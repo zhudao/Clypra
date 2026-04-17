@@ -13,12 +13,35 @@ class MockVideoElement {
   src = "";
   preload = "";
   muted = false;
-  readyState = 0;
+  private _readyState = 0;
   error: { message: string } | null = null;
   videoWidth = 1920;
   videoHeight = 1080;
-  currentTime = 0;
+  private _currentTime = 0;
   private listeners: Map<string, Set<EventListener>> = new Map();
+
+  get readyState(): number {
+    return this._readyState;
+  }
+
+  set readyState(value: number) {
+    this._readyState = value;
+  }
+
+  get currentTime(): number {
+    return this._currentTime;
+  }
+
+  set currentTime(value: number) {
+    this._currentTime = value;
+    // Trigger seeked event when currentTime is set (use Promise for async)
+    Promise.resolve().then(() => {
+      const seekedListeners = this.listeners.get("seeked");
+      if (seekedListeners) {
+        seekedListeners.forEach((listener) => listener(new Event("seeked")));
+      }
+    });
+  }
 
   addEventListener(event: string, listener: EventListener, options?: any): void {
     if (!this.listeners.has(event)) {
@@ -26,33 +49,50 @@ class MockVideoElement {
     }
     this.listeners.get(event)!.add(listener);
 
-    // Auto-trigger loadedmetadata for successful loads
-    if (event === "loadedmetadata" && !this.src.includes("invalid")) {
-      queueMicrotask(() => {
-        this.readyState = 2;
+    // Auto-trigger loadedmetadata for successful loads (only if readyState < 1)
+    if (event === "loadedmetadata" && !this.src.includes("invalid") && this._readyState < 1) {
+      Promise.resolve().then(() => {
+        if (this._readyState < 1) {
+          this._readyState = 1;
+        }
         listener(new Event("loadedmetadata"));
       });
     }
 
     // Auto-trigger error for invalid sources
     if (event === "error" && this.src.includes("invalid")) {
-      queueMicrotask(() => {
+      Promise.resolve().then(() => {
         this.error = { message: "Failed to load" };
         listener(new Event("error"));
       });
     }
 
-    // Auto-trigger loadeddata
-    if (event === "loadeddata" && this.readyState < 2) {
-      queueMicrotask(() => {
-        this.readyState = 2;
+    // Auto-trigger loadeddata (first frame decoded) - only if readyState < 2
+    if (event === "loadeddata" && !this.src.includes("invalid") && this._readyState < 2) {
+      Promise.resolve().then(() => {
+        if (this._readyState < 2) {
+          this._readyState = 2;
+        }
         listener(new Event("loadeddata"));
       });
+    }
+
+    // Auto-trigger seeked event when currentTime is set
+    if (event === "seeked" && !this.src.includes("invalid")) {
+      // Will be triggered when currentTime setter is called
     }
   }
 
   removeEventListener(event: string, listener: EventListener): void {
     this.listeners.get(event)?.delete(listener);
+  }
+
+  dispatchEvent(event: Event): boolean {
+    const listeners = this.listeners.get(event.type);
+    if (listeners) {
+      listeners.forEach((listener) => listener(event));
+    }
+    return true;
   }
 }
 
@@ -68,13 +108,11 @@ describe("VideoPool - Unit Tests", () => {
       },
     });
 
-    // Mock setTimeout/clearTimeout
-    vi.useFakeTimers();
+    // Don't use fake timers - they interfere with async video loading
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.useRealTimers();
   });
 
   describe("Video Element Creation", () => {
@@ -297,6 +335,7 @@ describe("VideoPool - Unit Tests", () => {
 
   describe("Delayed Eviction", () => {
     it("should schedule eviction 5 seconds after reference count reaches zero", async () => {
+      vi.useFakeTimers();
       const pool = new VideoPool(10);
       const sourcePath = "test-video.mp4";
 
@@ -315,9 +354,11 @@ describe("VideoPool - Unit Tests", () => {
       expect(pool.getEntry(sourcePath)).toBeUndefined();
 
       pool.dispose();
+      vi.useRealTimers();
     });
 
     it("should cancel eviction if video is referenced again", async () => {
+      vi.useFakeTimers();
       const pool = new VideoPool(10);
       const sourcePath = "test-video.mp4";
 
@@ -338,6 +379,7 @@ describe("VideoPool - Unit Tests", () => {
       expect(pool.getEntry(sourcePath)!.refCount).toBe(1);
 
       pool.dispose();
+      vi.useRealTimers();
     });
   });
 
@@ -368,8 +410,22 @@ describe("VideoPool - Unit Tests", () => {
       entry.isReady = false;
       entry.video.readyState = 1;
 
-      // Get video again - should wait for ready
-      const video = await pool.getVideo(sourcePath);
+      // Simulate the video becoming ready by manually triggering events
+      // This mimics what would happen in a real browser
+      const getVideoPromise = pool.getVideo(sourcePath);
+
+      // Wait a bit then trigger loadeddata event
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const loadedDataEvent = new Event("loadeddata");
+      entry.video.dispatchEvent(loadedDataEvent);
+      entry.video.readyState = 2;
+
+      // Wait a bit then trigger seeked event
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const seekedEvent = new Event("seeked");
+      entry.video.dispatchEvent(seekedEvent);
+
+      const video = await getVideoPromise;
 
       expect(video.readyState).toBeGreaterThanOrEqual(2);
 
@@ -393,6 +449,7 @@ describe("VideoPool - Unit Tests", () => {
     });
 
     it("should clear all eviction timers on dispose", async () => {
+      vi.useFakeTimers();
       const pool = new VideoPool(10);
 
       await pool.getVideo("video1.mp4");
@@ -405,6 +462,7 @@ describe("VideoPool - Unit Tests", () => {
 
       // Advance time - should not cause any issues
       vi.advanceTimersByTime(10000);
+      vi.useRealTimers();
     });
   });
 });

@@ -349,15 +349,18 @@ export const useTimelineStore = create<TimelineState>((set, get) => {
     },
 
     // Playhead and view state actions
-    setPlayhead: (time: number) => {
+    setPlayhead: (time: number, captureHistory: boolean = false) => {
       const state = get();
       // Clamp playhead to timeline boundaries
       const clampedTime = clamp(time, 0, state.duration);
 
       set({ playhead: clampedTime });
 
-      // Capture snapshot after modification
-      undoManager.pushState(createSnapshot(get()));
+      // Only capture history for user-initiated changes (scrubbing, clicking timeline)
+      // During playback, we don't capture to avoid flooding the undo buffer
+      if (captureHistory) {
+        undoManager.pushState(createSnapshot(get()));
+      }
     },
 
     setZoom: (pxPerSec: number) => {

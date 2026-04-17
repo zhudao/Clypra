@@ -84,11 +84,13 @@ export class VideoPool {
       try {
         await this.loadVideoMetadata(video);
 
-        // Trigger initial frame load by seeking to start
-        // This ensures at least one frame is decoded and ready for drawing
-        if (video.currentTime !== 0) {
-          video.currentTime = 0;
-        }
+        // CRITICAL: Deterministic first-frame warmup (CapCut-style instant preview)
+        // Step 1: Wait for loadeddata (first frame decoded)
+        await this.waitForFirstFrameDecoded(video);
+
+        // Step 2: Force seek to frame 0 and wait for seeked event
+        // This ensures the frame is actually renderable on canvas
+        await this.forceSeekToFrameZero(video);
 
         entry.isLoaded = true;
         entry.isReady = true;
@@ -241,6 +243,83 @@ export class VideoPool {
 
       // Also check immediately in case the video is already ready
       checkReady();
+    });
+  }
+
+  /**
+   * Wait for first frame to be decoded (loadeddata event)
+   * CRITICAL: loadedmetadata ≠ frame ready
+   * loadeddata = first frame decoded and ready for rendering
+   */
+  private waitForFirstFrameDecoded(video: HTMLVideoElement): Promise<void> {
+    // If readyState >= 2 (HAVE_CURRENT_DATA), first frame is already decoded
+    if (video.readyState >= 2) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        video.removeEventListener("loadeddata", onLoaded);
+        video.removeEventListener("error", onError);
+        reject(new Error("First frame decode timeout"));
+      }, 10000); // 10 second timeout
+
+      const onLoaded = () => {
+        clearTimeout(timeout);
+        video.removeEventListener("loadeddata", onLoaded);
+        video.removeEventListener("error", onError);
+        resolve();
+      };
+
+      const onError = () => {
+        clearTimeout(timeout);
+        video.removeEventListener("loadeddata", onLoaded);
+        video.removeEventListener("error", onError);
+        reject(new Error(`Video error during frame decode: ${video.error?.message}`));
+      };
+
+      video.addEventListener("loadeddata", onLoaded, { once: true });
+      video.addEventListener("error", onError, { once: true });
+    });
+  }
+
+  /**
+   * Force seek to frame 0 and wait for seeked event
+   * CRITICAL: Ensures frame is actually renderable on canvas
+   * Without this, canvas.drawImage() draws blank/black
+   */
+  private forceSeekToFrameZero(video: HTMLVideoElement): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // If already at frame 0 and frame is decoded, no need to seek
+      if (video.currentTime === 0 && video.readyState >= 2) {
+        return resolve();
+      }
+
+      const timeout = setTimeout(() => {
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        reject(new Error("Seek to frame 0 timeout"));
+      }, 5000); // 5 second timeout
+
+      const onSeeked = () => {
+        clearTimeout(timeout);
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        resolve();
+      };
+
+      const onError = () => {
+        clearTimeout(timeout);
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        reject(new Error(`Video error during seek: ${video.error?.message}`));
+      };
+
+      video.addEventListener("seeked", onSeeked, { once: true });
+      video.addEventListener("error", onError, { once: true });
+
+      // Force seek to 0
+      video.currentTime = 0;
     });
   }
 

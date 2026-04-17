@@ -113,6 +113,8 @@ export class FrameCache {
     if (oldestKey !== null) {
       const entry = this.cache.get(oldestKey);
       if (entry) {
+        // CRITICAL: Close ImageBitmap to free GPU memory
+        entry.bitmap.close();
       }
       this.cache.delete(oldestKey);
     }

@@ -53,7 +53,7 @@ export function useTimelineKeyboardShortcuts(options: KeyboardShortcutsOptions =
         e.preventDefault();
         const frameDuration = 1 / fps;
         const newTime = Math.max(0, playhead - frameDuration);
-        setPlayhead(newTime);
+        setPlayhead(newTime, true); // Capture history for user action
         return;
       }
 
@@ -61,19 +61,19 @@ export function useTimelineKeyboardShortcuts(options: KeyboardShortcutsOptions =
         e.preventDefault();
         const frameDuration = 1 / fps;
         const newTime = Math.min(duration, playhead + frameDuration);
-        setPlayhead(newTime);
+        setPlayhead(newTime, true); // Capture history for user action
         return;
       }
 
       if (e.key === "Home") {
         e.preventDefault();
-        setPlayhead(0);
+        setPlayhead(0, true); // Capture history for user action
         return;
       }
 
       if (e.key === "End") {
         e.preventDefault();
-        setPlayhead(duration);
+        setPlayhead(duration, true); // Capture history for user action
         return;
       }
 

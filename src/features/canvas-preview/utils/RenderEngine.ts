@@ -71,6 +71,8 @@ export class RenderEngine {
     // readyState >= 3 means future frames are also available (better for smooth playback)
     if (video.readyState < 2) {
       console.log("Video not ready for drawing - readyState:", video.readyState, "clipId:", clip.id);
+      // Draw loading placeholder instead of nothing
+      this.drawLoadingPlaceholder();
       return;
     }
 
@@ -149,6 +151,26 @@ export class RenderEngine {
         },
       });
     }
+  }
+
+  /**
+   * Draw loading placeholder when frame isn't ready yet
+   */
+  private drawLoadingPlaceholder(): void {
+    // Draw semi-transparent overlay
+    this.ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+    this.ctx.fillRect(0, 0, this.canvasWidth, this.canvasHeight);
+
+    // Draw loading text
+    this.ctx.fillStyle = "#ffffff";
+    this.ctx.font = "14px sans-serif";
+    this.ctx.textAlign = "center";
+    this.ctx.textBaseline = "middle";
+
+    const centerX = this.canvasWidth / 2;
+    const centerY = this.canvasHeight / 2;
+
+    this.ctx.fillText("Loading frame...", centerX, centerY);
   }
 
   /**

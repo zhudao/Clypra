@@ -111,7 +111,7 @@ export interface TimelineState {
   toggleTrackMute: (id: string) => void;
 
   // Playhead and view actions
-  setPlayhead: (time: number) => void;
+  setPlayhead: (time: number, captureHistory?: boolean) => void;
   setZoom: (pxPerSec: number) => void;
   setScroll: (left: number, top: number) => void;
   setIsPlaying: (isPlaying: boolean) => void; // Control playback state

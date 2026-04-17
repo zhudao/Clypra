@@ -5,6 +5,12 @@ use tokio::process::Command;
 /// values in 0..1. If there is no audio, returns zeros.
 #[tauri::command]
 async fn audio_waveform_peaks(input_path: String, bucket_count: u32) -> Result<Vec<f32>, String> {
+    // Check FFmpeg availability first
+    if let Err(_) = check_ffmpeg_available().await {
+        // Return empty peaks if FFmpeg not available (non-critical feature)
+        return Ok(vec![0.0; (bucket_count as usize).clamp(32, 512)]);
+    }
+
     let buckets = (bucket_count as usize).clamp(32, 512);
     let has = Command::new("ffprobe")
         .args([
@@ -153,6 +159,11 @@ async fn trim_export(
     start_sec: f64,
     end_sec: f64,
 ) -> Result<(), String> {
+    // Check FFmpeg availability first
+    if let Err(e) = check_ffmpeg_available().await {
+        return Err(e);
+    }
+
     if !end_sec.is_finite() || !start_sec.is_finite() {
         return Err("Start and end times must be finite numbers.".into());
     }
@@ -198,12 +209,225 @@ async fn trim_export(
     Ok(())
 }
 
+/// Check if FFmpeg is installed and available on PATH
+async fn check_ffmpeg_available() -> Result<(), String> {
+    match Command::new("ffmpeg").arg("-version").output().await {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(_) => Err("FFmpeg found but returned error".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err("FFmpeg not found. Please install FFmpeg:\n• macOS: brew install ffmpeg\n• Ubuntu: sudo apt install ffmpeg\n• Windows: Download from ffmpeg.org".into())
+        }
+        Err(e) => Err(format!("Failed to check FFmpeg: {}", e)),
+    }
+}
+
+/// Extract a single frame at the specified time from a video file.
+/// Returns a base64-encoded PNG data URL for display in the frontend.
+/// Uses FFmpeg for frame-accurate extraction with timeout protection.
+#[tauri::command]
+async fn extract_frame_at_time(
+    input_path: String,
+    time_secs: f64,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    // Check FFmpeg availability first
+    if let Err(e) = check_ffmpeg_available().await {
+        return Err(e);
+    }
+
+    // Validate inputs
+    if !time_secs.is_finite() || time_secs < 0.0 {
+        return Err("Time must be a non-negative finite number".into());
+    }
+    if width == 0 || height == 0 {
+        return Err("Width and height must be positive".into());
+    }
+
+    let time_str = format!("{:.6}", time_secs);
+    let scale_str = format!("{}:{}", width, height);
+
+    use tokio::time::{timeout, Duration};
+
+    // Spawn FFmpeg with 5-second timeout
+    let ffmpeg_result = timeout(
+        Duration::from_secs(5),
+        Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel", "error",
+                // Input seeking for speed (keyframe-accurate, then decode to exact frame)
+                "-ss", &time_str,
+                "-i", &input_path,
+                // Output just one frame
+                "-vframes", "1",
+                // Scale to requested dimensions
+                "-vf", &format!("scale={}:force_original_aspect_ratio=decrease,pad={}:(ow-iw)/2:(oh-ih)/2:black", scale_str, scale_str),
+                // PNG for lossless quality
+                "-f", "image2",
+                "-vcodec", "png",
+                "-pix_fmt", "rgba",
+                "pipe:1", // Output to stdout
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+
+    match ffmpeg_result {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("FFmpeg failed: {}", stderr));
+            }
+
+            // Encode PNG bytes to base64 data URL
+            let base64_data = base64::encode(&output.stdout);
+            Ok(format!("data:image/png;base64,{}", base64_data))
+        }
+        Ok(Err(e)) => Err(format!("Failed to spawn FFmpeg: {}", e)),
+        Err(_) => Err("Frame extraction timeout (5s exceeded)".into()),
+    }
+}
+
+/// Extract multiple frames for filmstrip generation.
+/// More efficient than multiple extract_frame_at_time calls.
+#[tauri::command]
+async fn extract_filmstrip_frames(
+    input_path: String,
+    frame_count: u32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<String>, String> {
+    // Check FFmpeg availability first
+    if let Err(e) = check_ffmpeg_available().await {
+        return Err(e);
+    }
+
+    if frame_count == 0 || frame_count > 100 {
+        return Err("Frame count must be between 1 and 100".into());
+    }
+    if width == 0 || height == 0 {
+        return Err("Width and height must be positive".into());
+    }
+
+    use tokio::time::{timeout, Duration};
+
+    // Get video duration first
+    let probe = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            &input_path,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("FFprobe failed: {}", e))?;
+
+    if !probe.status.success() {
+        return Err("Failed to probe video duration".into());
+    }
+
+    let duration: f64 = String::from_utf8_lossy(&probe.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0.0);
+
+    if duration <= 0.0 {
+        return Err("Invalid video duration".into());
+    }
+
+    // Create temp directory for frames
+    let temp_dir = std::env::temp_dir().join("kyro_filmstrip").join(
+        &format!("{}_{}", 
+            input_path.replace(['/', '\\', ':'], "_"),
+            std::process::id()
+        )
+    );
+    
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    // Calculate frame interval
+    let interval = duration / f64::from(frame_count);
+    let select_expr = (0..frame_count)
+        .map(|i| format!("eq(n,{})", (i as f64 * interval * 30.0) as u32)) // Assume 30fps for frame selection
+        .collect::<Vec<_>>()
+        .join("+");
+
+    let scale_str = format!("{}:{}", width, height);
+    let output_pattern = temp_dir.join("frame_%03d.png").to_string_lossy().to_string();
+
+    // Extract all frames in one FFmpeg call
+    let ffmpeg_result = timeout(
+        Duration::from_secs(30),
+        Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", &input_path,
+                "-vf", &format!(
+                    "select='{}',scale={}:force_original_aspect_ratio=decrease,pad={}:(ow-iw)/2:(oh-ih)/2:black,setpts=N/FRAME_RATE/TB",
+                    select_expr, scale_str, scale_str
+                ),
+                "-vsync", "vfr",
+                &output_pattern,
+            ])
+            .output(),
+    )
+    .await;
+
+    match ffmpeg_result {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("FFmpeg failed: {}", stderr));
+            }
+
+            // Read and encode each frame
+            let mut frames = Vec::new();
+            for i in 1..=frame_count {
+                let frame_path = temp_dir.join(format!("frame_{:03}.png", i));
+                if let Ok(data) = std::fs::read(&frame_path) {
+                    let base64_data = base64::encode(&data);
+                    frames.push(format!("data:image/png;base64,{}", base64_data));
+                }
+            }
+
+            // Cleanup temp directory
+            let _ = std::fs::remove_dir_all(&temp_dir);
+
+            if frames.is_empty() {
+                return Err("No frames extracted".into());
+            }
+
+            Ok(frames)
+        }
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            Err(format!("Failed to spawn FFmpeg: {}", e))
+        }
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            Err("Filmstrip extraction timeout (30s exceeded)".into())
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![trim_export, audio_waveform_peaks])
+        .invoke_handler(tauri::generate_handler![
+            trim_export,
+            audio_waveform_peaks,
+            extract_frame_at_time,
+            extract_filmstrip_frames,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

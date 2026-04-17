@@ -21,3 +21,30 @@ export async function exportTrimmedVideo(inputPath: string, outputPath: string, 
     endSec,
   });
 }
+
+/**
+ * Extract a single video frame at a specific time using FFmpeg.
+ * Returns a base64-encoded PNG data URL.
+ */
+export async function extractFrameAtTime(inputPath: string, timeSecs: number, width: number, height: number): Promise<string> {
+  return invoke<string>("extract_frame_at_time", {
+    inputPath,
+    timeSecs,
+    width,
+    height,
+  });
+}
+
+/**
+ * Extract multiple frames for filmstrip generation.
+ * More efficient than multiple individual frame extractions.
+ * Returns an array of base64-encoded PNG data URLs.
+ */
+export async function extractFilmstripFrames(inputPath: string, frameCount: number, width: number, height: number): Promise<string[]> {
+  return invoke<string[]>("extract_filmstrip_frames", {
+    inputPath,
+    frameCount,
+    width,
+    height,
+  });
+}
