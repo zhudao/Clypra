@@ -337,12 +337,12 @@ async fn extract_filmstrip_frames(
 
     use tokio::time::{timeout, Duration};
 
-    // Get video duration first
+    // Probe video for duration and frame rate
     let probe = Command::new("ffprobe")
         .args([
             "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-show_entries", "format=duration:stream=r_frame_rate",
+            "-of", "default=noprint_wrappers=1",
             &input_path,
         ])
         .output()
@@ -350,13 +350,30 @@ async fn extract_filmstrip_frames(
         .map_err(|e| format!("FFprobe failed: {}", e))?;
 
     if !probe.status.success() {
-        return Err("Failed to probe video duration".into());
+        return Err("Failed to probe video".into());
     }
 
-    let duration: f64 = String::from_utf8_lossy(&probe.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0.0);
+    let probe_output = String::from_utf8_lossy(&probe.stdout);
+    let mut duration = 0.0;
+    let mut fps = 30.0; // Default fallback
+
+    for line in probe_output.lines() {
+        if line.starts_with("duration=") {
+            duration = line.trim_start_matches("duration=").parse().unwrap_or(0.0);
+        } else if line.starts_with("r_frame_rate=") {
+            // Parse fraction like "30000/1001" for 29.97fps
+            let fps_str = line.trim_start_matches("r_frame_rate=");
+            if let Some((num, den)) = fps_str.split_once('/') {
+                if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {
+                    if d > 0.0 {
+                        fps = n / d;
+                    }
+                }
+            } else if let Ok(f) = fps_str.parse::<f64>() {
+                fps = f;
+            }
+        }
+    }
 
     if duration <= 0.0 {
         return Err("Invalid video duration".into());
@@ -373,10 +390,10 @@ async fn extract_filmstrip_frames(
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let _temp_guard = TempDirGuard(temp_dir.clone()); // Auto-cleanup on drop
 
-    // Calculate frame interval
+    // Calculate frame interval using actual video FPS
     let interval = duration / f64::from(frame_count);
     let select_expr = (0..frame_count)
-        .map(|i| format!("eq(n,{})", (i as f64 * interval * 30.0) as u32)) // Assume 30fps for frame selection
+        .map(|i| format!("eq(n,{})", (i as f64 * interval * fps) as u32))
         .collect::<Vec<_>>()
         .join("+");
 
