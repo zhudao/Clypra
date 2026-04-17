@@ -209,6 +209,18 @@ async fn trim_export(
     Ok(())
 }
 
+/// RAII guard for temp directory cleanup
+/// Automatically removes directory when dropped, even on panic
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 /// Check if FFmpeg is installed and available on PATH
 async fn check_ffmpeg_available() -> Result<(), String> {
     match Command::new("ffmpeg").arg("-version").output().await {
@@ -350,7 +362,7 @@ async fn extract_filmstrip_frames(
         return Err("Invalid video duration".into());
     }
 
-    // Create temp directory for frames
+    // Create temp directory for frames with RAII cleanup guard
     let temp_dir = std::env::temp_dir().join("kyro_filmstrip").join(
         &format!("{}_{}", 
             input_path.replace(['/', '\\', ':'], "_"),
@@ -359,6 +371,7 @@ async fn extract_filmstrip_frames(
     );
     
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let _temp_guard = TempDirGuard(temp_dir.clone()); // Auto-cleanup on drop
 
     // Calculate frame interval
     let interval = duration / f64::from(frame_count);
@@ -392,7 +405,6 @@ async fn extract_filmstrip_frames(
     match ffmpeg_result {
         Ok(Ok(output)) => {
             if !output.status.success() {
-                let _ = std::fs::remove_dir_all(&temp_dir);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("FFmpeg failed: {}", stderr));
             }
@@ -407,8 +419,7 @@ async fn extract_filmstrip_frames(
                 }
             }
 
-            // Cleanup temp directory
-            let _ = std::fs::remove_dir_all(&temp_dir);
+            // TempDirGuard auto-cleans temp directory when function returns
 
             if frames.is_empty() {
                 return Err("No frames extracted".into());
@@ -417,11 +428,9 @@ async fn extract_filmstrip_frames(
             Ok(frames)
         }
         Ok(Err(e)) => {
-            let _ = std::fs::remove_dir_all(&temp_dir);
             Err(format!("Failed to spawn FFmpeg: {}", e))
         }
         Err(_) => {
-            let _ = std::fs::remove_dir_all(&temp_dir);
             Err("Filmstrip extraction timeout (30s exceeded)".into())
         }
     }
