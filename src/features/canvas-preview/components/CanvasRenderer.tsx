@@ -36,6 +36,7 @@ const CanvasRendererComponent: React.FC<CanvasRendererProps> = ({ baseWidth, bas
   const lastRenderedTimeRef = useRef<number>(0);
   const isRenderingRef = useRef<boolean>(false);
   const pendingRenderAbortRef = useRef<(() => void) | null>(null);
+  const lastRenderedFrameRef = useRef<ImageBitmap | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const activeClipsRef = useRef<ActiveClip[]>([]);

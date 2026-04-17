@@ -51,7 +51,7 @@ export interface TimelineContainerProps {
  * - Store state synchronization
  * - Keyboard shortcuts
  */
-export function TimelineContainer({ duration, trimStart, trimEnd, playhead, onSeek, videoUrl, sourcePath, videoRef }: TimelineContainerProps) {
+export function TimelineContainer({ duration, trimStart, trimEnd, playhead, onSeek, videoUrl, sourcePath }: TimelineContainerProps) {
   const [toolMode, setToolMode] = useState<ToolMode>("selection");
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineContentRef = useRef<HTMLDivElement>(null);

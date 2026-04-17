@@ -107,10 +107,12 @@ export class RenderEngine {
       drawWidth = this.canvasWidth;
       drawHeight = this.canvasWidth / videoAspect;
       drawX = 0;
+      drawY = (this.canvasHeight - drawHeight) / 2;
     } else {
       // Video is taller - fit height, letterbox
       drawHeight = this.canvasHeight;
       drawWidth = this.canvasHeight * videoAspect;
+      drawX = (this.canvasWidth - drawWidth) / 2;
       drawY = 0;
     }
 
@@ -152,7 +154,7 @@ export class RenderEngine {
   /**
    * Draw error placeholder for failed clip
    */
-  private drawErrorPlaceholder(clip: ActiveClip, errorMessage: string): void {
+  private drawErrorPlaceholder(_clip: ActiveClip, errorMessage: string): void {
     // Draw semi-transparent red rectangle
     this.ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
     this.ctx.fillRect(0, 0, this.canvasWidth, this.canvasHeight);

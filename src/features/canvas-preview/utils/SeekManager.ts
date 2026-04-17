@@ -3,10 +3,14 @@
  */
 
 export class SeekManager {
+  private readonly SEEK_THRESHOLD = 0.04; // 40ms threshold for scrubbing
   private readonly PLAYBACK_SEEK_THRESHOLD = 0.001; // 1ms during playback - seek every frame
+  private readonly DEBOUNCE_WINDOW = 16; // 16ms debounce window
+  private readonly SEEK_TIMEOUT = 5000; // 5 second timeout for seeks
 
   private debounceTimers: Map<HTMLVideoElement, number> = new Map();
   private pendingSeeks: Map<HTMLVideoElement, number> = new Map();
+  private seekingVideos: Set<HTMLVideoElement> = new Set();
   private isPlaybackMode: boolean = false; // Track if we're in playback mode
 
   /**

@@ -24,31 +24,6 @@ export interface VideoPoolState {
 }
 
 /**
- * JSON schema for validation
- */
-const VIDEO_POOL_STATE_SCHEMA = {
-  type: "object",
-  required: ["entries", "maxSize"],
-  properties: {
-    entries: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["sourcePath", "refCount", "lastUsed", "isLoaded", "isReady"],
-        properties: {
-          sourcePath: { type: "string" },
-          refCount: { type: "number" },
-          lastUsed: { type: "number" },
-          isLoaded: { type: "boolean" },
-          isReady: { type: "boolean" },
-        },
-      },
-    },
-    maxSize: { type: "number" },
-  },
-};
-
-/**
  * CanvasCompositorParser handles serialization and parsing of VideoPool state
  */
 export class CanvasCompositorParser {

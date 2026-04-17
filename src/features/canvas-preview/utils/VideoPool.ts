@@ -211,7 +211,7 @@ export class VideoPool {
       return Promise.resolve();
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       // Add timeout to prevent hanging forever
       const timeout = setTimeout(() => {
         video.removeEventListener("loadedmetadata", checkReady);

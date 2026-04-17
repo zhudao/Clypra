@@ -6,7 +6,6 @@
 import { useCallback, useState } from "react";
 import { useTimelineStore } from "../store/timelineStore";
 import { CoordinateSystem } from "../utils/coordinateSystem";
-import type { Clip } from "../types/core";
 
 interface SelectionRectangle {
   startX: number;
@@ -82,8 +81,8 @@ export function useSelectionRectangle({ coords, scrollLeft, scrollTop }: UseSele
         // Calculate rectangle bounds
         const minX = Math.min(currentRect.startX, currentRect.currentX);
         const maxX = Math.max(currentRect.startX, currentRect.currentX);
-        const minY = Math.min(currentRect.startY, currentRect.currentY);
-        const maxY = Math.max(currentRect.startY, currentRect.currentY);
+        // const minY = Math.min(currentRect.startY, currentRect.currentY);
+        // const maxY = Math.max(currentRect.startY, currentRect.currentY);
 
         // Convert X coordinates to time
         const startTime = coords.pixelsToTime(minX);
@@ -109,7 +108,6 @@ export function useSelectionRectangle({ coords, scrollLeft, scrollTop }: UseSele
 
         if (intersectingClips.length > 0) {
           // Replace current selection with intersecting clips
-          const newSelection = new Set(intersectingClips);
           store.selectClip(intersectingClips[0], false);
           for (let i = 1; i < intersectingClips.length; i++) {
             store.selectClip(intersectingClips[i], true);
