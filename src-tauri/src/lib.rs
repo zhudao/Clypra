@@ -460,10 +460,10 @@ async fn extract_filmstrip_frames(
     // Add hardware acceleration args before -i
     ffmpeg_args.extend(hwaccel_args.iter().cloned());
     
-    // Create filter string with proper lifetime
+    // Create filter string - crop to fill (no black bars, CapCut style)
     let filter_str = format!(
-        "select='{}',scale={}:force_original_aspect_ratio=decrease,pad={}:(ow-iw)/2:(oh-ih)/2:black,setpts=N/FRAME_RATE/TB",
-        select_expr, scale_str, scale_str
+        "select='{}',scale={}:force_original_aspect_ratio=increase,crop={}:{},setpts=N/FRAME_RATE/TB",
+        select_expr, scale_str, width, height
     );
     
     // Continue with input and filter args

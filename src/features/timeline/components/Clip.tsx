@@ -164,12 +164,14 @@ export const Clip = memo(function Clip({ clip, isSelected, pxPerSec, onSelect }:
           )}
           {!filmstripLoading && stripUrl && (
             <div
-              className="w-full h-full bg-cover bg-center opacity-40"
+              className="absolute inset-0"
               style={{
                 backgroundImage: `url(${stripUrl})`,
-                backgroundSize: "100% 100%",
-                backgroundRepeat: "no-repeat",
+                backgroundSize: `${width}px ${60}px`,
+                backgroundRepeat: "repeat-x",
+                backgroundPosition: "left center",
               }}
+              data-testid="clip-filmstrip"
             />
           )}
         </div>
@@ -187,7 +189,11 @@ export const Clip = memo(function Clip({ clip, isSelected, pxPerSec, onSelect }:
               <div className="text-[10px] text-white/40">No waveform</div>
             </div>
           )}
-          {!waveformLoading && !waveformError && peaks && <Waveform peaks={peaks} width={width} height={60} className="opacity-60" />}
+          {!waveformLoading && !waveformError && peaks && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+              <Waveform peaks={peaks} width={width} height={28} />
+            </div>
+          )}
         </div>
       )}
 
