@@ -69,7 +69,7 @@ export const EditorLayout: React.FC = () => {
           <PropertiesPanel />
         </div>
 
-        <div className="h-80 border-t border-border">
+        <div className="h-80 border-t border-border bg-surface">
           <Timeline />
         </div>
       </div>
