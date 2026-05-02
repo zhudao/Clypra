@@ -56,11 +56,12 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration })
     <div
       ref={containerRef}
       data-playhead
-      className={`absolute z-80 inset-y-0 select-none ${isDragging ? "cursor-ew-resize" : "cursor-ew-resize hover:cursor-ew-resize"}`}
+      className="absolute z-80 inset-y-0 select-none"
       style={{
         left: `${left}px`,
         width: "8px", // Wider hit area
         marginLeft: "-3px", // Center the visual line
+        cursor: "ew-resize", // Inline style for cursor
       }}
       onMouseDown={handleMouseDown}
     >
