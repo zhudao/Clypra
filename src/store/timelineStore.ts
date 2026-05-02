@@ -26,10 +26,7 @@ const trackHeights: Record<string, number> = {
 };
 
 export const useTimelineStore = create<TimelineStore>((set, get) => ({
-  tracks: [
-    { id: "track-1", type: "video", name: "Video 1", muted: false, locked: false, height: 68 },
-    { id: "track-2", type: "audio", name: "Audio 1", muted: false, locked: false, height: 52 },
-  ],
+  tracks: [],
   clips: [],
   zoomLevel: 1.0,
   scrollLeft: 0,

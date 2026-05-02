@@ -57,7 +57,7 @@ export const EditorLayout: React.FC = () => {
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-bg">
+    <div className="w-full h-full flex flex-col bg-bg overflow-hidden rounded-md">
       <TopBar />
 
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
