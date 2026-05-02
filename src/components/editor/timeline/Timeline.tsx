@@ -217,10 +217,7 @@ export const Timeline: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
         <TrackList />
 
-        <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-x-auto overflow-y-auto scrollbar-thin px-1 relative">
-          {/* Visual feedback overlay when dragging over timeline */}
-          <div className={`absolute inset-0 duration-300 transition-colors pointer-events-none ${isDraggingOver ? "bg-surface-raised/10" : ""}`} style={{ zIndex: isDraggingOver ? 10 : -1 }} />
-
+        <div ref={containerRef} onScroll={handleScroll} className={`flex-1 overflow-x-auto overflow-y-auto scrollbar-thin px-1 relative transition-colors ${isDraggingOver ? "bg-cyan-500/10 ring-2 ring-cyan-500/50 ring-inset" : ""}`}>
           {clips.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="flex items-center gap-3 text-[#6b7280] pointer-events-none">
