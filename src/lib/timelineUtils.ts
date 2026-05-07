@@ -28,32 +28,7 @@ export function getIntervalForDensity(density: DensityLevel): number {
   return config?.interval ?? 1.0;
 }
 
-// Sample from base timestamps based on zoom level (CapCut-style)
-// Extracts once at base density (5s), then samples based on zoom
-export function sampleTimestampsForZoom(baseTimestamps: number[], pixelsPerSecond: number): number[] {
-  // For 5s base interval, we can only show frames at 5s or multiples
-  // Zoomed out: show every frame (5s intervals)
-  // Zoomed in: we would need to extract additional frames on-demand
-  const interval = getIntervalForZoom(pixelsPerSecond);
 
-  // If requested interval is >= 5s, sample from base
-  if (interval >= 5.0) {
-    const step = Math.max(1, Math.round(interval / 5.0));
-    return baseTimestamps.filter((_, idx) => idx % step === 0);
-  }
-
-  // For zoomed in (interval < 5s), just show all base frames for now
-  // In a real implementation, you'd extract additional frames on-demand
-  return baseTimestamps;
-}
-
-// Get display interval for zoom level (for sampling, not extraction)
-export function getIntervalForZoom(pixelsPerSecond: number): number {
-  if (pixelsPerSecond < 0.3) return 5.0; // Zoomed out: show every 5s
-  if (pixelsPerSecond < 1.5) return 1.0; // Normal: show every 1s
-  if (pixelsPerSecond < 3.0) return 0.2; // Zoomed in: show every 0.2s
-  return 0.05; // Ultra zoom: show every 0.05s
-}
 
 // Generates a globally-aligned timestamp grid for a clip range.
 // Aligns to a global origin so clips from the same video share cached frames.

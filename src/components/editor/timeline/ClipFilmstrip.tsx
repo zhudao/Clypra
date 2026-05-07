@@ -1,197 +1,279 @@
-import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { normalizePathForTauriInvoke } from "../../../lib/tauri";
-import { sampleTimestampsForZoom, generateTimestampGrid } from "../../../lib/timelineUtils";
-import { cn } from "@/lib/utils";
-import { DensityLevel } from "../../../types";
-import type { Clip, MediaAsset, ThumbnailTile } from "../../../types";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { normalizePathForTauriInvoke } from "../../../lib/tauri"
+import { generateTimestampGrid } from "../../../lib/timelineUtils"
+import { cn } from "@/lib/utils"
+import { DensityLevel } from "../../../types"
+import type { Clip, MediaAsset, ThumbnailTile } from "../../../types"
 
-/** Paths that must use poster tiling, not ffmpeg filmstrip (still images / mis-typed video). */
-const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i
+
+/** Fixed visual tile width — never changes with zoom */
+const TILE_WIDTH_PX = 60
 
 /**
- * No-op kept for test compatibility. The timestamp-based architecture no longer
- * uses an in-memory frame cache — cache management is handled by the Rust backend.
+ * Dense extraction interval — extract once at this density on mount.
+ * 0.5s means one frame every 0.5 seconds — enough for any zoom level.
+ * At 60px per tile, you'd need >120px/s zoom to need denser than this.
  */
-export function clearFilmstripFrameCache(): void {
-  // intentional no-op
-}
+const EXTRACTION_INTERVAL = 0.5
+
+/**
+ * No-op kept for test compatibility. The CapCut-style architecture manages
+ * its own in-memory frame cache per component instance.
+ */
+export function clearFilmstripFrameCache(): void {}
 
 export interface ClipFilmstripProps {
-  clip: Clip;
-  mediaAsset: MediaAsset;
-  clipWidthPx: number;
-  pixelsPerSecond: number;
-  stripHeightPx?: number;
-  className?: string;
+  clip: Clip
+  mediaAsset: MediaAsset
+  clipWidthPx: number
+  pixelsPerSecond: number
+  stripHeightPx?: number
+  className?: string
+}
+
+/**
+ * Round a timestamp to millisecond precision for consistent Map key lookups.
+ * Both the pre-fill and the Rust callback use this to ensure matching keys.
+ */
+function roundMs(t: number): number {
+  return Math.round(t * 1000) / 1000
 }
 
 /**
  * ClipFilmstrip renders a filmstrip of thumbnail tiles for a video clip.
  *
  * CapCut-style architecture:
- * - **Single density extraction**: Extracts once at High density (every 0.2s)
- *   using the native ffmpeg-next decoder
- * - **Zoom-based sampling**: Displays a subset of frames based on zoom level
- *   without re-extraction. Zoom out shows fewer frames (every Nth), zoom in shows more
- * - **Streaming channel**: `decode_frames_streaming` returns cached hits
- *   synchronously (< 5ms) and streams extracted frames as they complete
+ * - **Extract once on import**: Generates a dense 0.5s grid and invokes
+ *   `decode_frames_streaming` exactly ONCE per clip (or when trim changes).
+ * - **Zoom = pure sampling**: Zoom changes compute how many 60px tiles fit,
+ *   then sample every Nth frame from the existing cache. Zero Rust calls.
+ * - **Trim = re-extract**: Only trimIn/trimOut changes trigger a new extraction.
  */
-export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx: _clipWidthPx, pixelsPerSecond, stripHeightPx = 32, className }: ClipFilmstripProps) {
-  /** Map from timestamp → tile (poster or real thumbnail). */
-  const [tiles, setTiles] = useState<Map<number, ThumbnailTile>>(new Map());
-  /**
-   * Base timestamp grid (5s interval) - extracted once, sampled based on zoom
-   */
-  const [baseTimestamps, setBaseTimestamps] = useState<number[]>([]);
-  /**
-   * Display timestamps - sampled from base grid based on zoom
-   */
-  const displayTimestamps = useMemo(() => {
-    return sampleTimestampsForZoom(baseTimestamps, pixelsPerSecond);
-  }, [baseTimestamps, pixelsPerSecond]);
+export function ClipFilmstrip({
+  clip,
+  mediaAsset,
+  clipWidthPx,
+  pixelsPerSecond,
+  stripHeightPx = 40,
+  className,
+}: ClipFilmstripProps) {
+  // ALL extracted frames — populated once on mount, never cleared on zoom
+  const [frameCache, setFrameCache] = useState<Map<number, string>>(new Map())
+  const extractionKeyRef = useRef("")
 
   const isVideoSource = useMemo(() => {
-    const path = mediaAsset.path ?? "";
-    return mediaAsset.type === "video" && path.length > 0 && !IMAGE_EXT.test(path);
-  }, [mediaAsset.type, mediaAsset.path]);
+    const path = mediaAsset.path ?? ""
+    return mediaAsset.type === "video" && path.length > 0 && !IMAGE_EXT.test(path)
+  }, [mediaAsset.type, mediaAsset.path])
 
-  /**
-   * Resolution tier derived from window.devicePixelRatio:
-   *   - "1x" for DPR in [1.0, 1.5)  → extract at 80×60 px
-   *   - "2x" for DPR ≥ 1.5          → extract at 160×120 px (Retina/HiDPI)
-   *
-   * Matches the backend ResolutionTier enum and cache key format.
-   */
-  const resolutionTier = typeof window !== "undefined" && window.devicePixelRatio >= 1.5 ? "2x" : "1x";
-  const [thumbW, thumbH] = resolutionTier === "2x" ? [160, 120] : [80, 60];
+  const resolutionTier =
+    typeof window !== "undefined" && window.devicePixelRatio >= 1.5 ? "2x" : "1x"
+  const [thumbW, thumbH] = resolutionTier === "2x" ? [120, 80] : [60, 40]
 
-  // ── High-density grid generation ─────────────────────────────────────────────
-  // Generate timestamp grid once at High density (every 0.2s)
-  // This grid is used for extraction, then sampled based on zoom for display
+  // ── Extract once on mount (not on zoom) ─────────────────────────────────
   useEffect(() => {
-    console.log("[ClipFilmstrip] High-density grid gen check:", {
-      hasDuration: !!mediaAsset.duration,
-      duration: mediaAsset.duration,
-      isVideoSource,
-      trimIn: clip.trimIn,
-      trimOut: clip.trimOut,
-    });
+    if (!isVideoSource || !mediaAsset.path || !mediaAsset.duration) return
 
-    if (!mediaAsset.duration || !isVideoSource) {
-      console.log("[ClipFilmstrip] SKIPPING grid gen - no duration or not video");
-      setBaseTimestamps([]);
-      setTiles(new Map());
-      return;
-    }
+    // Only re-extract if the source video or trim points changed
+    const extractionKey = `${mediaAsset.path}:${clip.trimIn}:${clip.trimOut}`
+    if (extractionKey === extractionKeyRef.current) return
+    extractionKeyRef.current = extractionKey
 
-    // Always generate at Low density (5s interval) for instant extraction
-    const BASE_INTERVAL = 5.0;
-    const grid = generateTimestampGrid(clip.trimIn, clip.trimOut, BASE_INTERVAL, mediaAsset.duration);
-    console.log(`[ClipFilmstrip] Generated ${grid.length} base timestamps (interval=${BASE_INTERVAL}s)`);
-    setBaseTimestamps(grid);
+    // Generate dense timestamp grid once
+    const allTimestamps = generateTimestampGrid(
+      clip.trimIn,
+      clip.trimOut,
+      EXTRACTION_INTERVAL, // 0.5s — dense enough for all zoom levels
+      mediaAsset.duration
+    )
 
-    // Initialize tiles with poster frames so the filmstrip shows something immediately
+    if (allTimestamps.length === 0) return
+
+    // Pre-fill with poster frame so nothing is blank while extracting.
+    // Use roundMs() keys so they match what Rust sends back.
     if (mediaAsset.posterFrame) {
-      const posterSrc = mediaAsset.posterFrame.startsWith("data:") ? mediaAsset.posterFrame : convertFileSrc(mediaAsset.posterFrame);
-      const initialTiles = new Map<number, ThumbnailTile>(grid.map((time) => [time, { time, path: posterSrc, density: DensityLevel.Low }]));
-      setTiles(initialTiles);
+      const posterSrc = mediaAsset.posterFrame.startsWith("data:")
+        ? mediaAsset.posterFrame
+        : convertFileSrc(mediaAsset.posterFrame)
+
+      setFrameCache(new Map(allTimestamps.map(t => [roundMs(t), posterSrc])))
     } else {
-      setTiles(new Map());
-    }
-  }, [clip.trimIn, clip.trimOut, mediaAsset.duration, mediaAsset.posterFrame, isVideoSource]);
-
-  // ── Streaming thumbnail channel ────────────────────────────────────────────
-  // Extract thumbnails once at High density using native decoder
-  useEffect(() => {
-    if (!isVideoSource || !mediaAsset.path || !mediaAsset.duration || baseTimestamps.length === 0) {
-      return;
+      // Even without a poster, initialise empty slots so we know the grid
+      setFrameCache(new Map(allTimestamps.map(t => [roundMs(t), ""])))
     }
 
-    let cancelled = false;
-    const videoPath = normalizePathForTauriInvoke(mediaAsset.path);
-    const channel = new Channel<ThumbnailTile>();
-    let tilesReceived = 0;
+    let cancelled = false
+    const videoPath = normalizePathForTauriInvoke(mediaAsset.path)
+    const channel = new Channel<ThumbnailTile>()
+    let receivedCount = 0
 
+    // As each frame arrives from Rust, slot it into the cache
     channel.onmessage = (tile) => {
-      tilesReceived++;
-      if (tilesReceived <= 3 || tilesReceived % 20 === 0) {
-        console.log(`[ClipFilmstrip] Tile #${tilesReceived} received: time=${tile.time.toFixed(2)}s`);
+      if (cancelled) return
+      receivedCount++
+      const src = tile.path.startsWith("data:")
+        ? tile.path
+        : convertFileSrc(tile.path)
+
+      // Use rounded key for consistency with the pre-fill
+      const key = roundMs(tile.time)
+
+      if (receivedCount <= 3) {
+        console.log(
+          `[ClipFilmstrip] Frame #${receivedCount}: time=${tile.time} key=${key} path=${tile.path.slice(0, 80)}...`
+        )
       }
-      if (cancelled) return;
-      setTiles((prev) => {
-        const next = new Map(prev);
-        const isDataUri = tile.path.startsWith("data:");
-        const imgSrc = isDataUri ? tile.path : convertFileSrc(tile.path);
-        next.set(tile.time, { ...tile, path: imgSrc });
-        return next;
-      });
-    };
 
-    console.log(`[ClipFilmstrip] Requesting ${baseTimestamps.length} frames at Low density via decode_frames_streaming`);
+      setFrameCache(prev => {
+        const next = new Map(prev)
+        next.set(key, src)
+        return next
+      })
+    }
 
+    console.log(
+      `[ClipFilmstrip] One-time extraction: ${allTimestamps.length} frames ` +
+      `(interval=${EXTRACTION_INTERVAL}s, range=${clip.trimIn.toFixed(1)}-${clip.trimOut.toFixed(1)}s) ` +
+      `size=${thumbW}x${thumbH}`
+    )
+
+    // Single invoke — happens once per clip, not on every zoom
     invoke("decode_frames_streaming", {
       videoPath,
-      timestamps: baseTimestamps,
-      density: DensityLevel.Low,
+      timestamps: allTimestamps,
+      density: DensityLevel.High, // extract at High density once
       width: thumbW,
       height: thumbH,
       duration: mediaAsset.duration,
       onTile: channel,
     })
       .then(() => {
-        console.log("[ClipFilmstrip] decode_frames_streaming completed");
+        console.log(`[ClipFilmstrip] Extraction complete, received ${receivedCount} frames`)
       })
-      .catch((err) => {
-        if (cancelled) return;
-        console.error("[ClipFilmstrip] decode_frames_streaming failed:", err);
-      });
+      .catch(err => {
+        if (!cancelled) console.error("[ClipFilmstrip] Extraction failed:", err)
+      })
 
-    return () => {
-      cancelled = true;
-    };
-  }, [isVideoSource, mediaAsset.path, mediaAsset.duration, baseTimestamps, thumbW, thumbH]);
+    return () => { cancelled = true }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-  // Fixed tile width for consistent appearance (5s interval at 10px/s = 50px)
-  const tileWidth = 50;
+  // NOTE: pixelsPerSecond is intentionally NOT in this dependency array.
+  // Zoom changes must NOT trigger re-extraction.
+  }, [
+    isVideoSource,
+    mediaAsset.path,
+    mediaAsset.duration,
+    mediaAsset.posterFrame,
+    clip.trimIn,
+    clip.trimOut,
+    thumbW,
+    thumbH,
+  ])
 
-  // Filter tiles to only show those in the display timestamps (sampled from high-density grid)
-  const displayTiles = displayTimestamps.map((time) => tiles.get(time)).filter((tile): tile is ThumbnailTile => tile !== undefined);
+  // ── Sampling (zoom-reactive, zero requests) ──────────────────────────────
+  // How many tiles fit at current zoom?
+  // Pick every Nth frame from the dense cache to fill the space.
+  const visibleTiles = useMemo(() => {
+    if (frameCache.size === 0) return []
 
-  const poster = mediaAsset.posterFrame;
+    // How many 60px tiles fit in the current clip width
+    const tileCount = Math.max(1, Math.ceil(clipWidthPx / TILE_WIDTH_PX))
 
-  // Video source with tiles: render the timestamp-based filmstrip.
-  if (isVideoSource && displayTiles.length > 0) {
+    // All cached timestamps sorted — filter out empty poster placeholders
+    const allTimes = Array.from(frameCache.entries())
+      .filter(([, src]) => src.length > 0)
+      .map(([t]) => t)
+      .sort((a, b) => a - b)
+
+    if (allTimes.length === 0) return []
+    if (tileCount >= allTimes.length) {
+      // Zoomed in enough to show every extracted frame
+      return allTimes.map(t => ({ time: t, src: frameCache.get(t)! }))
+    }
+
+    // Sample evenly from the dense cache — no new requests.
+    // Pick tileCount frames spread evenly across allTimes.
+    const step = (allTimes.length - 1) / (tileCount - 1)
+    const sampled: { time: number; src: string }[] = []
+
+    for (let i = 0; i < tileCount; i++) {
+      const idx = Math.min(Math.round(i * step), allTimes.length - 1)
+      const t = allTimes[idx]
+      sampled.push({ time: t, src: frameCache.get(t)! })
+    }
+
+    return sampled
+  }, [frameCache, clipWidthPx])
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  if (isVideoSource && visibleTiles.length > 0) {
+    // Dynamic tile width: fill 100% of clip width
+    const tileWidthPx = clipWidthPx / visibleTiles.length
+
     return (
-      <div data-testid="clip-filmstrip" className={cn("w-full overflow-hidden rounded-[2px] border border-black/20 bg-[#0c2730]/40", className)} style={{ height: stripHeightPx, display: "flex", overflow: "hidden" }}>
-        {displayTiles.map((tile) => (
+      <div
+        data-testid="clip-filmstrip"
+        className={cn(
+          "overflow-hidden rounded-[2px] border border-black/20 bg-[#0c2730]/40",
+          className
+        )}
+        style={{
+          height: stripHeightPx,
+          width: "100%",
+          display: "flex",
+          overflow: "hidden",
+        }}
+      >
+        {visibleTiles.map((tile, index) => (
           <img
-            key={tile.time}
-            src={tile.path}
-            alt={`Frame at ${tile.time}s`}
+            key={`${tile.time}-${index}`}
+            src={tile.src}
+            alt=""
             style={{
-              width: tileWidth,
+              width: tileWidthPx,
+              minWidth: 0,
               height: stripHeightPx,
               objectFit: "cover",
-              flexShrink: 0,
+              objectPosition: "center",
+              flex: "1 1 0",
             }}
             draggable={false}
           />
         ))}
       </div>
-    );
+    )
   }
 
-  // Poster frame fallback (image assets or video before first grid is ready).
-  if (poster) {
+  if (mediaAsset.posterFrame) {
     return (
-      <div data-testid="clip-filmstrip-fallback" className={cn("relative overflow-hidden rounded-[2px] border border-black/20", className)} style={{ height: stripHeightPx }}>
-        <img src={poster} alt="" className="absolute inset-0 block h-full w-full object-cover object-center select-none" draggable={false} />
+      <div
+        data-testid="clip-filmstrip-fallback"
+        className={cn(
+          "relative overflow-hidden rounded-[2px] border border-black/20",
+          className
+        )}
+        style={{ height: stripHeightPx, width: "100%" }}
+      >
+        <img
+          src={
+            mediaAsset.posterFrame.startsWith("data:")
+              ? mediaAsset.posterFrame
+              : convertFileSrc(mediaAsset.posterFrame)
+          }
+          alt=""
+          className="absolute inset-0 block h-full w-full object-cover select-none"
+          draggable={false}
+        />
       </div>
-    );
+    )
   }
 
-  // Empty state — no poster and no tiles yet.
-  return <div data-testid="clip-filmstrip-empty" className={cn("w-full rounded-[2px] bg-[#0c2730]/60", className)} style={{ height: stripHeightPx }} />;
+  return (
+    <div
+      data-testid="clip-filmstrip-empty"
+      className={cn("w-full rounded-[2px] bg-[#0c2730]/60", className)}
+      style={{ height: stripHeightPx }}
+    />
+  )
 }
