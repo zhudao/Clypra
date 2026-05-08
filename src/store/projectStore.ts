@@ -182,6 +182,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       clearTimeout(autoSaveTimer);
     }
 
+    // Respect the auto-save toggle from settings
+    const { useSettingsStore } = require("./settingsStore");
+    if (!useSettingsStore.getState().autoSave) return;
+
     autoSaveTimer = setTimeout(async () => {
       const state = get();
       const { project, mediaAssets } = state;

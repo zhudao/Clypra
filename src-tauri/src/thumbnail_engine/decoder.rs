@@ -13,6 +13,29 @@ use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Port of FFmpeg's av_display_rotation_get from libavutil/display.h.
+/// Extracts the rotation angle (in degrees) from a 3×3 display matrix.
+/// The matrix is 9 × i32 values in 16.16 fixed-point format.
+unsafe fn av_display_rotation_get(matrix: *const i32) -> f64 {
+    let s0 = *matrix.add(0) as f64; // matrix[0]
+    let s1 = *matrix.add(1) as f64; // matrix[1]
+    let s3 = *matrix.add(3) as f64; // matrix[3]
+    let s4 = *matrix.add(4) as f64; // matrix[4]
+
+    // scale[0] = hypot(matrix[0], matrix[3])
+    // scale[1] = hypot(matrix[1], matrix[4])
+    let scale0 = s0.hypot(s3);
+    let scale1 = s1.hypot(s4);
+
+    if scale0 == 0.0 || scale1 == 0.0 {
+        return 0.0;
+    }
+
+    // rotation = atan2(matrix[1] / scale[1], matrix[0] / scale[0]) in degrees
+    let angle = (s1 / scale1).atan2(s0 / scale0) * 180.0 / std::f64::consts::PI;
+    -angle
+}
+
 /// One decoder per video file — stays alive between frame requests
 pub struct VideoDecoder {
     input_ctx: ffmpeg::format::context::Input,
@@ -22,6 +45,8 @@ pub struct VideoDecoder {
     pub duration: f64,
     pub width: u32,
     pub height: u32,
+    /// Rotation from container metadata (0, 90, 180, 270)
+    rotation: u32,
 }
 
 impl VideoDecoder {
@@ -41,6 +66,56 @@ impl VideoDecoder {
         let stream_index = stream.index();
         let time_base = stream.time_base();
 
+        // Detect rotation from stream metadata or display matrix side data.
+        // Older encoders set a "rotate" tag; modern phones (iOS) use a display matrix.
+        let rotation = {
+            let mut rot = 0i32;
+
+            // 1. Try the "rotate" metadata tag first
+            for (key, value) in stream.metadata().iter() {
+                if key.eq_ignore_ascii_case("rotate") {
+                    rot = value.parse::<i32>().unwrap_or(0);
+                    break;
+                }
+            }
+
+            // 2. If no tag, try the display matrix side data
+            if rot == 0 {
+                unsafe {
+                    let stream_ptr = stream.as_ptr();
+                    // Try codecpar side data (FFmpeg 6.1+)
+                    let codecpar = (*stream_ptr).codecpar;
+                    if !codecpar.is_null() {
+                        let nb_sd = (*codecpar).nb_coded_side_data as usize;
+                        let sd_arr = (*codecpar).coded_side_data;
+                        if !sd_arr.is_null() {
+                            for i in 0..nb_sd {
+                                let sd = &*sd_arr.add(i);
+                                if sd.type_ == ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX {
+                                    let matrix = sd.data as *const i32;
+                                    rot = -(av_display_rotation_get(matrix) as i32);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Normalize to nearest 90-degree step
+            let abs_rot = ((rot % 360) + 360) as u32 % 360;
+            match abs_rot {
+                r if r > 45 && r <= 135 => 90,
+                r if r > 135 && r <= 225 => 180,
+                r if r > 225 && r <= 315 => 270,
+                _ => 0,
+            }
+        };
+
+        if rotation != 0 {
+            eprintln!("[VideoDecoder::open] Detected rotation={}°", rotation);
+        }
+
         // Duration in seconds
         let duration = input_ctx.duration() as f64 / ffmpeg::ffi::AV_TIME_BASE as f64;
 
@@ -59,7 +134,13 @@ impl VideoDecoder {
             duration,
             width,
             height,
+            rotation,
         })
+    }
+
+    /// Get the detected rotation angle (0, 90, 180, or 270)
+    pub fn rotation(&self) -> u32 {
+        self.rotation
     }
 
     /// Try hardware acceleration, fall back to software silently
@@ -182,7 +263,22 @@ impl VideoDecoder {
         let cpu_frame = self.to_cpu_frame(best_frame)?;
 
         // Scale to output dimensions and convert to RGBA
-        let rgba = self.scale_to_rgba(&cpu_frame, out_width, out_height)?;
+        // If rotation is 90/270, swap the scale target so the final rotated image
+        // has the caller's requested (out_width × out_height).
+        let (scale_w, scale_h) = if self.rotation == 90 || self.rotation == 270 {
+            (out_height, out_width) // pre-swap: scale to HxW, then rotate → WxH
+        } else {
+            (out_width, out_height)
+        };
+
+        let rgba_raw = self.scale_to_rgba(&cpu_frame, scale_w, scale_h)?;
+
+        // Apply rotation if needed
+        let rgba = if self.rotation != 0 {
+            Self::rotate_rgba(&rgba_raw, scale_w, scale_h, self.rotation)
+        } else {
+            rgba_raw
+        };
         
         let total_time = start.elapsed();
         eprintln!("[decode_frame] @{:.3}s: seek+decode={:?} total={:?} ({} packets)", 
@@ -253,6 +349,54 @@ impl VideoDecoder {
         }
         
         Ok(rgba)
+    }
+
+    /// Rotate an RGBA buffer by 90, 180, or 270 degrees.
+    /// For 90/270 the output dimensions are swapped (W×H → H×W).
+    fn rotate_rgba(src: &[u8], w: u32, h: u32, rotation: u32) -> Vec<u8> {
+        let w = w as usize;
+        let h = h as usize;
+
+        match rotation {
+            90 => {
+                // 90° CW: output is h×w
+                let mut dst = vec![0u8; w * h * 4];
+                for y in 0..h {
+                    for x in 0..w {
+                        let src_off = (y * w + x) * 4;
+                        // new position: col=h-1-y, row=x → offset = x * h + (h-1-y)
+                        let dst_off = (x * h + (h - 1 - y)) * 4;
+                        dst[dst_off..dst_off + 4].copy_from_slice(&src[src_off..src_off + 4]);
+                    }
+                }
+                dst
+            }
+            180 => {
+                // 180°: same dimensions, reverse pixel order
+                let mut dst = vec![0u8; w * h * 4];
+                let total = w * h;
+                for i in 0..total {
+                    let src_off = i * 4;
+                    let dst_off = (total - 1 - i) * 4;
+                    dst[dst_off..dst_off + 4].copy_from_slice(&src[src_off..src_off + 4]);
+                }
+                dst
+            }
+            270 => {
+                // 270° CW (= 90° CCW): output is h×w
+                let mut dst = vec![0u8; w * h * 4];
+                for y in 0..h {
+                    for x in 0..w {
+                        let src_off = (y * w + x) * 4;
+                        // new position: col=y, row=w-1-x → offset = (w-1-x) * h + y
+                        let dst_off = ((w - 1 - x) * h + y) * 4;
+                        dst[dst_off..dst_off + 4].copy_from_slice(&src[src_off..src_off + 4]);
+                    }
+                }
+                dst
+            }
+            _ => src.to_vec(),
+        }
     }
 }
 

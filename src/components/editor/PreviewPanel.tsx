@@ -95,7 +95,7 @@ function PreviewAspectShapeIcon({ widthOverHeight }: { widthOverHeight: number }
     w = 12;
     h = Math.round(Math.min(max, Math.max(min, w / widthOverHeight)));
   }
-  return <span className="inline-flex shrink-0 rounded-sm border border-[#5c6570] bg-[#0f1419]" style={{ width: w, height: h }} aria-hidden />;
+  return <span className="inline-flex shrink-0 rounded-sm border border-border-soft bg-bg" style={{ width: w, height: h }} aria-hidden />;
 }
 
 function AspectMenuRow({
@@ -120,17 +120,17 @@ function AspectMenuRow({
       disabled={disabled}
       title={preset === "custom" ? "Custom size (coming soon)" : PREVIEW_ASPECT_LABEL[preset]}
       className={cn(
-        "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-[#e8ecf0] hover:bg-[#1f2730]",
-        isSel && "bg-[#1f2730]",
+        "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-text-primary hover:bg-surface-raised",
+        isSel && "bg-surface-raised",
         disabled && "cursor-not-allowed opacity-45 hover:bg-transparent",
       )}
       onClick={() => {
         if (!disabled) onSelect(preset);
       }}
     >
-      <span className="flex w-5 shrink-0 justify-center">{isSel ? <Check className="h-3.5 w-3.5 text-[#53a9ff]" /> : null}</span>
+      <span className="flex w-5 shrink-0 justify-center">{isSel ? <Check className="h-3.5 w-3.5 text-accent" /> : null}</span>
       <span className="min-w-0 flex-1 truncate">{PREVIEW_ASPECT_LABEL[preset]}</span>
-      <span className="flex shrink-0 items-center justify-end text-[#88909a]">{icon}</span>
+      <span className="flex shrink-0 items-center justify-end text-text-muted">{icon}</span>
     </button>
   );
 }
@@ -353,7 +353,7 @@ const ProgramPreview: React.FC = () => {
 
             {aspectMenuOpen && (
               <div
-                className="absolute bottom-full left-0 z-50 mb-1 w-[220px] overflow-hidden rounded-lg border border-[#2b3442] bg-[#141920] py-1 text-[#e8ecf0] shadow-xl"
+                className="absolute bottom-full left-0 z-50 mb-1 w-[220px] overflow-hidden rounded-lg border border-border bg-surface py-1 text-text-primary shadow-xl"
                 role="listbox"
               >
                 <div className="px-1">
@@ -365,8 +365,8 @@ const ProgramPreview: React.FC = () => {
                   />
                   <AspectMenuRow preset="custom" selected={previewAspectPreset} onSelect={selectAspectPreset} disabled icon={<span className="w-[22px]" />} />
                 </div>
-                <div className="my-1 h-px bg-[#2b3442]" />
-                <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#88909a]">Landscape</div>
+                <div className="my-1 h-px bg-border" />
+                <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Landscape</div>
                 <div className="px-1">
                   {landscapePresets.map((p) => (
                     <AspectMenuRow
@@ -378,8 +378,8 @@ const ProgramPreview: React.FC = () => {
                     />
                   ))}
                 </div>
-                <div className="my-1 h-px bg-[#2b3442]" />
-                <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#88909a]">Portrait</div>
+                <div className="my-1 h-px bg-border" />
+                <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Portrait</div>
                 <div className="px-1">
                   {portraitPresets.map((p) => (
                     <AspectMenuRow
@@ -391,7 +391,7 @@ const ProgramPreview: React.FC = () => {
                     />
                   ))}
                 </div>
-                <div className="my-1 h-px bg-[#2b3442]" />
+                <div className="my-1 h-px bg-border" />
                 <div className="px-1">
                   <AspectMenuRow
                     preset="1:1"
@@ -415,14 +415,14 @@ const ProgramPreview: React.FC = () => {
           </Button>
 
           <div
-            className="flex-1 h-2 rounded bg-[#222a34] border border-[#2f3846] cursor-pointer"
+            className="flex-1 h-2 rounded bg-surface-raised border border-border cursor-pointer"
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               const ratio = (e.clientX - rect.left) / Math.max(1, rect.width);
               seek(Math.max(0, Math.min(duration, ratio * duration)));
             }}
           >
-            <div className="h-full rounded bg-[#53a9ff]" style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }} />
+            <div className="h-full rounded bg-accent" style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }} />
           </div>
 
           <Button variant="ghost" size="icon-sm" onClick={() => setIsMuted((m) => !m)} title={isMuted ? "Unmute" : "Mute"}>

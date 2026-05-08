@@ -4,12 +4,13 @@ import { Button } from "../../ui/Button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../ui/Tooltip";
 import { useTimelineStore } from "../../../store/timelineStore";
 import { useUIStore } from "../../../store/uiStore";
+import { useSettingsStore } from "../../../store/settingsStore";
 import { SuccessToast } from "../../ui/SuccessToast";
 
 export const TimelineToolbar: React.FC = () => {
   const { zoomLevel, setZoom, addTrack, swapClips, rippleEditEnabled, toggleRippleEdit } = useTimelineStore();
   const { selectedClipIds } = useUIStore();
-  const [snapMode, setSnapMode] = useState(true);
+  const { snapToGrid, setSnapToGrid } = useSettingsStore();
   const [splitMode, setSplitMode] = useState(false);
   const [linkMode, setLinkMode] = useState(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -67,7 +68,7 @@ export const TimelineToolbar: React.FC = () => {
             </Button>
           </Tool>
           <Tool label="Snap">
-            <Button variant="ghost" size="icon-sm" className={snapMode ? activeButton : toolButton} onClick={() => setSnapMode(!snapMode)}>
+            <Button variant="ghost" size="icon-sm" className={snapToGrid ? activeButton : toolButton} onClick={() => setSnapToGrid(!snapToGrid)}>
               <Magnet className="w-4 h-4" />
             </Button>
           </Tool>

@@ -1,131 +1,296 @@
-import React from "react";
-import { Check } from "lucide-react";
+import React, { useState } from "react";
+import { Check, Palette, SlidersHorizontal, Info } from "lucide-react";
 import { Modal } from "./Modal";
-import { useSettingsStore, Theme, FontFamily } from "../../store/settingsStore";
+import {
+  useSettingsStore,
+  Theme,
+  FontFamily,
+  THEME_META,
+  FONT_META,
+  getThemeColors,
+} from "../../store/settingsStore";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
+type Tab = "appearance" | "editor" | "about";
+
+const TABS: { id: Tab; label: string; icon: React.FC<{ className?: string }> }[] = [
+  { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "editor", label: "Editor", icon: SlidersHorizontal },
+  { id: "about", label: "About", icon: Info },
+];
+
+// ─── Mini theme preview ──────────────────────────────────────────────────
+function ThemeSwatch({ themeId, selected, onSelect }: { themeId: Theme; selected: boolean; onSelect: () => void }) {
+  const colors = getThemeColors(themeId);
+  const meta = THEME_META[themeId];
+  const bg = colors["--color-bg"];
+  const surface = colors["--color-surface"];
+  const surfaceRaised = colors["--color-surface-raised"];
+  const accent = colors["--color-accent"];
+  const border = colors["--color-border"];
+  const textPrimary = colors["--color-text-primary"];
+  const textMuted = colors["--color-text-muted"];
+
+  return (
+    <button
+      onClick={onSelect}
+      className={`relative rounded-xl p-[2px] transition-all duration-200 ${
+        selected
+          ? "ring-2 ring-accent ring-offset-2 ring-offset-bg"
+          : "ring-1 ring-white/[0.06] hover:ring-white/[0.12]"
+      }`}
+    >
+      {/* Live mini-preview */}
+      <div className="rounded-[10px] overflow-hidden w-full" style={{ background: bg }}>
+        {/* Fake topbar */}
+        <div className="h-4 flex items-center px-2 gap-1" style={{ background: surface, borderBottom: `1px solid ${border}` }}>
+          <div className="w-[4px] h-[4px] rounded-full" style={{ background: textMuted }} />
+          <div className="w-[4px] h-[4px] rounded-full" style={{ background: textMuted }} />
+          <div className="w-[4px] h-[4px] rounded-full" style={{ background: textMuted }} />
+          <div className="flex-1" />
+          <div className="w-8 h-[5px] rounded-sm" style={{ background: accent }} />
+        </div>
+        {/* Fake editor layout */}
+        <div className="flex h-[52px]">
+          {/* Sidebar */}
+          <div className="w-[28%] p-1.5 flex flex-col gap-1" style={{ background: surface, borderRight: `1px solid ${border}` }}>
+            <div className="h-[5px] w-[70%] rounded-sm" style={{ background: textMuted, opacity: 0.4 }} />
+            <div className="h-[5px] w-[50%] rounded-sm" style={{ background: textMuted, opacity: 0.3 }} />
+            <div className="h-[5px] w-[60%] rounded-sm" style={{ background: textMuted, opacity: 0.25 }} />
+          </div>
+          {/* Preview area */}
+          <div className="flex-1 flex items-center justify-center">
+            <div className="w-[36px] h-[28px] rounded-[3px]" style={{ background: surfaceRaised, border: `1px solid ${border}` }} />
+          </div>
+        </div>
+        {/* Fake timeline */}
+        <div className="h-[14px] flex items-center gap-[3px] px-1.5" style={{ background: surface, borderTop: `1px solid ${border}` }}>
+          <div className="h-[6px] flex-1 rounded-sm" style={{ background: accent, opacity: 0.5 }} />
+          <div className="h-[6px] w-[30%] rounded-sm" style={{ background: surfaceRaised }} />
+        </div>
+      </div>
+
+      {/* Label */}
+      <div className="flex items-center justify-between px-2 py-1.5">
+        <div className="text-left">
+          <div className="text-[11px] font-semibold text-text-primary leading-tight">{meta.name}</div>
+          <div className="text-[9px] text-text-muted leading-tight">{meta.description}</div>
+        </div>
+        {selected && (
+          <div className="w-[16px] h-[16px] rounded-full bg-accent flex items-center justify-center shrink-0">
+            <Check className="w-[10px] h-[10px] text-white" />
+          </div>
+        )}
+      </div>
+    </button>
+  );
+}
+
+// ─── Appearance Tab ──────────────────────────────────────────────────────
+function AppearanceTab() {
   const { theme, fontFamily, setTheme, setFontFamily } = useSettingsStore();
+  const themeKeys: Theme[] = ["dark", "midnight", "ocean", "forest"];
+  const fontKeys: FontFamily[] = ["inter", "system", "mono", "serif"];
 
-  const themes: Array<{ id: Theme; name: string; description: string; preview: string }> = [
-    {
-      id: "dark",
-      name: "Dark",
-      description: "Classic dark theme",
-      preview: "linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 50%, #242424 100%)",
-    },
-    {
-      id: "midnight",
-      name: "Midnight",
-      description: "Deep blue tones",
-      preview: "linear-gradient(135deg, #0a0e1a 0%, #131829 50%, #1a2138 100%)",
-    },
-    {
-      id: "ocean",
-      name: "Ocean",
-      description: "Cool cyan accents",
-      preview: "linear-gradient(135deg, #0a1520 0%, #0f1f2e 50%, #16293d 100%)",
-    },
-    {
-      id: "forest",
-      name: "Forest",
-      description: "Natural green hues",
-      preview: "linear-gradient(135deg, #0d1410 0%, #141d18 50%, #1c2820 100%)",
-    },
-  ];
+  return (
+    <div className="space-y-7">
+      {/* Themes */}
+      <section>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Theme</h3>
+        <div className="grid grid-cols-2 gap-3">
+          {themeKeys.map((t) => (
+            <ThemeSwatch key={t} themeId={t} selected={theme === t} onSelect={() => setTheme(t)} />
+          ))}
+        </div>
+      </section>
 
-  const fonts: Array<{ id: FontFamily; name: string; description: string; sample: string }> = [
-    {
-      id: "inter",
-      name: "Inter",
-      description: "Modern and clean",
-      sample: "Inter Variable",
-    },
-    {
-      id: "system",
-      name: "System",
-      description: "Native system font",
-      sample: "System Font",
-    },
-    {
-      id: "mono",
-      name: "Monospace",
-      description: "Code-style font",
-      sample: "Monospace",
-    },
-    {
-      id: "serif",
-      name: "Serif",
-      description: "Classic and elegant",
-      sample: "Serif Font",
-    },
+      {/* Font Family */}
+      <section>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Font</h3>
+        <div className="flex gap-2">
+          {fontKeys.map((f) => {
+            const meta = FONT_META[f];
+            const isSel = fontFamily === f;
+            return (
+              <button
+                key={f}
+                onClick={() => setFontFamily(f)}
+                className={`flex-1 flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-lg border transition-all ${
+                  isSel
+                    ? "border-accent bg-accent/[0.08] text-accent"
+                    : "border-white/[0.06] hover:border-white/[0.12] text-text-muted hover:text-text-primary"
+                }`}
+              >
+                <span
+                  className="text-lg leading-none"
+                  style={{ fontFamily: meta.stack }}
+                >
+                  Aa
+                </span>
+                <span className="text-[10px] font-medium">{meta.name}</span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// ─── Editor Tab ──────────────────────────────────────────────────────────
+function EditorTab() {
+  const {
+    snapToGrid, autoRipple, autoSave, defaultFrameRate,
+    setSnapToGrid, setAutoRipple, setAutoSave, setDefaultFrameRate,
+  } = useSettingsStore();
+
+  const frameRates: Array<{ value: 24 | 30 | 60; label: string }> = [
+    { value: 24, label: "24" },
+    { value: 30, label: "30" },
+    { value: 60, label: "60" },
   ];
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Settings">
-      <div className="space-y-8">
-        {/* Theme Selection */}
-        <div>
-          <h3 className="text-sm font-semibold text-text-primary mb-3">Theme</h3>
-          <div className="grid grid-cols-2 gap-3">
-            {themes.map((themeOption) => (
-              <button key={themeOption.id} onClick={() => setTheme(themeOption.id)} className={`relative p-4 rounded-lg border-2 transition-all text-left hover:border-accent/50 ${theme === themeOption.id ? "border-accent bg-surface-raised" : "border-border bg-surface"}`}>
-                {/* Theme preview gradient */}
-                <div className="w-full h-16 rounded-md mb-3" style={{ background: themeOption.preview }} />
+    <div className="space-y-6">
+      <section>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Timeline</h3>
+        <div className="space-y-3">
+          <SettingRow label="Snap to grid" description="Clips snap to ruler ticks when dragging">
+            <ToggleSwitch checked={snapToGrid} onChange={setSnapToGrid} />
+          </SettingRow>
+          <SettingRow label="Auto-ripple" description="Automatically close gaps when deleting clips">
+            <ToggleSwitch checked={autoRipple} onChange={setAutoRipple} />
+          </SettingRow>
+        </div>
+      </section>
 
-                {/* Theme info */}
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="font-medium text-text-primary text-sm">{themeOption.name}</div>
-                    <div className="text-xs text-text-muted mt-0.5">{themeOption.description}</div>
-                  </div>
+      <section>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Project</h3>
+        <div className="space-y-3">
+          <SettingRow label="Auto-save" description="Periodically save project state">
+            <ToggleSwitch checked={autoSave} onChange={setAutoSave} />
+          </SettingRow>
+          <SettingRow label="Default frame rate" description="Frame rate for new projects">
+            <div className="flex rounded-lg overflow-hidden border border-white/[0.06]">
+              {frameRates.map((fr) => (
+                <button
+                  key={fr.value}
+                  onClick={() => setDefaultFrameRate(fr.value)}
+                  className={`px-3 py-1 text-[11px] font-semibold transition-colors ${
+                    defaultFrameRate === fr.value
+                      ? "bg-accent text-white"
+                      : "bg-surface-raised text-text-muted hover:text-text-primary hover:bg-white/[0.06]"
+                  }`}
+                >
+                  {fr.label}
+                </button>
+              ))}
+              <span className="px-2 py-1 text-[10px] text-text-muted bg-surface-raised flex items-center">fps</span>
+            </div>
+          </SettingRow>
+        </div>
+      </section>
+    </div>
+  );
+}
 
-                  {/* Check icon for selected theme */}
-                  {theme === themeOption.id && (
-                    <div className="shrink-0 w-5 h-5 rounded-full bg-accent flex items-center justify-center">
-                      <Check className="w-3 h-3 text-white" />
-                    </div>
-                  )}
-                </div>
+function SettingRow({ label, description, children }: { label: string; description: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-1">
+      <div>
+        <div className="text-[13px] text-text-primary">{label}</div>
+        <div className="text-[11px] text-text-muted">{description}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean; onChange?: (v: boolean) => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange?.(!checked)}
+      className={`w-9 h-5 rounded-full relative shrink-0 transition-colors ${
+        disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"
+      } ${checked ? "bg-accent" : "bg-white/[0.1]"}`}
+    >
+      <div
+        className={`absolute top-[3px] w-[14px] h-[14px] rounded-full bg-white shadow-sm transition-transform ${
+          checked ? "left-[18px]" : "left-[3px]"
+        }`}
+      />
+    </button>
+  );
+}
+
+// ─── About Tab ───────────────────────────────────────────────────────────
+function AboutTab() {
+  return (
+    <div className="flex flex-col items-center text-center py-6 gap-4">
+      <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center">
+        <span className="text-2xl font-bold text-accent">C</span>
+      </div>
+      <div>
+        <h3 className="text-lg font-bold text-text-primary">Clypra</h3>
+        <p className="text-xs text-text-muted mt-1">Version 0.1.0 (dev)</p>
+      </div>
+      <p className="text-xs text-text-muted max-w-[280px] leading-relaxed">
+        A modern, native video editor built with Tauri, React, and FFmpeg.
+        Designed for speed and creative freedom.
+      </p>
+      <div className="flex gap-4 text-[10px] text-text-muted/60 mt-2">
+        <span>Tauri 2.x</span>
+        <span>•</span>
+        <span>React 19</span>
+        <span>•</span>
+        <span>FFmpeg</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Settings Modal ─────────────────────────────────────────────────
+export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
+  const [activeTab, setActiveTab] = useState<Tab>("appearance");
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Settings" size="lg">
+      <div className="flex min-h-[420px]">
+        {/* Sidebar */}
+        <div className="w-[160px] shrink-0 border-r border-white/[0.06] p-2 flex flex-col gap-0.5">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${
+                  isActive
+                    ? "bg-accent/[0.1] text-accent"
+                    : "text-text-muted hover:text-text-primary hover:bg-white/[0.04]"
+                }`}
+              >
+                <Icon className="w-4 h-4 shrink-0" />
+                {tab.label}
               </button>
-            ))}
-          </div>
+            );
+          })}
         </div>
 
-        {/* Font Family Selection */}
-        <div>
-          <h3 className="text-sm font-semibold text-text-primary mb-3">Font Family</h3>
-          <div className="space-y-2">
-            {fonts.map((fontOption) => (
-              <button key={fontOption.id} onClick={() => setFontFamily(fontOption.id)} className={`w-full p-3 rounded-lg border-2 transition-all text-left hover:border-accent/50 flex items-center justify-between ${fontFamily === fontOption.id ? "border-accent bg-surface-raised" : "border-border bg-surface"}`}>
-                <div className="flex-1">
-                  <div className="font-medium text-text-primary text-sm">{fontOption.name}</div>
-                  <div className="text-xs text-text-muted mt-0.5">{fontOption.description}</div>
-                </div>
-
-                {/* Font preview */}
-                <div
-                  className="text-sm text-text-muted mr-3"
-                  style={{
-                    fontFamily: fontOption.id === "inter" ? '"Inter Variable", sans-serif' : fontOption.id === "system" ? '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' : fontOption.id === "mono" ? '"JetBrains Mono", "Fira Code", Consolas, monospace' : 'Georgia, "Times New Roman", serif',
-                  }}
-                >
-                  Aa
-                </div>
-
-                {/* Check icon for selected font */}
-                {fontFamily === fontOption.id && (
-                  <div className="shrink-0 w-5 h-5 rounded-full bg-accent flex items-center justify-center">
-                    <Check className="w-3 h-3 text-white" />
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
+        {/* Content */}
+        <div className="flex-1 p-5 overflow-y-auto">
+          {activeTab === "appearance" && <AppearanceTab />}
+          {activeTab === "editor" && <EditorTab />}
+          {activeTab === "about" && <AboutTab />}
         </div>
       </div>
     </Modal>

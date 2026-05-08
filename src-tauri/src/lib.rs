@@ -731,18 +731,29 @@ async fn extract_poster_frame_command(
         duration * 0.1
     };
     
-    // Use native decoder directly (no queue, no cancellation)
+    // Base thumbnail long/short edge
+    let long_edge: u32 = if dpr >= 1.5 { 320 } else { 160 };
+    let short_edge: u32 = if dpr >= 1.5 { 180 } else { 90 };
+    
     let decoder_arc = get_decoder(&video_path).await?;
-    let rgba_bytes = {
+    let (rgba_bytes, out_w, out_h) = {
         let mut decoder = decoder_arc.lock().await;
-        let out_w = if dpr >= 1.5 { 320 } else { 160 };
-        let out_h = if dpr >= 1.5 { 180 } else { 90 };
-        decoder.decode_frame(poster_time, out_w, out_h)?
+        let rotation = decoder.rotation();
+        
+        // For portrait videos (90°/270°), request portrait dimensions.
+        // decode_frame handles the rotation internally — caller just
+        // specifies the desired output size in display orientation.
+        let (req_w, req_h) = if rotation == 90 || rotation == 270 {
+            (short_edge, long_edge) // portrait: 90×160
+        } else {
+            (long_edge, short_edge) // landscape: 160×90
+        };
+        
+        let bytes = decoder.decode_frame(poster_time, req_w, req_h)?;
+        (bytes, req_w, req_h)
     };
     
     // Encode RGBA to WebP
-    let out_w = if dpr >= 1.5 { 320 } else { 160 };
-    let out_h = if dpr >= 1.5 { 180 } else { 90 };
     let mut webp_data = Vec::new();
     let encoder = WebPEncoder::new_lossless(&mut webp_data);
     encoder.encode(&rgba_bytes, out_w, out_h, image::ExtendedColorType::Rgba8)
@@ -1083,9 +1094,6 @@ async fn decode_frames_streaming(
     // Get or create video cache entry for cache checks
     let video_cache = thumbnail_engine::get_video_cache(&video_path, duration).await;
     
-    // Cancel stale timestamps from previous requests
-    thumbnail_engine::ACTIVE_TRACKER.cancel_stale_timestamps(&video_id, &timestamps);
-    
     // Check cache for existing frames
     let mut missing_times = Vec::new();
     let mut cache_hits = 0u32;
@@ -1111,17 +1119,15 @@ async fn decode_frames_streaming(
     
     eprintln!("[decode_frames_streaming] Cache check: hits={} missing={}", cache_hits, missing_times.len());
     
-    // Register this request as active
-    thumbnail_engine::ACTIVE_TRACKER.register_request(&video_id, &timestamps);
-    
     // If all cached, return early
     if missing_times.is_empty() {
         eprintln!("[decode_frames_streaming] All cached, returning early ({:?})", start.elapsed());
         return Ok(());
     }
     
-    // Spawn background task for missing timestamps using native decoder
-    tokio::spawn(async move {
+    // Spawn extraction task and AWAIT it — invoke won't resolve until all frames are streamed.
+    // This ensures the frontend's .then() fires after all frames have arrived via the channel.
+    let handle = tokio::spawn(async move {
         let bg_start = std::time::Instant::now();
         eprintln!("[decode_frames_streaming] BG task starting, missing={}", missing_times.len());
         
@@ -1137,21 +1143,13 @@ async fn decode_frames_streaming(
             }
         };
         
-        // Extract missing frames in batches for better responsiveness
+        // Extract missing frames
         let mut frames_decoded = 0u32;
         let mut frames_failed = 0u32;
-        const BATCH_SIZE: usize = 10; // Process 10 frames, then yield
+        const BATCH_SIZE: usize = 10;
         
         for (batch_idx, time) in missing_times.iter().enumerate() {
             let frame_start = std::time::Instant::now();
-            
-            // Check if request is still active
-            let timestamp_key = (*time * 1000.0).round() as u64;
-            if let Some(entry) = thumbnail_engine::ACTIVE_TRACKER.active_requests.get(&video_id) {
-                if !entry.value().contains(&timestamp_key) {
-                    continue; // Skip cancelled timestamps
-                }
-            }
             
             // Get cache path
             let cache_path = match GLOBAL_CACHE.frame_path(&video_id, density, *time, resolution_tier).await {
@@ -1162,15 +1160,15 @@ async fn decode_frames_streaming(
                 }
             };
             
-            // Skip if already cached (race condition)
+            // Skip if already cached on disk (race with preload)
             if cache_path.exists() {
                 let path_str = cache_path.to_string_lossy().to_string();
-                eprintln!("[decode_frames_streaming] Cache hit, sending: time={:.2}s, path={}", *time, &path_str[..80.min(path_str.len())]);
                 let _ = on_tile.send(ThumbnailTile {
                     time: *time,
                     path: path_str,
                     density,
                 });
+                frames_decoded += 1;
                 continue;
             }
             
@@ -1179,7 +1177,9 @@ async fn decode_frames_streaming(
                 Ok(bytes) => bytes,
                 Err(e) => {
                     frames_failed += 1;
-                    eprintln!("[decode_frames_streaming] Decode failed at {}s: {}", *time, e);
+                    if frames_failed <= 5 {
+                        eprintln!("[decode_frames_streaming] Decode failed at {}s: {}", *time, e);
+                    }
                     continue;
                 }
             };
@@ -1193,7 +1193,7 @@ async fn decode_frames_streaming(
             
             frames_decoded += 1;
             
-            // Yield every BATCH_SIZE frames to keep UI responsive
+            // Yield every BATCH_SIZE frames to keep runtime fair
             if batch_idx % BATCH_SIZE == 0 && batch_idx > 0 {
                 tokio::task::yield_now().await;
             }
@@ -1203,7 +1203,6 @@ async fn decode_frames_streaming(
                 if let Some(level_cache) = vc.levels.get(&density) {
                     let cached_frame = thumbnail_engine::CachedFrame::new(*time, cache_path.clone());
                     level_cache.insert(*time, cached_frame);
-                    // Update total_size
                     if let Ok(metadata) = std::fs::metadata(&cache_path) {
                         GLOBAL_CACHE.total_size.fetch_add(metadata.len(), std::sync::atomic::Ordering::Relaxed);
                     }
@@ -1215,16 +1214,14 @@ async fn decode_frames_streaming(
             
             // Stream result to frontend
             let path_str = cache_path.to_string_lossy().to_string();
-            eprintln!("[decode_frames_streaming] Sending tile: time={:.2}s, path_len={}, path_start={}", 
-                      *time, path_str.len(), &path_str[..50.min(path_str.len())]);
             let _ = on_tile.send(ThumbnailTile {
                 time: *time,
                 path: path_str,
                 density,
             });
             
-            // Log first few frames and then every 10th
-            if frames_decoded <= 3 || frames_decoded % 10 == 0 {
+            // Log first few frames and then every 20th
+            if frames_decoded <= 3 || frames_decoded % 20 == 0 {
                 eprintln!("[decode_frames_streaming] Frame {} at {:.2}s decoded+saved in {:?}", 
                           frames_decoded, *time, frame_start.elapsed());
             }
@@ -1233,6 +1230,9 @@ async fn decode_frames_streaming(
         eprintln!("[decode_frames_streaming] BG task complete: decoded={} failed={} total_time={:?}",
                   frames_decoded, frames_failed, bg_start.elapsed());
     });
+    
+    // Await the task — invoke resolves only after all frames are streamed
+    handle.await.map_err(|e| format!("Extraction task failed: {}", e))?;
     
     Ok(())
 }

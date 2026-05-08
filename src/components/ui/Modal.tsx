@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { X } from 'lucide-react'
 
 export interface ModalProps {
@@ -7,27 +7,54 @@ export interface ModalProps {
   title: string
   children: React.ReactNode
   footer?: React.ReactNode
+  /** Use "lg" for wide settings-style modals */
+  size?: 'default' | 'lg'
 }
 
-export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer }) => {
+export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer, size = 'default' }) => {
+  // Close on Escape
+  useEffect(() => {
+    if (!isOpen) return
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [isOpen, onClose])
+
   if (!isOpen) return null
+
+  const maxW = size === 'lg' ? 'max-w-[680px]' : 'max-w-xl'
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="fixed inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative bg-surface rounded-lg border border-border min-w-96 max-w-xl max-h-80vh overflow-y-auto">
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <h2 className="text-lg font-semibold text-text-primary">{title}</h2>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/70 backdrop-blur-[2px] animate-in fade-in duration-150"
+        onClick={onClose}
+      />
+      {/* Dialog */}
+      <div
+        className={`relative ${maxW} w-[90vw] max-h-[85vh] overflow-hidden rounded-xl border border-white/[0.06] bg-surface shadow-2xl animate-in zoom-in-95 fade-in duration-150`}
+        style={{ boxShadow: '0 0 0 1px rgba(255,255,255,0.04), 0 24px 64px rgba(0,0,0,0.55)' }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 h-12 border-b border-white/[0.06]">
+          <h2 className="text-[15px] font-semibold text-text-primary tracking-tight">{title}</h2>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-surface-raised rounded transition-colors"
+            className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-white/[0.06] transition-colors text-text-muted hover:text-text-primary"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-4">{children}</div>
+        {/* Body */}
+        <div className="overflow-y-auto" style={{ maxHeight: 'calc(85vh - 48px - (var(--footer-h, 0px)))' }}>
+          {children}
+        </div>
+        {/* Footer */}
         {footer && (
-          <div className="p-4 border-t border-border flex justify-end gap-2">{footer}</div>
+          <div className="px-5 py-3 border-t border-white/[0.06] flex justify-end gap-2">{footer}</div>
         )}
       </div>
     </div>

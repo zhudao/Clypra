@@ -177,10 +177,10 @@ const MediaCard: React.FC<MediaCardProps> = ({ asset, isSelected, isUsedInTimeli
   return (
     <div ref={drag} onClick={handleClick} onContextMenu={onContextMenu} className={`group relative bg-surface-raised rounded overflow-hidden transition-all cursor-pointer ${isDragging ? "opacity-50" : ""} ${isSelected ? "ring-1 ring-accent" : ""}`}>
       <div className="aspect-video bg-surface-raised flex items-center justify-center relative">
-        {asset.posterFrame ? <img src={asset.posterFrame} alt={asset.name} className="w-full h-full object-cover" /> : <div className="w-8 h-8">{asset.type === "video" ? <Film className="w-full h-full text-text-muted" /> : asset.type === "audio" ? <Music className="w-full h-full text-text-muted" /> : <Image className="w-full h-full text-text-muted" />}</div>}
+        {asset.posterFrame && !(/\.(mp4|mov|avi|mkv|webm|flv)(%|$)/i.test(asset.posterFrame)) ? <img src={asset.posterFrame} alt={asset.name} className="w-full h-full object-contain" /> : <div className="w-8 h-8">{asset.type === "video" ? <Film className="w-full h-full text-text-muted" /> : asset.type === "audio" ? <Music className="w-full h-full text-text-muted" /> : <Image className="w-full h-full text-text-muted" />}</div>}
         {asset.duration > 0 && (
           <div className="absolute bottom-1 right-1 bg-black/70 px-1.5 py-0.5 rounded text-xs text-white">
-            {Math.floor(asset.duration / 60)}:{String(Math.floor(asset.duration % 60)).padStart(2, "0")}
+            {Math.floor(Math.ceil(asset.duration) / 60)}:{String(Math.ceil(asset.duration) % 60).padStart(2, "0")}
           </div>
         )}
         {/* "Added" badge */}

@@ -12,16 +12,16 @@ import { useTimelineStore, getInsertIndexForNewTrack } from "../../../store/time
 import { useProjectStore } from "../../../store/projectStore";
 import { useUIStore } from "../../../store/uiStore";
 import { usePlayback } from "../../../hooks/usePlayback";
-import { useTimelineAutoScroll } from "../../../hooks/useTimelineAutoScroll";
+// import { useTimelineAutoScroll } from "../../../hooks/useTimelineAutoScroll";
 import type { VideoMetadata } from "../../../types";
 import { createClipFromAsset } from "../../../lib/timelineClip";
 
 const TIMELINE_MIN_PPS = 50;
 const TIMELINE_MAX_PPS = 500;
 /** Multiplier on normalized wheel delta (pixels); higher = stronger zoom per tick. */
-const WHEEL_ZOOM_SENSITIVITY = 0.001;
+const WHEEL_ZOOM_SENSITIVITY = 0.006;
 /** Extra multiplier for Ctrl/⌘ + wheel zoom feel (higher = faster). */
-const WHEEL_ZOOM_SPEED_MULTIPLIER = 1.35;
+const WHEEL_ZOOM_SPEED_MULTIPLIER = 2.5;
 
 function normalizeWheelDeltaY(e: WheelEvent, viewportClientHeight: number): number {
   switch (e.deltaMode) {
@@ -871,15 +871,15 @@ export const Timeline: React.FC = () => {
                     dragState={
                       dragState
                         ? {
-                            draggingClipId: dragState.draggingClipId,
-                            offsetX: dragState.offsetX,
-                            offsetY: dragState.offsetY,
-                            isInvalidPosition: dragState.isInvalidPosition,
-                            targetTrackId: dragState.targetTrackId,
-                            insertionIndex: dragState.insertionIndex,
-                            gapStartTime: dragState.gapStartTime,
-                            gapDuration: dragState.gapDuration,
-                          }
+                          draggingClipId: dragState.draggingClipId,
+                          offsetX: dragState.offsetX,
+                          offsetY: dragState.offsetY,
+                          isInvalidPosition: dragState.isInvalidPosition,
+                          targetTrackId: dragState.targetTrackId,
+                          insertionIndex: dragState.insertionIndex,
+                          gapStartTime: dragState.gapStartTime,
+                          gapDuration: dragState.gapDuration,
+                        }
                         : undefined
                     }
                   />

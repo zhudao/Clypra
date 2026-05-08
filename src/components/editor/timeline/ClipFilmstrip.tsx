@@ -12,11 +12,18 @@ const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i
 const TILE_WIDTH_PX = 60
 
 /**
- * Dense extraction interval — extract once at this density on mount.
- * 0.5s means one frame every 0.5 seconds — enough for any zoom level.
- * At 60px per tile, you'd need >120px/s zoom to need denser than this.
+ * Adaptive extraction interval — scales with video duration to cap frame count.
+ *   ≤ 60s  → 0.5s  (max 120 frames)
+ *   ≤ 300s → 1.0s  (max 300 frames)
+ *   ≤ 600s → 2.0s  (max 300 frames)
+ *   > 600s → ceil(duration / 200)  (max ~200 frames)
  */
-const EXTRACTION_INTERVAL = 0.5
+function getExtractionInterval(durationSecs: number): number {
+  if (durationSecs <= 60) return 0.5
+  if (durationSecs <= 300) return 1.0
+  if (durationSecs <= 600) return 2.0
+  return Math.ceil(durationSecs / 200)
+}
 
 /**
  * No-op kept for test compatibility. The CapCut-style architecture manages
@@ -81,11 +88,14 @@ export function ClipFilmstrip({
     if (extractionKey === extractionKeyRef.current) return
     extractionKeyRef.current = extractionKey
 
+    // Adaptive interval: caps frame count for long videos
+    const interval = getExtractionInterval(mediaAsset.duration)
+
     // Generate dense timestamp grid once
     const allTimestamps = generateTimestampGrid(
       clip.trimIn,
       clip.trimOut,
-      EXTRACTION_INTERVAL, // 0.5s — dense enough for all zoom levels
+      interval,
       mediaAsset.duration
     )
 
@@ -135,7 +145,7 @@ export function ClipFilmstrip({
 
     console.log(
       `[ClipFilmstrip] One-time extraction: ${allTimestamps.length} frames ` +
-      `(interval=${EXTRACTION_INTERVAL}s, range=${clip.trimIn.toFixed(1)}-${clip.trimOut.toFixed(1)}s) ` +
+      `(interval=${interval}s, range=${clip.trimIn.toFixed(1)}-${clip.trimOut.toFixed(1)}s) ` +
       `size=${thumbW}x${thumbH}`
     )
 

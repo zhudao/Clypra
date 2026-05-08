@@ -3,6 +3,7 @@ import { LaunchScreen } from "./components/screens/LaunchScreen";
 import { EditorScreen } from "./components/screens/EditorScreen";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { useProjectStore } from "./store/projectStore";
+import { useUIStore } from "./store/uiStore";
 import type { Project, AspectRatio } from "./types";
 
 const App = () => {
@@ -43,12 +44,17 @@ const App = () => {
   }, [setRecentProjects]);
 
   const handleCreateProject = (name: string, aspectRatio: AspectRatio, frameRate: 24 | 30 | 60) => {
+    // Reset UI state from any previous session
+    useUIStore.getState().exitSourceMode();
     createProject(name, aspectRatio, frameRate);
   };
 
   const handleOpenProject = async (proj: Project) => {
     try {
       console.log("[OpenProject] Starting to open project:", proj.id);
+
+      // Reset UI state from any previous session
+      useUIStore.getState().exitSourceMode();
 
       // Load the full project data from disk
       const { invoke } = await import("@tauri-apps/api/core");

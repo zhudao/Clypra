@@ -9,18 +9,18 @@
   --color-bg: #0f0f0f;
   --color-surface: #1a1a1a;
   --color-surface-raised: #242424;
+  --color-surface-panel: #161616;
+  --color-surface-floating: #20242a;
   --color-border: #2e2e2e;
+  --color-border-soft: #343b45;
   --color-accent: #6c63ff;
+  --color-accent-soft: #8b84ff;
   --color-text-primary: #f0f0f0;
   --color-text-muted: #666666;
   --color-danger: #e05252;
   --color-video-clip: #2d2340;
   --color-audio-clip: #1a3040;
   --color-text-clip: #3d3010;
-  --color-accent-soft: #4fb8ff;
-  --color-surface-floating: #20242a;
-  --color-surface-panel: #171b20;
-  --color-border-soft: #343b45;
 }
 
 html,
