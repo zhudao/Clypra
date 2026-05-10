@@ -75,9 +75,9 @@ export class RasterSurface {
    * Tile count is driven by clipWidthPx / tileWidthPx — never by artifact count.
    * Artifacts are sampled (nearest-neighbour in time) to fill tile slots.
    *
-   * Zero browser resampling: drawImage() maps bitmap pixels to canvas pixels
-   * via the GPU compositor. Canvas backing store is DPR-scaled so 1 canvas
-   * pixel = 1 physical pixel.
+   * Filmstrip frames are drawn in physical backing-store pixels. Tile slots are
+   * fixed width, and native bitmaps are clipped into those slots without passing
+   * destination width/height to drawImage().
    */
   drawFilmstrip(
     artifacts: readonly TransportArtifact[],
@@ -97,17 +97,14 @@ export class RasterSurface {
     const backingW = this._canvas.width;
     const backingH = this._canvas.height;
 
-    // Scale context so all coordinates are in CSS pixels (DPR handled by backing store)
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
     // Clear with background
     ctx.fillStyle = '#0c2730';
-    ctx.fillRect(0, 0, clipWidthPx, stripHeightPx);
+    ctx.fillRect(0, 0, backingW, backingH);
 
-    // Tile layout
+    // Tile layout is quantized. The final tile may overflow and is clipped by canvas bounds.
     const tileCount = Math.max(1, Math.ceil(clipWidthPx / targetTileW));
-    const tileW = clipWidthPx / tileCount;
+    const tileW = Math.round(targetTileW * dpr);
+    const tileH = Math.round(stripHeightPx * dpr);
 
     // Sample artifacts for each tile slot (nearest-neighbour in time index)
     const step = artifacts.length > 1 ? (artifacts.length - 1) / (tileCount - 1) : 0;
@@ -117,18 +114,16 @@ export class RasterSurface {
       const art = artifacts[idx];
       const x = i * tileW;
 
-      this._drawTile(ctx, art.bitmap, art.width, art.height, x, 0, tileW, stripHeightPx);
+      this._drawTile(ctx, art.bitmap, art.width, art.height, x, 0, tileW, tileH);
     }
-
-    ctx.restore();
 
     // Overlay: subtle gradient at left/right edges to soften tile boundaries
     this._drawEdgeFade(ctx, backingW, backingH);
   }
 
   /**
-   * Draw a single tile — cover-fit the bitmap into the tile rect.
-   * No CSS scaling involved; all math is done in canvas coordinates.
+   * Draw a single tile by clipping native bitmap pixels into a fixed tile slot.
+   * This intentionally avoids destination width/height drawImage arguments.
    */
   private _drawTile(
     ctx: CanvasRenderingContext2D,
@@ -142,24 +137,16 @@ export class RasterSurface {
   ): void {
     if (bmpW === 0 || bmpH === 0 || tileW === 0 || tileH === 0) return;
 
-    // Cover-fit: scale the bitmap so it fills the tile, centred
-    const bmpAspect = bmpW / bmpH;
-    const tileAspect = tileW / tileH;
+    const drawX = Math.round(x + (tileW - bmpW) / 2);
+    const drawY = Math.round(y + (tileH - bmpH) / 2);
 
-    let sx = 0, sy = 0, sw = bmpW, sh = bmpH;
-
-    if (bmpAspect > tileAspect) {
-      // Bitmap wider than tile — crop horizontally
-      sw = Math.round(bmpH * tileAspect);
-      sx = Math.round((bmpW - sw) / 2);
-    } else {
-      // Bitmap taller than tile — crop vertically
-      sh = Math.round(bmpW / tileAspect);
-      sy = Math.round((bmpH - sh) / 2);
-    }
-
-    ctx.imageSmoothingEnabled = false; // pixel-exact — no browser resampling
-    ctx.drawImage(bitmap, sx, sy, sw, sh, x, y, tileW, tileH);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(Math.round(x), Math.round(y), Math.round(tileW), Math.round(tileH));
+    ctx.clip();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bitmap, drawX, drawY);
+    ctx.restore();
   }
 
   /** Draw a single poster frame filling the entire strip. */
@@ -170,10 +157,16 @@ export class RasterSurface {
     const ctx = this._ctx;
     const { clipWidthPx, stripHeightPx, dpr } = layout;
 
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    this._drawTile(ctx, bitmap, bitmap.width, bitmap.height, 0, 0, clipWidthPx, stripHeightPx);
-    ctx.restore();
+    this._drawTile(
+      ctx,
+      bitmap,
+      bitmap.width,
+      bitmap.height,
+      0,
+      0,
+      Math.round(clipWidthPx * dpr),
+      Math.round(stripHeightPx * dpr),
+    );
   }
 
   /** Draw a placeholder (waiting for decode). */

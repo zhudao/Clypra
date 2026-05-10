@@ -14,7 +14,7 @@ import { useUIStore } from "../../../store/uiStore";
 import { usePlayback } from "../../../hooks/usePlayback";
 // import { useTimelineAutoScroll } from "../../../hooks/useTimelineAutoScroll";
 import type { VideoMetadata } from "../../../types";
-import { createClipFromAsset } from "../../../lib/timelineClip";
+import { createClipFromAsset, getTimelineViewportEnd } from "../../../lib/timelineClip";
 import { useRenderEngineStore } from "../../../store/renderEngineStore";
 import { TIMELINE_MAX_PPS, TIMELINE_MIN_PPS } from "../../../lib/timelineZoom";
 
@@ -521,8 +521,10 @@ export const Timeline: React.FC = () => {
     return () => window.removeEventListener("pointerdown", handleWindowPointerDown);
   }, []);
 
-  // ✅ Ensure content width uses same rounding as all other pixel calculations
-  const contentWidth = Math.max(1000, Math.round(duration * pixelsPerSecond));
+  // ✅ Ensure content width uses viewport end (with 10s minimum for UX), but playback uses actual content end
+  const contentEnd = duration; // Playback duration is the actual content end
+  const viewportEnd = getTimelineViewportEnd(contentEnd);
+  const contentWidth = Math.round(viewportEnd * pixelsPerSecond);
 
   const seekFromPointer = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -542,6 +544,7 @@ export const Timeline: React.FC = () => {
 
       const rect = container.getBoundingClientRect();
       const x = event.clientX - rect.left + container.scrollLeft;
+      // Clamp seeking to actual program duration, not viewport padding
       const time = Math.max(0, Math.min(x / pixelsPerSecond, duration));
       seek(time);
     },
@@ -578,12 +581,14 @@ export const Timeline: React.FC = () => {
       const localX = pendingClientX - rect.left;
       const scrollLeftDom = container.scrollLeft;
 
+      // Use viewport end for zoom anchoring (includes 10s padding for UX)
+      const currentViewportEnd = getTimelineViewportEnd(duration);
       let anchorTime = (scrollLeftDom + localX) / oldPps;
-      anchorTime = Math.max(0, Math.min(anchorTime, duration));
+      anchorTime = Math.max(0, Math.min(anchorTime, currentViewportEnd));
 
       useTimelineStore.getState().setPixelsPerSecond(nextPps);
 
-      const nextContentWidth = Math.max(1000, Math.round(duration * nextPps));
+      const nextContentWidth = Math.round(currentViewportEnd * nextPps);
       const maxScrollLeft = Math.max(0, nextContentWidth - container.clientWidth);
       let nextScrollLeft = anchorTime * nextPps - localX;
       nextScrollLeft = Math.max(0, Math.min(nextScrollLeft, maxScrollLeft));
@@ -610,9 +615,10 @@ export const Timeline: React.FC = () => {
     };
   }, [duration]);
 
+  // ✅ Set playback duration to actual content end (not viewport padding)
   useEffect(() => {
-    const timelineEnd = getTimelineEndTime();
-    setDuration(Math.max(timelineEnd, 10));
+    const contentEnd = getTimelineEndTime();
+    setDuration(contentEnd);
   }, [clips, getTimelineEndTime, setDuration]);
 
   // Auto-scroll during playback: bulletproof viewport tracking with strict invariants

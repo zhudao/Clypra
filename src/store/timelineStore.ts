@@ -3,6 +3,7 @@ import type { Track, Clip } from "../types";
 import { useUIStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { clampTimelinePixelsPerSecond, clampTimelineZoom, TIMELINE_PPS_PER_ZOOM, TIMELINE_ZOOM_DEFAULT } from "../lib/timelineZoom";
+import { getTimelineContentEnd } from "../lib/timelineClip";
 
 interface TimelineStore {
   tracks: Track[];
@@ -207,25 +208,39 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     if (time <= clip.startTime || time >= clipEndTime) return;
 
     const timeSinceStart = time - clip.startTime;
+
+    // Calculate new trim points and durations
+    const leftTrimOut = clip.trimIn + timeSinceStart;
+    const leftDuration = leftTrimOut - clip.trimIn;
+
+    const rightTrimIn = leftTrimOut;
+    const rightDuration = clip.trimOut - rightTrimIn;
+
     const newClip: Clip = {
       ...clip,
       id: `clip-${Date.now()}`,
       startTime: time,
-      duration: clip.duration - timeSinceStart,
-      trimIn: clip.trimIn + timeSinceStart,
+      duration: rightDuration,
+      trimIn: rightTrimIn,
+      trimOut: clip.trimOut,
     };
 
     set((state) => ({
-      clips: [...state.clips.map((c) => (c.id === clipId ? { ...c, duration: timeSinceStart, trimOut: clip.trimOut - (clip.duration - timeSinceStart) } : c)), newClip],
+      clips: [
+        ...state.clips.map((c) => {
+          if (c.id === clipId) {
+            return { ...c, duration: leftDuration, trimOut: leftTrimOut };
+          }
+          return c;
+        }),
+        newClip,
+      ],
     }));
   },
 
   getTimelineEndTime: () => {
     const state = get();
-    return state.clips.reduce((maxTime, clip) => {
-      const clipEndTime = clip.startTime + clip.duration;
-      return Math.max(maxTime, clipEndTime);
-    }, 0);
+    return getTimelineContentEnd(state.clips);
   },
 
   swapClips: () => {
@@ -382,8 +397,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           // Update trim points for media
           if (side === "left") {
             updates.trimIn = clip.trimIn + (newStartTime - clip.startTime);
+            updates.duration = clip.trimOut - updates.trimIn;
           } else {
             updates.trimOut = Math.min(clip.trimIn + newDuration, mediaDurationBound);
+            updates.duration = updates.trimOut - clip.trimIn;
           }
 
           return { ...c, ...updates };

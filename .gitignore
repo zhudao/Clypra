@@ -3,6 +3,7 @@
 target/
 Cargo.lock
 **/*.rs.bk
+/dist
 
 # Dependencies
 node_modules/

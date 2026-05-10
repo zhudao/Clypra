@@ -19,13 +19,11 @@ import { cn } from '@/lib/utils';
 import { InteractionState } from '../../../lib/renderEngine/types';
 import { createRasterSurface, type AnyRasterSurface } from '../../../lib/renderEngine/webglRasterSurface';
 import { useFilmstrip } from '../../../lib/useFilmstrip';
+import { getFilmstripTileWidthForTier } from '../../../lib/filmstripLayout';
 import { normalizePathForTauriInvoke } from '../../../lib/tauri';
 import type { Clip, MediaAsset } from '../../../types';
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
-
-/** Fixed visual tile width — never changes with zoom */
-const TILE_WIDTH_PX = 60;
 
 /**
  * No-op kept for test compatibility.
@@ -62,15 +60,21 @@ export function ClipFilmstrip({
     : '';
 
   // ── Filmstrip data (replaces all inline extraction orchestration) ─────────
-  const { artifacts, isFallback, interactionState } = useFilmstrip({
+  const { artifacts, isFallback, interactionState, spatialTier } = useFilmstrip({
     clipId: clip.id,
     videoPath,
     trimIn: clip.trimIn,
     trimOut: clip.trimOut,
     duration: mediaAsset.duration ?? 0,
+    clipWidthPx,
+    stripHeightPx,
     posterFrame: mediaAsset.posterFrame,
     enabled: isVideoSource && !!videoPath && !!mediaAsset.duration,
   });
+
+  const tileWidthPx = useMemo(() => {
+    return getFilmstripTileWidthForTier(spatialTier);
+  }, [spatialTier]);
 
   // ── RasterSurface lifecycle ───────────────────────────────────────────────
   useEffect(() => {
@@ -88,14 +92,14 @@ export function ClipFilmstrip({
     if (!surface) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const layout = { clipWidthPx, stripHeightPx, dpr, tileWidthPx: TILE_WIDTH_PX };
+    const layout = { clipWidthPx, stripHeightPx, dpr, tileWidthPx };
 
     if (artifacts.length > 0) {
       surface.drawFilmstrip(artifacts, layout);
     } else {
       surface.drawPlaceholder(layout);
     }
-  }, [artifacts, clipWidthPx, stripHeightPx]);
+  }, [artifacts, clipWidthPx, stripHeightPx, tileWidthPx]);
 
   // ── Dimming hint during ballistic scroll (ISM) ───────────────────────────
   const isBallistic = interactionState === InteractionState.Scrolling;
@@ -109,7 +113,7 @@ export function ClipFilmstrip({
       <div
         data-testid="clip-filmstrip"
         className={cn(
-          'overflow-hidden rounded-[2px] border border-black/20 bg-[#0c2730]/40',
+          'relative overflow-hidden rounded-[2px] border border-black/20 bg-[#0c2730]/40',
           className,
         )}
         style={{ height: stripHeightPx, width: '100%', opacity, transition: 'opacity 80ms linear' }}

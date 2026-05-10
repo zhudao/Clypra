@@ -126,7 +126,13 @@ const App = () => {
         useTimelineStore.setState({ tracks: fullProjectData.tracks });
       }
       if (fullProjectData.clips && Array.isArray(fullProjectData.clips)) {
-        useTimelineStore.setState({ clips: fullProjectData.clips });
+        const { normalizeClipTiming } = await import("./lib/timelineClip");
+        const mediaAssets = useProjectStore.getState().mediaAssets;
+        const normalizedClips = fullProjectData.clips.map((clip: any) => {
+           const asset = mediaAssets.find((a: any) => a.id === clip.mediaId);
+           return normalizeClipTiming(clip, asset);
+        });
+        useTimelineStore.setState({ clips: normalizedClips });
       }
     } catch (error) {
       console.error("[OpenProject] Failed to open project:", error);

@@ -23,18 +23,12 @@ import { useRenderEngineStore } from "../store/renderEngineStore";
 import { useRenderState } from "./renderEngine/hooks";
 import { SpatialTier, InteractionState } from "./renderEngine/types";
 import { requestProgressiveTiers, type TransportArtifact } from "./renderEngine/transport";
-import { generateTimestampGrid } from "./timelineUtils";
-
-// ─── Config ───────────────────────────────────────────────────────────────────
-
-const DEFAULT_INTERVAL_SECS = 1.0;
-
-function getExtractionInterval(durationSecs: number): number {
-  if (durationSecs <= 60) return 0.5;
-  if (durationSecs <= 300) return 1.0;
-  if (durationSecs <= 600) return 2.0;
-  return Math.ceil(durationSecs / 200);
-}
+import {
+  DEFAULT_FILMSTRIP_TILE_WIDTH_PX,
+  generateFilmstripSlotTimestamps,
+  getFilmstripTileWidthForTier,
+  getReadableFilmstripTier,
+} from "./filmstripLayout";
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +38,9 @@ export interface UseFilmstripOptions {
   trimIn: number;
   trimOut: number;
   duration: number;
+  clipWidthPx?: number;
+  tileWidthPx?: number;
+  stripHeightPx?: number;
   posterFrame?: string;
   enabled?: boolean;
 }
@@ -57,6 +54,8 @@ export interface UseFilmstripResult {
   isFallback: boolean;
   /** Current interaction state — surface can dim during ballistic scroll */
   interactionState: InteractionState;
+  /** SRP-selected tier used for UI-only layout decisions. */
+  spatialTier: SpatialTier;
 }
 
 export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
@@ -70,8 +69,8 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
   const [artifacts, setArtifacts] = useState<readonly TransportArtifact[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Track previous epoch to avoid re-requesting when epoch hasn't changed
-  const prevEpochRef = useRef<string>("");
+  // Track previous request signature to avoid duplicate decode requests.
+  const prevRequestKeyRef = useRef<string>("");
 
   // Clear previous bitmaps on unmount or re-request
   const disposePrev = useCallback(() => {
@@ -85,22 +84,48 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
 
     const { epochId, currentTier, interactionState } = renderState;
 
-    // Skip re-request if epoch hasn't changed
-    if (epochId === prevEpochRef.current) return;
-    prevEpochRef.current = epochId;
-
-    // Cancel any in-flight request for the previous epoch
-    disposePrev();
-
-    // Don't request during ballistic scroll — wait for Converging state
+    // Don't request during scrubbing — wait for Converging/Idle without
+    // poisoning the request signature for the next stable state.
     if (interactionState === InteractionState.Scrubbing) return;
 
     const { spatialTier } = currentTier;
-    const interval = getExtractionInterval(duration);
-    const timestampsSecs = generateTimestampGrid(trimIn, trimOut, interval, duration);
+    const tileWidthPx = opts.tileWidthPx ?? getFilmstripTileWidthForTier(spatialTier);
+    const stripHeightPx = opts.stripHeightPx ?? 40;
+    const clipWidthPx = opts.clipWidthPx ?? duration * DEFAULT_FILMSTRIP_TILE_WIDTH_PX;
+    const timestampsSecs = generateFilmstripSlotTimestamps({
+      trimIn,
+      trimOut,
+      duration,
+      clipWidthPx,
+      tileWidthPx,
+    });
     if (timestampsSecs.length === 0) return;
 
     const timestampsMs = timestampsSecs.map((t) => Math.round(t * 1000));
+    const startTier = SpatialTier.L0;
+    const targetTier = getReadableFilmstripTier(
+      spatialTier,
+      tileWidthPx,
+      stripHeightPx,
+      window.devicePixelRatio || 1,
+    );
+    const requestKey = [
+      epochId,
+      trimIn,
+      trimOut,
+      duration,
+      clipWidthPx,
+      tileWidthPx,
+      stripHeightPx,
+      targetTier,
+      timestampsMs.join(","),
+    ].join("|");
+
+    if (requestKey === prevRequestKeyRef.current) return;
+    prevRequestKeyRef.current = requestKey;
+
+    // Cancel any in-flight request for the previous signature.
+    disposePrev();
 
     // Keep previous artifacts visible during upgrade (don't clear on re-request)
     setIsLoading(true);
@@ -139,9 +164,6 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
 
     // Progressive tier sequence: always start at L0 for fast-paint, then
     // converge to the SRP-committed tier for the current zoom level.
-    const startTier = SpatialTier.L0;
-    const targetTier = spatialTier;
-
     cancelRef.current = requestProgressiveTiers({
       videoPath,
       timestampsMs,
@@ -189,8 +211,14 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
     duration,
     trimIn,
     trimOut,
+    opts.clipWidthPx,
+    opts.tileWidthPx,
+    opts.stripHeightPx,
     // Re-run when epoch changes (covers zoom-tier, scroll, trim)
     renderState.epochId,
+    renderState.currentTier.spatialTier,
+    renderState.interactionState,
+    renderState.isFallback,
     runtime,
     clipId,
     disposePrev,
@@ -204,5 +232,6 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
     isLoading,
     isFallback: renderState.isFallback || artifacts.length === 0,
     interactionState: renderState.interactionState,
+    spatialTier: renderState.currentTier.spatialTier,
   };
 }

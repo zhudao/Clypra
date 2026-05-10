@@ -22,7 +22,6 @@ const eid = (s: string) => s as RenderEpochId;
 const mockRequestProgressiveTiers = vi.fn(() => vi.fn()); // returns cancel fn
 const mockUseRenderState = vi.fn();
 const mockUseRenderEngineStore = vi.fn();
-const mockGenerateTimestampGrid = vi.fn(() => [1.0, 2.0, 3.0]);
 
 vi.mock('../renderEngine/transport', () => ({
   requestProgressiveTiers: mockRequestProgressiveTiers,
@@ -34,10 +33,6 @@ vi.mock('../renderEngine/hooks', () => ({
 
 vi.mock('../../store/renderEngineStore', () => ({
   useRenderEngineStore: mockUseRenderEngineStore,
-}));
-
-vi.mock('../timelineUtils', () => ({
-  generateTimestampGrid: mockGenerateTimestampGrid,
 }));
 
 // Import AFTER mocks are registered
@@ -278,6 +273,43 @@ describe('useFilmstrip', () => {
     renderHook(() => useFilmstrip(defaultOpts()));
 
     expect(mockRequestProgressiveTiers).toHaveBeenCalledOnce();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const call = (mockRequestProgressiveTiers.mock.calls as any[][])[0]?.[0] as ProgressiveTierRequest | undefined;
+    expect(call?.startTier).toBe(SpatialTier.L0);
+    expect(call?.targetTier).toBe(SpatialTier.L2);
+  });
+
+  it('derives request timestamps from visible tile slots', () => {
+    renderHook(() => useFilmstrip({
+      ...defaultOpts(),
+      trimIn: 0,
+      trimOut: 10,
+      clipWidthPx: 300,
+      tileWidthPx: 100,
+    }));
+
+    expect(mockRequestProgressiveTiers).toHaveBeenCalledOnce();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const call = (mockRequestProgressiveTiers.mock.calls as any[][])[0]?.[0] as ProgressiveTierRequest | undefined;
+    expect(call?.timestampsMs).toEqual([1667, 5000, 8333]);
+  });
+
+  it('upgrades target tier when DPR requires more pixels for readable tiles', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    mockUseRenderState.mockReturnValue(
+      makeRenderState({
+        interactionState: InteractionState.Idle,
+        currentTier: { spatialTier: SpatialTier.L1, temporalTier: 0 },
+      }),
+    );
+
+    renderHook(() => useFilmstrip({
+      ...defaultOpts(),
+      clipWidthPx: 300,
+      tileWidthPx: 72,
+      stripHeightPx: 40,
+    }));
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const call = (mockRequestProgressiveTiers.mock.calls as any[][])[0]?.[0] as ProgressiveTierRequest | undefined;
     expect(call?.startTier).toBe(SpatialTier.L0);

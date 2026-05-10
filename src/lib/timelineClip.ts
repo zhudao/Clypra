@@ -7,6 +7,43 @@ export const resolveClipDuration = (asset: MediaAsset): number => {
   return DEFAULT_STILL_DURATION_SECONDS;
 };
 
+// Centralized timeline timing helpers
+
+export function getClipVisibleDuration(clip: Pick<Clip, "trimIn" | "trimOut">): number {
+  return Math.max(0, clip.trimOut - clip.trimIn);
+}
+
+export function normalizeClipTiming(clip: Clip, asset?: MediaAsset): Clip {
+  const sourceDuration = asset ? resolveClipDuration(asset) : Infinity;
+  // Ensure trim bounds are within source duration
+  const trimIn = Math.max(0, Math.min(clip.trimIn, sourceDuration));
+  const trimOut = Math.max(trimIn, Math.min(clip.trimOut, sourceDuration));
+  
+  // Calculate new duration
+  const duration = Math.max(0, trimOut - trimIn);
+
+  return {
+    ...clip,
+    trimIn,
+    trimOut,
+    duration
+  };
+}
+
+export function getClipEndTime(clip: Pick<Clip, "startTime" | "trimIn" | "trimOut">): number {
+  return clip.startTime + getClipVisibleDuration(clip);
+}
+
+export function getTimelineContentEnd(clips: Pick<Clip, "startTime" | "trimIn" | "trimOut">[]): number {
+  if (!clips || clips.length === 0) return 0;
+  return Math.max(...clips.map(getClipEndTime), 0);
+}
+
+export function getTimelineViewportEnd(contentEnd: number): number {
+  return Math.max(contentEnd, 10);
+}
+
+
 interface CreateClipFromAssetParams {
   asset: MediaAsset;
   trackId: string;

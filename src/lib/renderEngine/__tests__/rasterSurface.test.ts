@@ -10,7 +10,7 @@
  *   - Idempotent dispose
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { RasterSurface, type FilmstripLayout } from '../rasterSurface';
 import type { TransportArtifact } from '../transport';
 import type { RenderEpochId } from '../types';
@@ -27,11 +27,17 @@ function makeCanvas() {
   const createLinearGradient = vi.fn(() => ({
     addColorStop: vi.fn(),
   }));
+  const beginPath = vi.fn();
+  const rect = vi.fn();
+  const clip = vi.fn();
 
   const ctx = {
     save: vi.fn(),
     restore: vi.fn(),
     scale: vi.fn(),
+    beginPath,
+    rect,
+    clip,
     fillRect,
     drawImage,
     createLinearGradient,
@@ -46,7 +52,7 @@ function makeCanvas() {
     getContext: vi.fn(() => ctx),
   };
 
-  return { canvas: canvas as unknown as HTMLCanvasElement, ctx, drawImage, fillRect };
+  return { canvas: canvas as unknown as HTMLCanvasElement, ctx, drawImage, fillRect, rect, clip };
 }
 
 // ─── Artifact stub ────────────────────────────────────────────────────────────
@@ -173,30 +179,28 @@ describe('RasterSurface', () => {
     surface.dispose();
   });
 
-  describe('cover-fit crop math', () => {
-    it('crops horizontally when bitmap is wider than tile', () => {
-      const { canvas, drawImage } = makeCanvas();
+  describe('native clipped tile drawing', () => {
+    it('clips each tile and draws the bitmap without destination scaling args', () => {
+      const { canvas, drawImage, rect, clip } = makeCanvas();
       const surface = new RasterSurface(canvas);
-      // Bitmap 160×45 (aspect ~3.6), tile 60×40 (aspect 1.5) → wide bitmap → horizontal crop
-      const artifact = makeArtifact(1000, 160, 45);
-      surface.drawFilmstrip([artifact], layout({ clipWidthPx: 60, tileWidthPx: 60 }));
-      const [, sx, , sw] = drawImage.mock.calls[0] as number[];
-      // Source x should be > 0 (cropped from center)
-      expect(sx).toBeGreaterThan(0);
-      // Source width should be < bitmap width
-      expect(sw).toBeLessThan(160);
+      surface.drawFilmstrip([makeArtifact(1000, 80, 45)], layout({ clipWidthPx: 60, tileWidthPx: 60 }));
+
+      expect(rect).toHaveBeenCalledWith(0, 0, 60, 40);
+      expect(clip).toHaveBeenCalledOnce();
+      expect(drawImage.mock.calls[0]).toHaveLength(3);
+      expect(drawImage.mock.calls[0][1]).toBe(-10);
+      expect(drawImage.mock.calls[0][2]).toBe(-2);
       surface.dispose();
     });
 
-    it('crops vertically when bitmap is taller than tile', () => {
-      const { canvas, drawImage } = makeCanvas();
+    it('uses fixed tile positions and clips the final overflowing tile', () => {
+      const { canvas, rect } = makeCanvas();
       const surface = new RasterSurface(canvas);
-      // Bitmap 80×160 (aspect 0.5), tile 60×40 (aspect 1.5) → tall bitmap → vertical crop
-      const artifact = makeArtifact(1000, 80, 160);
-      surface.drawFilmstrip([artifact], layout({ clipWidthPx: 60, tileWidthPx: 60 }));
-      const [, , sy, , sh] = drawImage.mock.calls[0] as number[];
-      expect(sy).toBeGreaterThan(0);
-      expect(sh).toBeLessThan(160);
+      surface.drawFilmstrip([makeArtifact(1000), makeArtifact(2000)], layout({ clipWidthPx: 130, tileWidthPx: 60 }));
+
+      expect(rect).toHaveBeenNthCalledWith(1, 0, 0, 60, 40);
+      expect(rect).toHaveBeenNthCalledWith(2, 60, 0, 60, 40);
+      expect(rect).toHaveBeenNthCalledWith(3, 120, 0, 60, 40);
       surface.dispose();
     });
   });

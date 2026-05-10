@@ -162,12 +162,7 @@ export const TimelineToolbar: React.FC = () => {
               <div ref={zoomRailRef} role="slider" tabIndex={0} aria-label="Timeline zoom" aria-valuemin={TIMELINE_ZOOM_MIN} aria-valuemax={TIMELINE_ZOOM_MAX} aria-valuenow={zoomLevel} aria-valuetext={`${zoomLevel.toFixed(2)} times, ${currentTierLabel}, ${temporalDetail.label}, ${cadenceLabel} samples`} onPointerDown={handleZoomPointerDown} onPointerMove={handleZoomPointerMove} onKeyDown={handleZoomKeyDown} className="group relative flex h-8 w-44 cursor-pointer touch-none items-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-surface">
                 <div className="relative mx-[11px] h-[7px] w-full overflow-hidden rounded-full bg-surface-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_0_1px_rgba(255,255,255,0.04),0_5px_14px_rgba(0,0,0,0.28)]">
                   {tierSegments.map(({ tier, left, width }) => (
-                    <div
-                      key={tier}
-                      aria-hidden
-                      className={`absolute top-0 h-full ${tierBandClass[tier]}`}
-                      style={{ left: `${left}%`, width: `${width}%` }}
-                    />
+                    <div key={tier} aria-hidden className={`absolute top-0 h-full ${tierBandClass[tier]}`} style={{ left: `${left}%`, width: `${width}%` }} />
                   ))}
                   <div className="relative h-full rounded-full bg-accent shadow-[0_0_16px_rgba(108,99,255,0.28)]" style={{ width: `${zoomProgress}%` }} />
                 </div>
@@ -177,8 +172,8 @@ export const TimelineToolbar: React.FC = () => {
               <Button variant="ghost" size="icon-sm" className={zoomButton} onClick={() => setZoom(clampTimelineZoom(zoomLevel + TIMELINE_ZOOM_STEP))} aria-label="Zoom in timeline">
                 <ZoomIn className="w-4 h-4" strokeWidth={2.6} />
               </Button>
-              <span data-testid="timeline-zoom-label" className="min-w-20 rounded-full bg-surface-raised px-2 py-1 text-right font-['Outfit'] text-[11px] font-semibold tabular-nums text-accent-soft ring-1 ring-accent/20">{zoomLevel.toFixed(2)}x · {currentTierLabel}</span>
-              <span data-testid="timeline-cadence-label" className="min-w-24 rounded-full bg-surface-raised/70 px-2 py-1 text-right font-['Outfit'] text-[10px] font-semibold tabular-nums text-text-muted ring-1 ring-border">{temporalDetail.label} · {cadenceLabel}</span>
+              {/* <span data-testid="timeline-zoom-label" className="min-w-20 rounded-full bg-surface-raised px-2 py-1 text-right font-['Outfit'] text-[11px] font-semibold tabular-nums text-accent-soft ring-1 ring-accent/20">{zoomLevel.toFixed(2)}x · {currentTierLabel}</span>
+              <span data-testid="timeline-cadence-label" className="min-w-24 rounded-full bg-surface-raised/70 px-2 py-1 text-right font-['Outfit'] text-[10px] font-semibold tabular-nums text-text-muted ring-1 ring-border">{temporalDetail.label} · {cadenceLabel}</span> */}
             </span>
           </Tool>
         </div>

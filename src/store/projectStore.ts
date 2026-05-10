@@ -72,10 +72,33 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     // Clear existing state first
     set({ project, mediaAssets: [] });
 
-    // Clear timeline state
+    // Clear timeline state and normalize clips on load
     import("./timelineStore").then(({ useTimelineStore }) => {
       useTimelineStore.setState(DEFAULT_TIMELINE_VIEW);
     });
+
+    // Normalize clips after a brief delay to ensure timeline store is ready
+    setTimeout(() => {
+      import("./timelineStore").then(({ useTimelineStore }) => {
+        import("../lib/timelineClip").then(({ normalizeClipTiming }) => {
+          const { clips } = useTimelineStore.getState();
+          const { mediaAssets } = get();
+
+          // Repair any clips with incorrect duration
+          const normalizedClips = clips.map((clip) => {
+            const asset = mediaAssets.find((a) => a.id === clip.mediaId);
+            return normalizeClipTiming(clip, asset);
+          });
+
+          // Update clips if any were normalized
+          const hasChanges = normalizedClips.some((nc, i) => nc.duration !== clips[i].duration || nc.trimIn !== clips[i].trimIn || nc.trimOut !== clips[i].trimOut);
+
+          if (hasChanges) {
+            useTimelineStore.setState({ clips: normalizedClips });
+          }
+        });
+      });
+    }, 100);
   },
 
   addMediaAsset: (asset) => {
@@ -132,7 +155,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       if (currentProject && currentProject.id === projectId) {
         set({ project: null, mediaAssets: [] });
       }
-
     } catch (error) {
       console.error("[DeleteProject] Failed to delete project:", error);
       throw error;
@@ -173,7 +195,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             await invoke("save_project", {
               projectData: JSON.stringify(projectData),
             });
-
           } catch (error) {
             console.error("[CloseProject] Failed to save project:", error);
           }
@@ -223,7 +244,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         await invoke("save_project", {
           projectData: JSON.stringify(projectData),
         });
-
       } catch (error) {
         console.error("[AutoSave] Failed to save project:", error);
       }

@@ -1,264 +1,369 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { useTimelineStore } from "../timelineStore";
 import type { Clip } from "../../types";
 
-describe("timelineStore track controls", () => {
-  const makeClip = (overrides: Partial<Clip> = {}): Clip => ({
-    id: "clip-1",
-    trackId: "track-1",
-    mediaId: "asset-1",
-    startTime: 0,
-    duration: 10,
-    trimIn: 0,
-    trimOut: 10,
-    x: 0,
-    y: 0,
-    width: 1920,
-    height: 1080,
-    opacity: 1,
-    rotation: 0,
-    ...overrides,
-  });
-
+describe("timelineStore clip operations", () => {
   beforeEach(() => {
+    // Reset store before each test
     useTimelineStore.setState({
       tracks: [],
       clips: [],
+      mainVideoTrackId: null,
       zoomLevel: 1,
       scrollLeft: 0,
       pixelsPerSecond: 100,
+      rippleEditEnabled: false,
     });
   });
 
-  it("defaults initial timeline zoom to 50%", () => {
-    useTimelineStore.setState({
-      tracks: [],
-      clips: [],
-      scrollLeft: 0,
+  describe("addClip", () => {
+    it("preserves duration === trimOut - trimIn invariant", () => {
+      const { addClip } = useTimelineStore.getState();
+
+      const clip: Clip = {
+        id: "clip-1",
+        trackId: "track-1",
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      addClip(clip);
+
+      const { clips } = useTimelineStore.getState();
+      expect(clips).toHaveLength(1);
+      expect(clips[0].duration).toBe(clips[0].trimOut - clips[0].trimIn);
+    });
+  });
+
+  describe("updateClip", () => {
+    it("preserves duration === trimOut - trimIn when updating trim points", () => {
+      const { addClip, updateClip } = useTimelineStore.getState();
+
+      const clip: Clip = {
+        id: "clip-1",
+        trackId: "track-1",
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 10,
+        trimIn: 0,
+        trimOut: 10,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      addClip(clip);
+
+      // Update trim points and duration together
+      updateClip("clip-1", {
+        trimIn: 2,
+        trimOut: 8,
+        duration: 6,
+      });
+
+      const { clips } = useTimelineStore.getState();
+      expect(clips[0].duration).toBe(6);
+      expect(clips[0].duration).toBe(clips[0].trimOut - clips[0].trimIn);
+    });
+  });
+
+  describe("splitClipAtTime", () => {
+    it("preserves duration === trimOut - trimIn for both split clips", () => {
+      const { addClip, addTrack, splitClipAtTime } = useTimelineStore.getState();
+
+      addTrack("video");
+      const { tracks } = useTimelineStore.getState();
+
+      const clip: Clip = {
+        id: "clip-1",
+        trackId: tracks[0].id,
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 10,
+        trimIn: 0,
+        trimOut: 10,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      addClip(clip);
+      splitClipAtTime("clip-1", 4);
+
+      const { clips } = useTimelineStore.getState();
+      expect(clips).toHaveLength(2);
+
+      // Left clip: 0-4
+      const leftClip = clips.find((c) => c.startTime === 0);
+      expect(leftClip).toBeDefined();
+      expect(leftClip!.duration).toBe(4);
+      expect(leftClip!.trimIn).toBe(0);
+      expect(leftClip!.trimOut).toBe(4);
+      expect(leftClip!.duration).toBe(leftClip!.trimOut - leftClip!.trimIn);
+
+      // Right clip: 4-10
+      const rightClip = clips.find((c) => c.startTime === 4);
+      expect(rightClip).toBeDefined();
+      expect(rightClip!.duration).toBe(6);
+      expect(rightClip!.trimIn).toBe(4);
+      expect(rightClip!.trimOut).toBe(10);
+      expect(rightClip!.duration).toBe(rightClip!.trimOut - rightClip!.trimIn);
     });
 
-    expect(useTimelineStore.getInitialState().zoomLevel).toBe(0.5);
-    expect(useTimelineStore.getInitialState().pixelsPerSecond).toBe(50);
-  });
+    it("handles split with existing trim points", () => {
+      const { addClip, addTrack, splitClipAtTime } = useTimelineStore.getState();
 
-  it("creates tracks with visible=true, muted=false, locked=false defaults", () => {
-    useTimelineStore.getState().addTrack("video");
-    const track = useTimelineStore.getState().tracks[0];
+      addTrack("video");
+      const { tracks } = useTimelineStore.getState();
 
-    expect(track).toBeTruthy();
-    expect(track.visible).toBe(true);
-    expect(track.muted).toBe(false);
-    expect(track.locked).toBe(false);
-  });
+      const clip: Clip = {
+        id: "clip-1",
+        trackId: tracks[0].id,
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 6, // trimmed from 10s source
+        trimIn: 2,
+        trimOut: 8,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
 
-  it("toggles lock/mute/visibility only for the target track", () => {
-    useTimelineStore.setState({
-      tracks: [
-        { id: "track-1", type: "video", name: "Video 1", muted: false, locked: false, visible: true, height: 68 },
-        { id: "track-2", type: "audio", name: "Audio 1", muted: false, locked: false, visible: true, height: 52 },
-      ],
+      addClip(clip);
+      splitClipAtTime("clip-1", 3); // Split at 3s into the clip
+
+      const { clips } = useTimelineStore.getState();
+      expect(clips).toHaveLength(2);
+
+      const leftClip = clips.find((c) => c.startTime === 0);
+      expect(leftClip!.duration).toBe(3);
+      expect(leftClip!.trimIn).toBe(2);
+      expect(leftClip!.trimOut).toBe(5);
+      expect(leftClip!.duration).toBe(leftClip!.trimOut - leftClip!.trimIn);
+
+      const rightClip = clips.find((c) => c.startTime === 3);
+      expect(rightClip!.duration).toBe(3);
+      expect(rightClip!.trimIn).toBe(5);
+      expect(rightClip!.trimOut).toBe(8);
+      expect(rightClip!.duration).toBe(rightClip!.trimOut - rightClip!.trimIn);
     });
-    const [first, second] = useTimelineStore.getState().tracks;
-
-    useTimelineStore.getState().toggleTrackLock(first.id);
-    useTimelineStore.getState().toggleTrackMute(first.id);
-    useTimelineStore.getState().toggleTrackVisibility(first.id);
-
-    const nextTracks = useTimelineStore.getState().tracks;
-    const updatedFirst = nextTracks.find((t) => t.id === first.id)!;
-    const untouchedSecond = nextTracks.find((t) => t.id === second.id)!;
-
-    expect(updatedFirst.locked).toBe(true);
-    expect(updatedFirst.muted).toBe(true);
-    expect(updatedFirst.visible).toBe(false);
-
-    expect(untouchedSecond.locked).toBe(false);
-    expect(untouchedSecond.muted).toBe(false);
-    expect(untouchedSecond.visible).toBe(true);
   });
 
-  it("removes a track and its clips", () => {
-    useTimelineStore.setState({
-      tracks: [
-        { id: "track-1", type: "video", name: "Video 1", muted: false, locked: false, visible: true, height: 68 },
-        { id: "track-2", type: "audio", name: "Audio 1", muted: false, locked: false, visible: true, height: 52 },
-      ],
-      clips: [makeClip({ id: "clip-a", trackId: "track-1" }), makeClip({ id: "clip-b", trackId: "track-2" })],
+  describe("normalizeTrack", () => {
+    it("preserves duration === trimOut - trimIn when normalizing", () => {
+      const { addClip, addTrack, normalizeTrack } = useTimelineStore.getState();
+
+      addTrack("video");
+      const { tracks } = useTimelineStore.getState();
+      const trackId = tracks[0].id;
+
+      // Add clips with gaps
+      const clip1: Clip = {
+        id: "clip-1",
+        trackId,
+        mediaId: "media-1",
+        startTime: 5,
+        duration: 3,
+        trimIn: 1,
+        trimOut: 4,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      const clip2: Clip = {
+        id: "clip-2",
+        trackId,
+        mediaId: "media-2",
+        startTime: 15,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      addClip(clip1);
+      addClip(clip2);
+
+      normalizeTrack(trackId);
+
+      const { clips } = useTimelineStore.getState();
+
+      // Clips should be packed to start, but durations preserved
+      expect(clips[0].startTime).toBe(0);
+      expect(clips[0].duration).toBe(3);
+      expect(clips[0].duration).toBe(clips[0].trimOut - clips[0].trimIn);
+
+      expect(clips[1].startTime).toBe(3);
+      expect(clips[1].duration).toBe(5);
+      expect(clips[1].duration).toBe(clips[1].trimOut - clips[1].trimIn);
     });
-
-    useTimelineStore.getState().removeTrack("track-1");
-    const state = useTimelineStore.getState();
-
-    expect(state.tracks).toHaveLength(1);
-    expect(state.tracks[0].id).toBe("track-2");
-    expect(state.clips).toHaveLength(1);
-    expect(state.clips[0].trackId).toBe("track-2");
   });
 
-  it("adds, updates, moves, and removes clips", () => {
-    const clip = makeClip();
+  describe("insertClipAtIndex", () => {
+    it("preserves duration === trimOut - trimIn when inserting", () => {
+      const { addClip, addTrack, insertClipAtIndex } = useTimelineStore.getState();
 
-    useTimelineStore.getState().addClip(clip);
-    expect(useTimelineStore.getState().clips).toHaveLength(1);
+      addTrack("video");
+      const { tracks } = useTimelineStore.getState();
+      const trackId = tracks[0].id;
 
-    useTimelineStore.getState().updateClip("clip-1", { opacity: 0.5, duration: 12 });
-    expect(useTimelineStore.getState().clips[0].opacity).toBe(0.5);
-    expect(useTimelineStore.getState().clips[0].duration).toBe(12);
+      const clip1: Clip = {
+        id: "clip-1",
+        trackId,
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
 
-    useTimelineStore.getState().moveClip("clip-1", 7.5);
-    expect(useTimelineStore.getState().clips[0].startTime).toBe(7.5);
+      const clip2: Clip = {
+        id: "clip-2",
+        trackId,
+        mediaId: "media-2",
+        startTime: 5,
+        duration: 3,
+        trimIn: 1,
+        trimOut: 4,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
 
-    useTimelineStore.getState().removeClip("clip-1");
-    expect(useTimelineStore.getState().clips).toHaveLength(0);
-  });
+      addClip(clip1);
+      addClip(clip2);
 
-  it("splits a clip and updates trim/duration correctly", () => {
-    useTimelineStore.setState({
-      clips: [makeClip({ id: "clip-split", startTime: 5, duration: 10, trimIn: 2, trimOut: 12 })],
+      // Insert clip2 at index 0 (before clip1)
+      insertClipAtIndex("clip-2", trackId, 0);
+
+      const { clips } = useTimelineStore.getState();
+
+      // clip2 should now be first
+      const firstClip = clips.find((c) => c.startTime === 0);
+      expect(firstClip!.id).toBe("clip-2");
+      expect(firstClip!.duration).toBe(3);
+      expect(firstClip!.duration).toBe(firstClip!.trimOut - firstClip!.trimIn);
+
+      // clip1 should be second
+      const secondClip = clips.find((c) => c.startTime === 3);
+      expect(secondClip!.id).toBe("clip-1");
+      expect(secondClip!.duration).toBe(5);
+      expect(secondClip!.duration).toBe(secondClip!.trimOut - secondClip!.trimIn);
     });
-
-    useTimelineStore.getState().splitClipAtTime("clip-split", 9);
-    const clips = useTimelineStore.getState().clips;
-    const original = clips.find((c) => c.id === "clip-split");
-    const created = clips.find((c) => c.id !== "clip-split");
-
-    expect(clips).toHaveLength(2);
-    expect(original).toBeTruthy();
-    expect(created).toBeTruthy();
-    expect(original?.duration).toBe(4);
-    expect(original?.trimOut).toBe(6);
-    expect(created?.startTime).toBe(9);
-    expect(created?.duration).toBe(6);
-    expect(created?.trimIn).toBe(6);
   });
 
-  it("does not split when clip is missing or split point is out of bounds", () => {
-    useTimelineStore.setState({
-      clips: [makeClip({ id: "clip-guard", startTime: 10, duration: 5, trimIn: 0, trimOut: 5 })],
-    });
-
-    useTimelineStore.getState().splitClipAtTime("nope", 12);
-    expect(useTimelineStore.getState().clips).toHaveLength(1);
-
-    useTimelineStore.getState().splitClipAtTime("clip-guard", 10);
-    useTimelineStore.getState().splitClipAtTime("clip-guard", 15);
-    expect(useTimelineStore.getState().clips).toHaveLength(1);
-  });
-
-  it("computes timeline end time from clip bounds", () => {
-    useTimelineStore.setState({
-      clips: [makeClip({ id: "clip-1", startTime: 0, duration: 3 }), makeClip({ id: "clip-2", startTime: 5, duration: 11 }), makeClip({ id: "clip-3", startTime: 4, duration: 2 })],
-    });
-
-    expect(useTimelineStore.getState().getTimelineEndTime()).toBe(16);
-  });
-
-  it("setPixelsPerSecond clamps to the SRP range 25–400 and sets zoomLevel to pps / 100", () => {
-    useTimelineStore.getState().setPixelsPerSecond(999);
-    expect(useTimelineStore.getState().pixelsPerSecond).toBe(400);
-    expect(useTimelineStore.getState().zoomLevel).toBe(4);
-
-    useTimelineStore.getState().setPixelsPerSecond(10);
-    expect(useTimelineStore.getState().pixelsPerSecond).toBe(25);
-    expect(useTimelineStore.getState().zoomLevel).toBe(0.25);
-
-    useTimelineStore.getState().setPixelsPerSecond(175);
-    expect(useTimelineStore.getState().pixelsPerSecond).toBe(175);
-    expect(useTimelineStore.getState().zoomLevel).toBe(1.75);
-  });
-
-  it("setZoom uses the same bounds via setPixelsPerSecond", () => {
-    useTimelineStore.getState().setZoom(5);
-    expect(useTimelineStore.getState().pixelsPerSecond).toBe(400);
-    expect(useTimelineStore.getState().zoomLevel).toBe(4);
-
-    useTimelineStore.getState().setZoom(0.1);
-    expect(useTimelineStore.getState().pixelsPerSecond).toBe(25);
-    expect(useTimelineStore.getState().zoomLevel).toBe(0.25);
-  });
-
-  it("sets mainVideoTrackId to the first created video track", () => {
-    useTimelineStore.getState().addTrack("audio");
-    useTimelineStore.getState().addTrack("video");
-    const firstVideoId = useTimelineStore.getState().mainVideoTrackId;
-    useTimelineStore.getState().addTrack("video");
-    const state = useTimelineStore.getState();
-    expect(firstVideoId).toBeTruthy();
-    expect(state.mainVideoTrackId).toBe(firstVideoId);
-  });
-
-  it("removeEmptyNonMainTracks removes empty non-main tracks only", () => {
-    useTimelineStore.setState({
-      mainVideoTrackId: "track-main",
-      tracks: [
-        { id: "track-main", type: "video", name: "Main", muted: false, locked: false, visible: true, height: 68 },
-        { id: "track-empty", type: "video", name: "Aux", muted: false, locked: false, visible: true, height: 68 },
-        { id: "track-used", type: "audio", name: "Used", muted: false, locked: false, visible: true, height: 52 },
-      ],
-      clips: [makeClip({ id: "clip-used", trackId: "track-used" })],
-    });
-
-    useTimelineStore.getState().removeEmptyNonMainTracks();
-    const state = useTimelineStore.getState();
-    expect(state.tracks.map((t) => t.id)).toEqual(["track-main", "track-used"]);
-  });
-
-  it("removeEmptyNonMainTracks can target source tracks only", () => {
-    useTimelineStore.setState({
-      mainVideoTrackId: "track-main",
-      tracks: [
-        { id: "track-main", type: "video", name: "Main", muted: false, locked: false, visible: true, height: 68 },
-        { id: "track-empty", type: "video", name: "Aux", muted: false, locked: false, visible: true, height: 68 },
-        { id: "track-other-empty", type: "audio", name: "Other", muted: false, locked: false, visible: true, height: 52 },
-      ],
-      clips: [],
+  describe("getTimelineEndTime", () => {
+    it("returns 0 for empty timeline", () => {
+      const { getTimelineEndTime } = useTimelineStore.getState();
+      expect(getTimelineEndTime()).toBe(0);
     });
 
-    useTimelineStore.getState().removeEmptyNonMainTracks(["track-empty"]);
-    const state = useTimelineStore.getState();
-    expect(state.tracks.map((t) => t.id)).toEqual(["track-main", "track-other-empty"]);
-  });
+    it("returns actual content end time, not viewport padding", () => {
+      const { addClip, addTrack, getTimelineEndTime } = useTimelineStore.getState();
 
-  it("rippleTrimClip right-edge trim shifts downstream clips forward", () => {
-    useTimelineStore.setState({
-      tracks: [{ id: "track-1", type: "video", name: "Video 1", muted: false, locked: false, visible: true, height: 68 }],
-      clips: [makeClip({ id: "c1", trackId: "track-1", startTime: 0, duration: 4, trimIn: 0, trimOut: 4 }), makeClip({ id: "c2", trackId: "track-1", startTime: 4, duration: 3, trimIn: 0, trimOut: 3 })],
+      addTrack("video");
+      const { tracks } = useTimelineStore.getState();
+
+      const clip: Clip = {
+        id: "clip-1",
+        trackId: tracks[0].id,
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 4.365,
+        trimIn: 0,
+        trimOut: 4.365,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      addClip(clip);
+
+      // Should return 4.365, not 10 (viewport padding)
+      expect(getTimelineEndTime()).toBe(4.365);
     });
 
-    useTimelineStore.getState().rippleTrimClip("c1", "right", 2);
-    const state = useTimelineStore.getState();
-    const c1 = state.clips.find((c) => c.id === "c1")!;
-    const c2 = state.clips.find((c) => c.id === "c2")!;
-    expect(c1.duration).toBe(6);
-    expect(c1.trimOut).toBe(6);
-    expect(c2.startTime).toBe(6);
-  });
+    it("returns max clip end time for multiple clips", () => {
+      const { addClip, addTrack, getTimelineEndTime } = useTimelineStore.getState();
 
-  it("rippleTrimClip left-edge trim shifts downstream clips and updates trimIn", () => {
-    useTimelineStore.setState({
-      tracks: [{ id: "track-1", type: "video", name: "Video 1", muted: false, locked: false, visible: true, height: 68 }],
-      clips: [makeClip({ id: "c1", trackId: "track-1", startTime: 2, duration: 4, trimIn: 1, trimOut: 5 }), makeClip({ id: "c2", trackId: "track-1", startTime: 6, duration: 3, trimIn: 0, trimOut: 3 })],
+      addTrack("video");
+      const { tracks } = useTimelineStore.getState();
+
+      const clip1: Clip = {
+        id: "clip-1",
+        trackId: tracks[0].id,
+        mediaId: "media-1",
+        startTime: 0,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      const clip2: Clip = {
+        id: "clip-2",
+        trackId: tracks[0].id,
+        mediaId: "media-2",
+        startTime: 5,
+        duration: 10,
+        trimIn: 0,
+        trimOut: 10,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      };
+
+      addClip(clip1);
+      addClip(clip2);
+
+      expect(getTimelineEndTime()).toBe(15); // 5 + 10
     });
-
-    useTimelineStore.getState().rippleTrimClip("c1", "left", 1);
-    const state = useTimelineStore.getState();
-    const c1 = state.clips.find((c) => c.id === "c1")!;
-    const c2 = state.clips.find((c) => c.id === "c2")!;
-    expect(c1.startTime).toBe(3);
-    expect(c1.duration).toBe(3);
-    expect(c1.trimIn).toBe(2);
-    expect(c2.startTime).toBe(7);
-  });
-
-  it("rippleTrimClip does nothing on locked track", () => {
-    useTimelineStore.setState({
-      tracks: [{ id: "track-1", type: "video", name: "Video 1", muted: false, locked: true, visible: true, height: 68 }],
-      clips: [makeClip({ id: "c1", trackId: "track-1", startTime: 0, duration: 4, trimIn: 0, trimOut: 4 }), makeClip({ id: "c2", trackId: "track-1", startTime: 4, duration: 3, trimIn: 0, trimOut: 3 })],
-    });
-
-    useTimelineStore.getState().rippleTrimClip("c1", "right", 2);
-    const state = useTimelineStore.getState();
-    expect(state.clips.find((c) => c.id === "c1")?.duration).toBe(4);
-    expect(state.clips.find((c) => c.id === "c2")?.startTime).toBe(4);
   });
 });

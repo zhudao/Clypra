@@ -79,27 +79,27 @@ interface AtlasCell {
   vh: number;
 }
 
-function packAtlas(artifacts: readonly TransportArtifact[], cols: number): { atlasW: number; atlasH: number; cells: AtlasCell[] } {
-  if (artifacts.length === 0) return { atlasW: 1, atlasH: 1, cells: [] };
+function packAtlas(artifacts: readonly TransportArtifact[], cols: number): { atlasW: number; atlasH: number; cellW: number; cellH: number; cells: AtlasCell[] } {
+  if (artifacts.length === 0) return { atlasW: 1, atlasH: 1, cellW: 1, cellH: 1, cells: [] };
 
-  const cellW = artifacts[0].width;
-  const cellH = artifacts[0].height;
+  const cellW = Math.max(...artifacts.map(artifact => artifact.width));
+  const cellH = Math.max(...artifacts.map(artifact => artifact.height));
   const rows = Math.ceil(artifacts.length / cols);
   const atlasW = nextPow2(cols * cellW);
   const atlasH = nextPow2(rows * cellH);
 
-  const cells: AtlasCell[] = artifacts.map((_, i) => {
+  const cells: AtlasCell[] = artifacts.map((artifact, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
     return {
       u: (col * cellW) / atlasW,
       v: (row * cellH) / atlasH,
-      uw: cellW / atlasW,
-      vh: cellH / atlasH,
+      uw: artifact.width / atlasW,
+      vh: artifact.height / atlasH,
     };
   });
 
-  return { atlasW, atlasH, cells };
+  return { atlasW, atlasH, cellW, cellH, cells };
 }
 
 // ─── WebGLRasterSurface ───────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ export class WebGLRasterSurface {
 
     // ── Upload atlas ────────────────────────────────────────────────────────
     const cols = Math.min(artifacts.length, 16); // max 16 per row
-    const { atlasW, atlasH, cells } = packAtlas(artifacts, cols);
+    const { atlasW, atlasH, cellW, cellH, cells } = packAtlas(artifacts, cols);
 
     gl.bindTexture(gl.TEXTURE_2D, this._atlasTexture);
     // Allocate atlas
@@ -206,54 +206,67 @@ export class WebGLRasterSurface {
       const art = artifacts[i];
       const col = i % cols;
       const row = Math.floor(i / cols);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, col * art.width, row * art.height, gl.RGBA, gl.UNSIGNED_BYTE, art.bitmap);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, col * cellW, row * cellH, gl.RGBA, gl.UNSIGNED_BYTE, art.bitmap);
     }
 
     // ── Build per-tile geometry ─────────────────────────────────────────────
-    // 6 vertices per tile, each vertex: [posRect(4), uvRect(4)] = 8 floats.
-    // gl_VertexID expands the repeated rect payload into the quad corners.
+    // Destination rects are native bitmap pixel crops clipped into fixed tile
+    // slots. This avoids stretching low-resolution artifacts across the slot.
     const FLOATS_PER_VERTEX = 8;
     const VERTS_PER_TILE = 6;
-    const buf = new Float32Array(tileCount * VERTS_PER_TILE * FLOATS_PER_VERTEX);
-
     const step = artifacts.length > 1 ? (artifacts.length - 1) / (tileCount - 1) : 0;
-    const tileW_cs = 2.0 / tileCount; // clip-space tile width
+    const tileW = Math.round(targetTileW * dpr);
+    const tileH = backingH;
+    const rects: Array<{ pos: [number, number, number, number]; uv: [number, number, number, number] }> = [];
 
     for (let i = 0; i < tileCount; i++) {
       const artIdx = Math.min(Math.round(i * step), artifacts.length - 1);
       const cell = cells[artIdx];
-      const x_cs = -1.0 + i * tileW_cs; // clip-space left edge
-
-      // Cover-fit UV crop (match RasterSurface cover-fit behaviour)
       const art = artifacts[artIdx];
-      const bmpAspect = art.width / art.height;
-      const tileAspect = clipWidthPx / tileCount / stripHeightPx;
-      let u0 = cell.u,
-        v0 = cell.v,
-        uw = cell.uw,
-        vh = cell.vh;
-      if (bmpAspect > tileAspect) {
-        const cropFraction = tileAspect / bmpAspect;
-        const uOffset = (cell.uw * (1 - cropFraction)) / 2;
-        u0 += uOffset;
-        uw = cell.uw * cropFraction;
-      } else if (bmpAspect < tileAspect) {
-        const cropFraction = bmpAspect / tileAspect;
-        const vOffset = (cell.vh * (1 - cropFraction)) / 2;
-        v0 += vOffset;
-        vh = cell.vh * cropFraction;
-      }
+      const tileX = i * tileW;
+      const drawX = Math.round(tileX + (tileW - art.width) / 2);
+      const drawY = Math.round((tileH - art.height) / 2);
 
+      const left = Math.max(tileX, drawX, 0);
+      const top = Math.max(0, drawY);
+      const right = Math.min(tileX + tileW, drawX + art.width, backingW);
+      const bottom = Math.min(tileH, drawY + art.height, backingH);
+      const dstW = right - left;
+      const dstH = bottom - top;
+      if (dstW <= 0 || dstH <= 0) continue;
+
+      const srcX = left - drawX;
+      const srcY = top - drawY;
+      const u0 = cell.u + srcX / atlasW;
+      const v0 = cell.v + srcY / atlasH;
+      const uw = dstW / atlasW;
+      const vh = dstH / atlasH;
+
+      rects.push({
+        pos: [
+          (left / backingW) * 2 - 1,
+          1 - (top / backingH) * 2,
+          (dstW / backingW) * 2,
+          (dstH / backingH) * 2,
+        ],
+        uv: [u0, v0, uw, vh],
+      });
+    }
+
+    const buf = new Float32Array(rects.length * VERTS_PER_TILE * FLOATS_PER_VERTEX);
+
+    for (let i = 0; i < rects.length; i++) {
+      const rect = rects[i];
       for (let v = 0; v < VERTS_PER_TILE; v++) {
         const off = (i * VERTS_PER_TILE + v) * FLOATS_PER_VERTEX;
-        buf[off + 0] = x_cs; // posRect.x
-        buf[off + 1] = 1.0; // posRect.y (top of clip-space)
-        buf[off + 2] = tileW_cs; // posRect.w
-        buf[off + 3] = 2.0; // posRect.h (full clip-space height)
-        buf[off + 4] = u0;
-        buf[off + 5] = v0;
-        buf[off + 6] = uw;
-        buf[off + 7] = vh;
+        buf[off + 0] = rect.pos[0];
+        buf[off + 1] = rect.pos[1];
+        buf[off + 2] = rect.pos[2];
+        buf[off + 3] = rect.pos[3];
+        buf[off + 4] = rect.uv[0];
+        buf[off + 5] = rect.uv[1];
+        buf[off + 6] = rect.uv[2];
+        buf[off + 7] = rect.uv[3];
       }
     }
 
@@ -274,7 +287,7 @@ export class WebGLRasterSurface {
     gl.bindTexture(gl.TEXTURE_2D, this._atlasTexture);
 
     // Single draw call for ALL tiles
-    gl.drawArrays(gl.TRIANGLES, 0, tileCount * VERTS_PER_TILE);
+    gl.drawArrays(gl.TRIANGLES, 0, rects.length * VERTS_PER_TILE);
 
     gl.bindVertexArray(null);
   }

@@ -6,14 +6,14 @@ import { SpatialTier } from '../types';
 
 const eid = (s: string) => s as RenderEpochId;
 
-function makeArtifact(timestampMs: number): TransportArtifact {
+function makeArtifact(timestampMs: number, width = 80, height = 45): TransportArtifact {
   return {
     frameId: `f-${timestampMs}`,
     contentHash: `h-${timestampMs}`,
     spatialTier: SpatialTier.L0,
-    bitmap: { width: 80, height: 45, close: vi.fn() } as unknown as ImageBitmap,
-    width: 80,
-    height: 45,
+    bitmap: { width, height, close: vi.fn() } as unknown as ImageBitmap,
+    width,
+    height,
     timestampMs,
     epochId: eid('epoch-1'),
     source: 'fresh-decode',
@@ -106,5 +106,61 @@ describe('WebGLRasterSurface', () => {
     expect(gl.enableVertexAttribArray).toHaveBeenCalledWith(1);
     expect(gl.enableVertexAttribArray).not.toHaveBeenCalledWith(-1);
     expect(gl.vertexAttribPointer).not.toHaveBeenCalledWith(-1, expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
+  });
+
+  it('packs mixed-size artifacts into fixed atlas cells without overlap', () => {
+    const canvas = { width: 0, height: 0 } as HTMLCanvasElement;
+    const gl = makeGl();
+    const surface = new WebGLRasterSurface(canvas, gl);
+
+    surface.drawFilmstrip([makeArtifact(1000, 80, 45), makeArtifact(2000, 120, 68)], {
+      clipWidthPx: 120,
+      stripHeightPx: 40,
+      dpr: 1,
+      tileWidthPx: 60,
+    });
+
+    expect(gl.texSubImage2D).toHaveBeenNthCalledWith(
+      1,
+      gl.TEXTURE_2D,
+      0,
+      0,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      expect.anything(),
+    );
+    expect(gl.texSubImage2D).toHaveBeenNthCalledWith(
+      2,
+      gl.TEXTURE_2D,
+      0,
+      120,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      expect.anything(),
+    );
+  });
+
+  it('accepts portrait artifacts without stretching them to fill tile width', () => {
+    const canvas = { width: 0, height: 0 } as HTMLCanvasElement;
+    const gl = makeGl();
+    const surface = new WebGLRasterSurface(canvas, gl);
+
+    surface.drawFilmstrip([makeArtifact(1000, 90, 160)], {
+      clipWidthPx: 96,
+      stripHeightPx: 40,
+      dpr: 1,
+      tileWidthPx: 96,
+    });
+
+    const vertices = vi.mocked(gl.bufferData).mock.calls[0][1] as Float32Array;
+
+    // The portrait bitmap is centered and clipped vertically. Its destination
+    // width remains 90px inside a 96px tile instead of being stretched to 96px.
+    expect(vertices[0]).toBeCloseTo((3 / 96) * 2 - 1, 5);
+    expect(vertices[2]).toBeCloseTo((90 / 96) * 2, 5);
+    expect(vertices[6]).toBeCloseTo(90 / 128, 5);
+    expect(vertices[7]).toBeCloseTo(40 / 256, 5);
   });
 });
