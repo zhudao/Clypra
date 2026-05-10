@@ -109,33 +109,20 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
     // Higher-tier arrivals naturally replace lower-tier entries for the same timestamp.
     const accumulated = new Map<string, TransportArtifact>();
 
-    // Progressive tier sequence: always start at L0 for fast-paint.
-    // Scrubbing returns early above (line 104), so here we're always Idle/Converging/Zooming.
-    // Upgrade all the way to the SRP-committed tier.
-    const startTier = SpatialTier.L0;
-    const targetTier = spatialTier;
+    // RAF-batched flush: coalesce all artifacts arriving within the same frame
+    // into a single setArtifacts() call. Without this, every artifact triggers
+    // a React re-render → full canvas redraw, causing visible flickering as
+    // L0/L1/L2/L3 thumbnails replace each other one-by-one.
+    let rafId: number | null = null;
+    let flushDirty = false;
 
-    cancelRef.current = requestProgressiveTiers({
-      videoPath,
-      timestampsMs,
-      startTier,
-      targetTier,
-      epochId,
-      clipId,
-      onArtifact: (artifact) => {
-        // Log first artifact to diagnose stretching
-        if (accumulated.size === 0) {
-          console.log("[Filmstrip] First artifact received:", {
-            width: artifact.width,
-            height: artifact.height,
-            bitmapWidth: artifact.bitmap.width,
-            bitmapHeight: artifact.bitmap.height,
-            spatialTier: artifact.spatialTier,
-            timestampMs: artifact.timestampMs,
-          });
-        }
-        const key = `${artifact.timestampMs}:${artifact.spatialTier}`;
-        accumulated.set(key, artifact);
+    const scheduleFlush = () => {
+      if (rafId !== null) return; // already scheduled
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (!flushDirty) return;
+        flushDirty = false;
+
         // For each timestamp, keep only the highest tier received so far
         const bestByTime = new Map<number, TransportArtifact>();
         for (const a of accumulated.values()) {
@@ -147,11 +134,55 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
         const sorted = Array.from(bestByTime.values()).sort((a, b) => a.timestampMs - b.timestampMs);
         setArtifacts(sorted);
         setIsLoading(false);
+      });
+    };
+
+    // Progressive tier sequence respects current zoom level for priority rendering.
+    // When zoomed in, start at the appropriate spatial tier to avoid unnecessary low‑tier flicker.
+    const startTier = spatialTier;
+    const targetTier = spatialTier;
+
+    cancelRef.current = requestProgressiveTiers({
+      videoPath,
+      timestampsMs,
+      startTier,
+      targetTier,
+      epochId,
+      clipId,
+      onArtifact: (artifact) => {
+        const key = `${artifact.timestampMs}:${artifact.spatialTier}`;
+        accumulated.set(key, artifact);
+        flushDirty = true;
+        scheduleFlush();
       },
-      onComplete: () => setIsLoading(false),
+      onComplete: () => {
+        // Final flush — ensure all remaining artifacts are committed
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        // Synchronous final flush to guarantee nothing is dropped
+        const bestByTime = new Map<number, TransportArtifact>();
+        for (const a of accumulated.values()) {
+          const existing = bestByTime.get(a.timestampMs);
+          if (!existing || a.spatialTier > existing.spatialTier) {
+            bestByTime.set(a.timestampMs, a);
+          }
+        }
+        const sorted = Array.from(bestByTime.values()).sort((a, b) => a.timestampMs - b.timestampMs);
+        setArtifacts(sorted);
+        setIsLoading(false);
+      },
     });
 
-    return () => disposePrev();
+    return () => {
+      // Cancel pending RAF flush before cancelling requests
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      disposePrev();
+    };
   }, [
     enabled,
     videoPath,

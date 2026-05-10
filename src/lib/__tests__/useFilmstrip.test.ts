@@ -43,6 +43,17 @@ vi.mock('../timelineUtils', () => ({
 // Import AFTER mocks are registered
 const { useFilmstrip } = await import('../useFilmstrip');
 
+// ─── RAF test control ────────────────────────────────────────────────────────
+
+let rafCallbacks = new Map<number, FrameRequestCallback>();
+let nextRafId = 1;
+
+function flushRaf() {
+  const callbacks = Array.from(rafCallbacks.values());
+  rafCallbacks.clear();
+  callbacks.forEach((cb) => cb(performance.now()));
+}
+
 // ─── Default render state ─────────────────────────────────────────────────────
 
 function makeRenderState(overrides = {}) {
@@ -91,9 +102,22 @@ describe('useFilmstrip', () => {
       selector({ runtime: {} })
     );
     mockRequestProgressiveTiers.mockImplementation(() => vi.fn());
+    rafCallbacks = new Map();
+    nextRafId = 1;
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextRafId++;
+      rafCallbacks.set(id, cb);
+      return id;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn((id: number) => {
+      rafCallbacks.delete(id);
+    }));
   });
 
-  afterEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
 
   // ── Basic enable/disable ───────────────────────────────────────────────────
 
@@ -146,6 +170,7 @@ describe('useFilmstrip', () => {
 
     act(() => {
       capturedOnArtifact?.(makeArtifact(1000));
+      flushRaf();
     });
 
     expect(result.current.isFallback).toBe(false);
@@ -167,6 +192,7 @@ describe('useFilmstrip', () => {
       capturedOnArtifact?.(makeArtifact(3000));
       capturedOnArtifact?.(makeArtifact(1000));
       capturedOnArtifact?.(makeArtifact(2000));
+      flushRaf();
     });
 
     const times = result.current.artifacts.map(a => a.timestampMs);
@@ -186,6 +212,7 @@ describe('useFilmstrip', () => {
     act(() => {
       capturedOnArtifact?.(makeArtifact(1000, SpatialTier.L0)); // L0 first
       capturedOnArtifact?.(makeArtifact(1000, SpatialTier.L1)); // L1 replaces
+      flushRaf();
     });
 
     // Still just one entry per timestamp
@@ -267,5 +294,26 @@ describe('useFilmstrip', () => {
     unmount();
 
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('cancels pending artifact flush on unmount', () => {
+    let capturedOnArtifact: ((a: TransportArtifact) => void) | null = null;
+    (mockRequestProgressiveTiers as unknown as { mockImplementation: (fn: (opts: ProgressiveTierRequest) => ReturnType<typeof vi.fn>) => void })
+      .mockImplementation((opts: ProgressiveTierRequest) => {
+        capturedOnArtifact = opts.onArtifact;
+        return vi.fn();
+      });
+
+    const { result, unmount } = renderHook(() => useFilmstrip(defaultOpts()));
+
+    act(() => {
+      capturedOnArtifact?.(makeArtifact(1000));
+    });
+    expect(rafCallbacks.size).toBe(1);
+
+    unmount();
+
+    act(() => flushRaf());
+    expect(result.current.artifacts).toHaveLength(0);
   });
 });
