@@ -1,8 +1,8 @@
 [package]
-name = "tauri-app"
+name = "clypra"
 version = "0.1.0-alpha.1"
-description = "A Tauri App"
-authors = ["you"]
+description = "A modern, open-source video editor with native performance and GPU-accelerated preview"
+authors = ["Clypra Contributors"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
