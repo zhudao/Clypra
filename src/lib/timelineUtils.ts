@@ -1,12 +1,13 @@
 // Re-export new render engine types (non-breaking alongside existing DENSITY_CONFIGS)
-export type { SpatialTier, TemporalTier, VelocityState } from './renderEngine/types';
-export { VELOCITY_THRESHOLDS, classifyVelocity } from './renderEngine/types';
+export type { SpatialTier, TemporalTier, VelocityState } from "./renderEngine/types";
+export { VELOCITY_THRESHOLDS, classifyVelocity } from "./renderEngine/types";
 
 import type { DragItem, Track, Clip, DensityConfig, DensityLevel } from "../types";
 import { useTimelineStore } from "../store/timelineStore";
 import { useProjectStore } from "../store/projectStore";
 import { capitalize } from "./utils";
 import { DensityLevel as DensityLevelEnum } from "../types";
+import { createClipFromAsset } from "./timelineClip";
 
 // Density configurations mapping zoom levels to extraction densities. Each configuration defines the time interval between thumbnails and the zoom range.
 export const DENSITY_CONFIGS: DensityConfig[] = [
@@ -31,8 +32,6 @@ export function getIntervalForDensity(density: DensityLevel): number {
   const config = DENSITY_CONFIGS.find((c) => c.level === density);
   return config?.interval ?? 1.0;
 }
-
-
 
 // Generates a globally-aligned timestamp grid for a clip range.
 // Aligns to a global origin so clips from the same video share cached frames.
@@ -101,21 +100,18 @@ export function handleCreateTrackAndDrop(item: DragItem, monitor: any, insertInd
 
   if (item.type === "MEDIA_ASSET") {
     const { project } = useProjectStore.getState();
-    const newClip: Clip = {
-      id: crypto.randomUUID(),
+    const canvasWidth = project?.canvasWidth ?? 1920;
+    const canvasHeight = project?.canvasHeight ?? 1080;
+
+    // Use createClipFromAsset to preserve aspect ratio (professional behavior)
+    const newClip = createClipFromAsset({
+      asset: item.asset,
       trackId: newTrack.id,
-      mediaId: item.asset.id,
       startTime,
-      duration: item.asset.duration || 5,
-      trimIn: 0,
-      trimOut: item.asset.duration || 5,
-      x: 0,
-      y: 0,
-      width: project?.canvasWidth ?? 1920,
-      height: project?.canvasHeight ?? 1080,
-      opacity: 1,
-      rotation: 0,
-    };
+      width: canvasWidth,
+      height: canvasHeight,
+    });
+
     addClip(newClip);
   } else if (item.type === "CLIP") {
     // Moving existing clip to new track

@@ -18,7 +18,7 @@ export function normalizeClipTiming(clip: Clip, asset?: MediaAsset): Clip {
   // Ensure trim bounds are within source duration
   const trimIn = Math.max(0, Math.min(clip.trimIn, sourceDuration));
   const trimOut = Math.max(trimIn, Math.min(clip.trimOut, sourceDuration));
-  
+
   // Calculate new duration
   const duration = Math.max(0, trimOut - trimIn);
 
@@ -26,7 +26,7 @@ export function normalizeClipTiming(clip: Clip, asset?: MediaAsset): Clip {
     ...clip,
     trimIn,
     trimOut,
-    duration
+    duration,
   };
 }
 
@@ -43,7 +43,6 @@ export function getTimelineViewportEnd(contentEnd: number): number {
   return Math.max(contentEnd, 10);
 }
 
-
 interface CreateClipFromAssetParams {
   asset: MediaAsset;
   trackId: string;
@@ -52,8 +51,105 @@ interface CreateClipFromAssetParams {
   height: number;
 }
 
+/**
+ * Fit modes for clip placement in sequence space.
+ * Mirrors professional NLE behavior (Premiere, Resolve, FCP).
+ */
+export type ClipFitMode = "contain" | "cover" | "stretch" | "original";
+
+/**
+ * Calculate clip dimensions that preserve aspect ratio within canvas bounds.
+ *
+ * Professional behavior:
+ * - "contain": Fit entire media inside canvas (letterbox/pillarbox if needed)
+ * - "cover": Fill canvas completely (crop overflow)
+ * - "stretch": Force to canvas dimensions (destructive, rarely used)
+ * - "original": Use source dimensions 1:1 (may exceed canvas)
+ *
+ * Default is "contain" - the professional standard for non-destructive editing.
+ */
+function calculateClipDimensions(asset: MediaAsset, canvasWidth: number, canvasHeight: number, fitMode: ClipFitMode = "contain"): { x: number; y: number; width: number; height: number } {
+  const assetWidth = asset.width ?? canvasWidth;
+  const assetHeight = asset.height ?? canvasHeight;
+
+  // Fallback for assets without dimensions
+  if (assetWidth <= 0 || assetHeight <= 0) {
+    return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
+  }
+
+  const assetAspect = assetWidth / assetHeight;
+  const canvasAspect = canvasWidth / canvasHeight;
+
+  let width: number;
+  let height: number;
+
+  switch (fitMode) {
+    case "contain": {
+      // Fit inside canvas, preserve aspect ratio (professional default)
+      if (assetAspect > canvasAspect) {
+        // Asset is wider - fit to width
+        width = canvasWidth;
+        height = canvasWidth / assetAspect;
+      } else {
+        // Asset is taller - fit to height
+        height = canvasHeight;
+        width = canvasHeight * assetAspect;
+      }
+      break;
+    }
+
+    case "cover": {
+      // Fill canvas completely, preserve aspect ratio, crop overflow
+      if (assetAspect > canvasAspect) {
+        // Asset is wider - fit to height, crop width
+        height = canvasHeight;
+        width = canvasHeight * assetAspect;
+      } else {
+        // Asset is taller - fit to width, crop height
+        width = canvasWidth;
+        height = canvasWidth / assetAspect;
+      }
+      break;
+    }
+
+    case "stretch": {
+      // Force to canvas dimensions (destructive)
+      width = canvasWidth;
+      height = canvasHeight;
+      break;
+    }
+
+    case "original": {
+      // Use source dimensions 1:1
+      width = assetWidth;
+      height = assetHeight;
+      break;
+    }
+  }
+
+  // Center in canvas
+  const x = (canvasWidth - width) / 2;
+  const y = (canvasHeight - height) / 2;
+
+  return { x, y, width, height };
+}
+
 export const createClipFromAsset = ({ asset, trackId, startTime, width, height }: CreateClipFromAssetParams): Clip => {
   const duration = resolveClipDuration(asset);
+
+  // Calculate dimensions that preserve aspect ratio (professional behavior)
+  // Default to "contain" - fits media inside canvas without stretching
+  const {
+    x,
+    y,
+    width: clipWidth,
+    height: clipHeight,
+  } = calculateClipDimensions(
+    asset,
+    width,
+    height,
+    "contain", // Professional default: preserve aspect ratio, letterbox if needed
+  );
 
   return {
     id: `clip-${Date.now()}-${Math.random()}`,
@@ -63,10 +159,10 @@ export const createClipFromAsset = ({ asset, trackId, startTime, width, height }
     duration,
     trimIn: 0,
     trimOut: duration,
-    x: 0,
-    y: 0,
-    width,
-    height,
+    x,
+    y,
+    width: clipWidth,
+    height: clipHeight,
     opacity: 1,
     rotation: 0,
   };
