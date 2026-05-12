@@ -175,7 +175,8 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
         }
         prevArtifactsRef.current = sorted;
 
-        setArtifacts(sorted);
+        // Use functional update to avoid dependency on artifacts state
+        setArtifacts(() => sorted);
         currentArtifactsRef.current = sorted; // Keep ref in sync for unmount cleanup
         setIsLoading(false);
       });
@@ -235,7 +236,8 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
         }
         prevArtifactsRef.current = sorted;
 
-        setArtifacts(sorted);
+        // Use functional update to avoid dependency on artifacts state
+        setArtifacts(() => sorted);
         currentArtifactsRef.current = sorted; // Keep ref in sync for unmount cleanup
         setIsLoading(false);
       },
