@@ -160,6 +160,13 @@ const ProgramPreview: React.FC = () => {
   const droppedFramesRef = useRef(0);
   const maxDriftRef = useRef(0);
 
+  // Sync preview aspect preset with project aspect ratio when project loads
+  useEffect(() => {
+    if (project?.aspectRatio) {
+      setPreviewAspectPreset(project.aspectRatio);
+    }
+  }, [project?.id, project?.aspectRatio]); // Re-run when project changes
+
   // Initialize clock with project settings (only when they actually change)
   const prevDurationRef = useRef<number>(0);
   const prevFrameRateRef = useRef<number>(0);

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
-import { useFullscreen } from "../useFullscreen";
+import { useTauriFullscreen } from "../useTauriFullscreen";
 
-describe("useFullscreen", () => {
+describe("useTauriFullscreen", () => {
   let mockFullscreenElement: Element | null = null;
   let fullscreenChangeListeners: Array<() => void> = [];
 
@@ -48,14 +48,14 @@ describe("useFullscreen", () => {
   });
 
   it("should initialize with isFullscreen false", () => {
-    const { result } = renderHook(() => useFullscreen());
+    const { result } = renderHook(() => useTauriFullscreen());
 
     expect(result.current.isFullscreen).toBe(false);
     expect(result.current.isSupported).toBe(true);
   });
 
   it("should enter fullscreen", async () => {
-    const { result } = renderHook(() => useFullscreen());
+    const { result } = renderHook(() => useTauriFullscreen());
 
     await act(async () => {
       await result.current.enterFullscreen();
@@ -69,7 +69,7 @@ describe("useFullscreen", () => {
   });
 
   it("should exit fullscreen", async () => {
-    const { result } = renderHook(() => useFullscreen());
+    const { result } = renderHook(() => useTauriFullscreen());
 
     // Enter fullscreen first
     await act(async () => {
@@ -93,7 +93,7 @@ describe("useFullscreen", () => {
   });
 
   it("should toggle fullscreen", async () => {
-    const { result } = renderHook(() => useFullscreen());
+    const { result } = renderHook(() => useTauriFullscreen());
 
     // Toggle to enter
     await act(async () => {
@@ -141,7 +141,7 @@ describe("useFullscreen", () => {
       value: false,
     });
 
-    const { result } = renderHook(() => useFullscreen());
+    const { result } = renderHook(() => useTauriFullscreen());
 
     expect(result.current.isSupported).toBe(false);
   });
