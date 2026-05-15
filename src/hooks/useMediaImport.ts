@@ -53,7 +53,8 @@ export const useMediaImport = () => {
               let coverArt: string | undefined;
 
               if (type === "video") {
-                // Use extract_poster_frame_command which extracts at 10% of duration (avoids black frames at 0s)
+                // Use extract_poster_frame_command which extracts at 15% of duration
+                // Heuristic: avoid first GOP/black frames (floor 1s), cap at 30s
                 posterFrame = (await invoke("extract_poster_frame_command", {
                   videoPath: path,
                   duration: metadata.duration,

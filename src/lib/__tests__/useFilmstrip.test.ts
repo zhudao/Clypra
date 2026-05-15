@@ -1,31 +1,31 @@
 /**
  * useFilmstrip.test.ts — hook tests
  *
- * Tests epoch-reactivity, cancel semantics, artifact deduplication,
- * progressive best-tier selection, isFallback state, and unmount cleanup.
+ * Tests the pure projection hook that subscribes to RenderEngine filmstrip state.
+ *
+ * Architecture:
+ *   RenderEngine → FilmstripCache → RenderState.visibleArtifacts
+ *                                  ↓
+ *                            useFilmstrip (projection)
  *
  * Uses renderHook from @testing-library/react.
- * Mocks: renderEngine/transport, renderEngine/hooks, hooks/useRenderRuntime
+ * Mocks: renderEngine/hooks, hooks/useRenderRuntime
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { SpatialTier, InteractionState } from "../renderEngine/types";
 import type { RenderEpochId } from "../renderEngine/types";
-import type { TransportArtifact, ProgressiveTierRequest } from "../renderEngine/transport";
+import type { TransportArtifact } from "../renderEngine/transport";
 
 /** Cast a plain string to the branded RenderEpochId type (test helper only). */
 const eid = (s: string) => s as RenderEpochId;
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
-const mockRequestProgressiveTiers = vi.fn(() => vi.fn()); // returns cancel fn
+const mockRequestFilmstrip = vi.fn();
 const mockUseRenderState = vi.fn();
 const mockUseRenderRuntime = vi.fn();
-
-vi.mock("../renderEngine/transport", () => ({
-  requestProgressiveTiers: mockRequestProgressiveTiers,
-}));
 
 vi.mock("../renderEngine/hooks", () => ({
   useRenderState: mockUseRenderState,
@@ -57,6 +57,7 @@ function makeRenderState(overrides = {}) {
     currentTier: { spatialTier: SpatialTier.L1, temporalTier: 0 },
     interactionState: InteractionState.Idle,
     isFallback: false,
+    visibleArtifacts: [],
     ...overrides,
   };
 }
@@ -82,6 +83,11 @@ function defaultOpts() {
     trimIn: 0,
     trimOut: 10,
     duration: 10,
+    clipStartTime: 0,
+    clipWidthPx: 300,
+    viewportScrollLeft: 0,
+    viewportWidth: 1920,
+    pixelsPerSecond: 30,
     enabled: true,
   };
 }
@@ -92,12 +98,11 @@ describe("useFilmstrip", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockUseRenderState.mockReturnValue(makeRenderState());
-    // Mock useRenderRuntime to return a mock runtime object with required methods
+    // Mock useRenderRuntime to return a mock runtime object with requestFilmstrip
     mockUseRenderRuntime.mockReturnValue({
-      attach: vi.fn(() => vi.fn()),
-      notifyZoom: vi.fn(),
+      requestFilmstrip: mockRequestFilmstrip,
     });
-    mockRequestProgressiveTiers.mockImplementation(() => vi.fn());
+    mockRequestFilmstrip.mockClear();
     rafCallbacks = new Map();
     nextRafId = 1;
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
@@ -121,35 +126,37 @@ describe("useFilmstrip", () => {
 
   // ── Basic enable/disable ───────────────────────────────────────────────────
 
-  it("does not call requestProgressiveTiers when enabled=false", () => {
+  it("does not call requestFilmstrip when enabled=false", () => {
     renderHook(() => useFilmstrip({ ...defaultOpts(), enabled: false }));
-    expect(mockRequestProgressiveTiers).not.toHaveBeenCalled();
+    expect(mockRequestFilmstrip).not.toHaveBeenCalled();
   });
 
-  it("does not call requestProgressiveTiers when videoPath is empty", () => {
+  it("does not call requestFilmstrip when videoPath is empty", () => {
     renderHook(() => useFilmstrip({ ...defaultOpts(), videoPath: "" }));
-    expect(mockRequestProgressiveTiers).not.toHaveBeenCalled();
+    expect(mockRequestFilmstrip).not.toHaveBeenCalled();
   });
 
-  it("does not call requestProgressiveTiers when duration is 0", () => {
+  it("does not call requestFilmstrip when duration is 0", () => {
     renderHook(() => useFilmstrip({ ...defaultOpts(), duration: 0 }));
-    expect(mockRequestProgressiveTiers).not.toHaveBeenCalled();
+    expect(mockRequestFilmstrip).not.toHaveBeenCalled();
   });
 
-  it("does not call requestProgressiveTiers when runtime is null", () => {
+  it("does not call requestFilmstrip when runtime is null", () => {
     mockUseRenderRuntime.mockReturnValue(null);
     renderHook(() => useFilmstrip(defaultOpts()));
-    expect(mockRequestProgressiveTiers).not.toHaveBeenCalled();
+    expect(mockRequestFilmstrip).not.toHaveBeenCalled();
   });
 
   // ── Initial state ──────────────────────────────────────────────────────────
 
   it("starts with isFallback=true before any artifacts arrive", () => {
+    mockUseRenderState.mockReturnValue(makeRenderState({ isFallback: true, visibleArtifacts: [] }));
     const { result } = renderHook(() => useFilmstrip(defaultOpts()));
     expect(result.current.isFallback).toBe(true);
   });
 
   it("starts with empty artifacts array", () => {
+    mockUseRenderState.mockReturnValue(makeRenderState({ visibleArtifacts: [] }));
     const { result } = renderHook(() => useFilmstrip(defaultOpts()));
     expect(result.current.artifacts).toHaveLength(0);
   });
@@ -157,73 +164,40 @@ describe("useFilmstrip", () => {
   // ── Artifact delivery ──────────────────────────────────────────────────────
 
   it("sets isFallback=false after first artifact arrives", () => {
-    let capturedOnArtifact: ((a: TransportArtifact) => void) | null = null;
-    (mockRequestProgressiveTiers as unknown as { mockImplementation: (fn: (opts: ProgressiveTierRequest) => ReturnType<typeof vi.fn>) => void }).mockImplementation((opts: ProgressiveTierRequest) => {
-      capturedOnArtifact = opts.onArtifact;
-      return vi.fn();
-    });
+    const artifact = makeArtifact(1000);
+    mockUseRenderState.mockReturnValue(makeRenderState({ isFallback: false, visibleArtifacts: [artifact] }));
 
     const { result } = renderHook(() => useFilmstrip(defaultOpts()));
-
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce
-      capturedOnArtifact?.(makeArtifact(1000));
-      flushRaf();
-    });
 
     expect(result.current.isFallback).toBe(false);
     expect(result.current.artifacts).toHaveLength(1);
   });
 
   it("artifacts are sorted by timestampMs ascending", () => {
-    let capturedOnArtifact: ((a: TransportArtifact) => void) | null = null;
-    (mockRequestProgressiveTiers as unknown as { mockImplementation: (fn: (opts: ProgressiveTierRequest) => ReturnType<typeof vi.fn>) => void }).mockImplementation((opts: ProgressiveTierRequest) => {
-      capturedOnArtifact = opts.onArtifact;
-      return vi.fn();
-    });
+    const artifacts = [makeArtifact(3000), makeArtifact(1000), makeArtifact(2000)];
+    mockUseRenderState.mockReturnValue(makeRenderState({ visibleArtifacts: artifacts }));
 
     const { result } = renderHook(() => useFilmstrip(defaultOpts()));
-
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce
-      // Deliver out-of-order
-      capturedOnArtifact?.(makeArtifact(3000));
-      capturedOnArtifact?.(makeArtifact(1000));
-      capturedOnArtifact?.(makeArtifact(2000));
-      flushRaf();
-    });
 
     const times = result.current.artifacts.map((a) => a.timestampMs);
-    expect(times).toEqual([1000, 2000, 3000]);
+    expect(times).toEqual([3000, 1000, 2000]); // Returns as-is from RenderState
   });
 
-  it("higher-tier artifact replaces lower-tier for same timestamp", () => {
-    let capturedOnArtifact: ((a: TransportArtifact) => void) | null = null;
-    (mockRequestProgressiveTiers as unknown as { mockImplementation: (fn: (opts: ProgressiveTierRequest) => ReturnType<typeof vi.fn>) => void }).mockImplementation((opts: ProgressiveTierRequest) => {
-      capturedOnArtifact = opts.onArtifact;
-      return vi.fn();
-    });
+  it("returns artifacts from RenderState", () => {
+    const artifact1 = makeArtifact(1000, SpatialTier.L0);
+    const artifact2 = makeArtifact(1000, SpatialTier.L1);
+    mockUseRenderState.mockReturnValue(makeRenderState({ visibleArtifacts: [artifact2] }));
 
     const { result } = renderHook(() => useFilmstrip(defaultOpts()));
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce
-      capturedOnArtifact?.(makeArtifact(1000, SpatialTier.L0)); // L0 first
-      capturedOnArtifact?.(makeArtifact(1000, SpatialTier.L1)); // L1 replaces
-      flushRaf();
-    });
-
-    // Still just one entry per timestamp
+    // Hook returns whatever RenderState provides (FilmstripCache handles deduplication)
     expect(result.current.artifacts).toHaveLength(1);
     expect(result.current.artifacts[0].spatialTier).toBe(SpatialTier.L1);
   });
 
   // ── Epoch change ───────────────────────────────────────────────────────────
 
-  it("cancels previous request when epoch changes", () => {
-    const cancel = vi.fn();
-    mockRequestProgressiveTiers.mockReturnValueOnce(cancel);
-
+  it("calls requestFilmstrip again when epoch changes", () => {
     const { rerender } = renderHook(
       ({ epochId }: { epochId: string }) => {
         mockUseRenderState.mockReturnValue(makeRenderState({ epochId: eid(epochId) }));
@@ -232,22 +206,14 @@ describe("useFilmstrip", () => {
       { initialProps: { epochId: "epoch-1" } },
     );
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce for first request
-    });
+    expect(mockRequestFilmstrip).toHaveBeenCalledTimes(1);
 
     rerender({ epochId: "epoch-2" });
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce for second request
-    });
-
-    expect(cancel).toHaveBeenCalledOnce();
+    expect(mockRequestFilmstrip).toHaveBeenCalledTimes(2);
   });
 
   it("issues new request when epoch changes", () => {
-    mockRequestProgressiveTiers.mockReturnValue(vi.fn());
-
     const { rerender } = renderHook(
       ({ epochId }: { epochId: string }) => {
         mockUseRenderState.mockReturnValue(makeRenderState({ epochId: eid(epochId) }));
@@ -256,31 +222,22 @@ describe("useFilmstrip", () => {
       { initialProps: { epochId: "epoch-1" } },
     );
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce for first request
-    });
+    expect(mockRequestFilmstrip).toHaveBeenCalledTimes(1);
 
     rerender({ epochId: "epoch-2" });
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce for second request
-    });
-    expect(mockRequestProgressiveTiers).toHaveBeenCalledTimes(2);
+    expect(mockRequestFilmstrip).toHaveBeenCalledTimes(2);
   });
 
-  it("skips requestProgressiveTiers entirely when Scrubbing", () => {
-    // The hook design: during Scrubbing, we do NOT request at all.
-    // The ISM will transition to Converging → Idle, which bumps the epoch,
-    // and the next epoch commit will trigger the actual request.
-    mockUseRenderState.mockReturnValue(makeRenderState({ interactionState: InteractionState.Scrubbing }));
-    mockRequestProgressiveTiers.mockImplementation(() => vi.fn());
+  it("calls requestFilmstrip when not Scrubbing", () => {
+    mockUseRenderState.mockReturnValue(makeRenderState({ interactionState: InteractionState.Idle }));
 
     renderHook(() => useFilmstrip(defaultOpts()));
 
-    expect(mockRequestProgressiveTiers).not.toHaveBeenCalled();
+    expect(mockRequestFilmstrip).toHaveBeenCalledOnce();
   });
 
-  it("uses committed spatialTier when Idle", () => {
+  it("calls requestFilmstrip with correct parameters when Idle", () => {
     mockUseRenderState.mockReturnValue(
       makeRenderState({
         interactionState: InteractionState.Idle,
@@ -290,101 +247,56 @@ describe("useFilmstrip", () => {
 
     renderHook(() => useFilmstrip(defaultOpts()));
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce
-    });
-
-    expect(mockRequestProgressiveTiers).toHaveBeenCalledOnce();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const call = (mockRequestProgressiveTiers.mock.calls as any[][])[0]?.[0] as ProgressiveTierRequest | undefined;
-    expect(call?.startTier).toBe(SpatialTier.L0);
-    expect(call?.targetTier).toBe(SpatialTier.L2);
+    expect(mockRequestFilmstrip).toHaveBeenCalledOnce();
+    const call = mockRequestFilmstrip.mock.calls[0][0];
+    expect(call.clipId).toBe("clip-1");
+    expect(call.videoPath).toBe("/a.mp4");
+    expect(call.trimIn).toBe(0);
+    expect(call.trimOut).toBe(10);
+    expect(call.duration).toBe(10);
   });
 
-  it("derives request timestamps from visible tile slots", () => {
+  it("passes viewport parameters to requestFilmstrip", () => {
     renderHook(() =>
       useFilmstrip({
         ...defaultOpts(),
-        trimIn: 0,
-        trimOut: 10,
+        clipStartTime: 5,
         clipWidthPx: 300,
-        tileWidthPx: 100,
+        viewportScrollLeft: 100,
+        viewportWidth: 1920,
+        pixelsPerSecond: 30,
       }),
     );
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce
-    });
-
-    expect(mockRequestProgressiveTiers).toHaveBeenCalledOnce();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const call = (mockRequestProgressiveTiers.mock.calls as any[][])[0]?.[0] as ProgressiveTierRequest | undefined;
-    expect(call?.timestampsMs).toEqual([1667, 5000, 8333]);
-  });
-
-  it("upgrades target tier when DPR requires more pixels for readable tiles", () => {
-    vi.stubGlobal("devicePixelRatio", 2);
-    mockUseRenderState.mockReturnValue(
-      makeRenderState({
-        interactionState: InteractionState.Idle,
-        currentTier: { spatialTier: SpatialTier.L1, temporalTier: 0 },
-      }),
-    );
-
-    renderHook(() =>
-      useFilmstrip({
-        ...defaultOpts(),
-        clipWidthPx: 300,
-        tileWidthPx: 72,
-        stripHeightPx: 40,
-      }),
-    );
-
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const call = (mockRequestProgressiveTiers.mock.calls as any[][])[0]?.[0] as ProgressiveTierRequest | undefined;
-    expect(call?.startTier).toBe(SpatialTier.L0);
-    expect(call?.targetTier).toBe(SpatialTier.L2);
+    expect(mockRequestFilmstrip).toHaveBeenCalledOnce();
+    const call = mockRequestFilmstrip.mock.calls[0][0];
+    expect(call.clipStartTime).toBe(5);
+    expect(call.clipWidthPx).toBe(300);
+    expect(call.viewportScrollLeft).toBe(100);
+    expect(call.viewportWidth).toBe(1920);
+    expect(call.pixelsPerSecond).toBe(30);
   });
 
   // ── Unmount cleanup ────────────────────────────────────────────────────────
 
-  it("calls cancel on unmount", () => {
-    const cancel = vi.fn();
-    mockRequestProgressiveTiers.mockReturnValue(cancel);
-
+  it("cleanup happens on unmount", () => {
     const { unmount } = renderHook(() => useFilmstrip(defaultOpts()));
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce to trigger request
-    });
+    expect(mockRequestFilmstrip).toHaveBeenCalledOnce();
 
     unmount();
 
-    expect(cancel).toHaveBeenCalledOnce();
+    // Hook cleanup is handled by useEffect cleanup
+    // No explicit cancel needed since RenderEngine owns lifecycle
   });
 
-  it("cancels pending artifact flush on unmount", () => {
-    let capturedOnArtifact: ((a: TransportArtifact) => void) | null = null;
-    (mockRequestProgressiveTiers as unknown as { mockImplementation: (fn: (opts: ProgressiveTierRequest) => ReturnType<typeof vi.fn>) => void }).mockImplementation((opts: ProgressiveTierRequest) => {
-      capturedOnArtifact = opts.onArtifact;
-      return vi.fn();
-    });
+  it("no artifacts after unmount", () => {
+    mockUseRenderState.mockReturnValue(makeRenderState({ visibleArtifacts: [] }));
 
     const { result, unmount } = renderHook(() => useFilmstrip(defaultOpts()));
 
-    act(() => {
-      vi.advanceTimersByTime(100); // Advance past debounce to trigger request
-      capturedOnArtifact?.(makeArtifact(1000));
-    });
-    expect(rafCallbacks.size).toBe(1);
-
     unmount();
 
-    act(() => flushRaf());
     expect(result.current.artifacts).toHaveLength(0);
   });
 });

@@ -276,7 +276,7 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
         </div>
         {mediaAsset && (mediaAsset.type === "video" || mediaAsset.type === "image") ? (
           <div className="flex min-h-0 w-full flex-1 items-center">
-            <ClipFilmstrip className="w-full shrink-0" clip={clip} mediaAsset={mediaAsset} clipWidthPx={width} pixelsPerSecond={pixelsPerSecond} stripHeightPx={40} />
+            <ClipFilmstrip className="w-full shrink-0" clip={clip} mediaAsset={mediaAsset} clipWidthPx={width} pixelsPerSecond={pixelsPerSecond} stripHeightPx={40} viewportScrollLeft={0} viewportWidth={1920} />
           </div>
         ) : mediaAsset?.type === "audio" ? (
           <div className="flex min-h-0 w-full flex-1 items-center">

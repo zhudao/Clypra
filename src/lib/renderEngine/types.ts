@@ -238,7 +238,7 @@ export interface RenderState {
   readonly targetTier: RenderTier;
   readonly epochId: RenderEpochId;
   readonly interactionState: InteractionState;
-  readonly visibleArtifacts: readonly RenderArtifact[];
+  readonly visibleArtifacts: readonly any[]; // TransportArtifact[] - using any to avoid circular dependency
   readonly isFallback: boolean;
 }
 

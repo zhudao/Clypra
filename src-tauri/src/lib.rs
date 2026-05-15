@@ -109,7 +109,12 @@ async fn clear_thumbnail_cache(video_path: String) {
     clear_video_thumbnail_cache(&video_path).await;
 }
 
-/// Extract poster frame at 10% mark using native decoder.
+/// Extract poster frame using professional thumbnail heuristic.
+///
+/// Heuristic: seek to 15% of duration, floor at 1.0s (avoid first GOP/black frame),
+/// cap at 30.0s (long intros don't represent content).
+///
+/// Formula: poster_time = clamp(duration * 0.15, 1.0, 30.0)
 #[tauri::command]
 async fn extract_poster_frame_command(
     video_path: String,
@@ -119,8 +124,9 @@ async fn extract_poster_frame_command(
     use image::codecs::webp::WebPEncoder;
     use thumbnail_engine::decoder::get_decoder;
 
-    // Calculate poster frame time (10% of duration, or 0.5s for short clips)
-    let poster_time = if duration < 1.0 { 0.5 } else { duration * 0.1 };
+    // Professional thumbnail heuristic:
+    // 15% into video, never < 1.0s (first GOP / black frames), never > 30.0s
+    let poster_time = (duration * 0.15).clamp(1.0, 30.0);
 
     // Target max dimension for longest edge
     let max_size: u32 = if dpr >= 1.5 { 320 } else { 160 };

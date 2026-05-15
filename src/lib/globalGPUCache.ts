@@ -62,7 +62,7 @@ export class GlobalGPUCacheManager {
     }
 
     try {
-      this.cache = new GPUTextureCache(canvas);
+      this.cache = new GPUTextureCache(canvas, memoryLimitMB);
       this.memoryLimitMB = memoryLimitMB;
 
       // Start auto-eviction check (every 10 seconds)

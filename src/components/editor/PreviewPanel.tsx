@@ -28,6 +28,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { SourcePreview } from "./SourcePreview";
 import { PreviewTransport } from "./PreviewTransport";
 import { GPUTextureCache } from "@/lib/gpuTextureCache";
+import { PreviewQualityManager, PreviewQualityTier } from "@/lib/preview/PreviewQualityManager";
 import { cn } from "@/lib/utils";
 import type { EvaluatedMediaLayer } from "@/core/evaluation/types";
 import { AspectRatio, PREVIEW_ASPECT_LABEL } from "@/types";
@@ -134,6 +135,7 @@ const ProgramPreview: React.FC = () => {
   const [useCanvasPreview] = useState(true); // Canvas is authoritative visual output
   const gpuCacheRef = useRef<GPUTextureCache | null>(null);
   const gpuFallbackRef = useRef(false); // true if WebGL2 unavailable → use Canvas2D
+  const qualityManagerRef = useRef<PreviewQualityManager | null>(null);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [telemetryStats, setTelemetryStats] = useState<{
     avgEvaluationTimeMs: number;
@@ -303,6 +305,21 @@ const ProgramPreview: React.FC = () => {
   const displayWidth = canvasWidth * scale;
   const displayHeight = canvasHeight * scale;
 
+  // Preview Quality Manager — prevents 4K × DPR VRAM explosion
+  const dpr = window.devicePixelRatio || 1;
+  if (!qualityManagerRef.current && project) {
+    qualityManagerRef.current = new PreviewQualityManager({
+      sequenceWidth: canvasWidth,
+      sequenceHeight: canvasHeight,
+      viewportWidth: Math.floor(displayWidth),
+      viewportHeight: Math.floor(displayHeight),
+      dpr,
+    });
+  }
+  if (qualityManagerRef.current) {
+    qualityManagerRef.current.updateViewport(Math.floor(displayWidth), Math.floor(displayHeight), dpr);
+  }
+
   // GPU cache initialization — create once, reuse across resizes and state changes.
   // GPU resources survive layout changes; only disposed on unmount.
   useEffect(() => {
@@ -378,11 +395,21 @@ const ProgramPreview: React.FC = () => {
       isRendering = true;
       const timeToRender = clock.time;
 
+      // Select quality tier based on playback/interaction state
+      const qm = qualityManagerRef.current;
+      const isPlaying = clockState.state === "playing";
+      const qualityTier = qm ? qm.selectTierForInteraction(isPlaying, false, false) : PreviewQualityTier.Idle;
+      const profile = qm ? qm.getRenderProfile(qualityTier) : { maxWidth: canvasWidth, maxHeight: canvasHeight, dprScale: dpr, useDpr: true };
+
       // Check GPU texture cache for this frame (skip scheduler entirely on cache hit)
+      // Cache key uses render dimensions (what we render) not display dimensions (what we show)
       if (gpuCache) {
-        const cacheKey = `preview:${epoch}:${timeToRender.toFixed(3)}:${displayWidth}x${displayHeight}`;
+        const renderW = profile.maxWidth;
+        const renderH = profile.maxHeight;
+        const cacheKey = `preview:${epoch}:${timeToRender.toFixed(3)}:${renderW}x${renderH}:${dpr}`;
         if (gpuCache.hasTexture(cacheKey)) {
           gpuCache.clear();
+          // Render full-resolution texture scaled down to display size
           gpuCache.renderTexture(cacheKey, 0, 0, displayWidth, displayHeight);
           isRendering = false;
           return;
@@ -402,14 +429,15 @@ const ProgramPreview: React.FC = () => {
         }
       }
 
-      // Schedule frame render
+      // Schedule frame render at quality-manager-capped resolution
+      // Prevents 4K × DPR VRAM explosion while maintaining visual fidelity
       const jobId = scheduler.schedule({
         time: timeToRender,
         resolution: {
-          width: displayWidth,
-          height: displayHeight,
+          width: profile.maxWidth,
+          height: profile.maxHeight,
         },
-        pixelRatio: 1,
+        pixelRatio: profile.useDpr ? profile.dprScale : 1.0,
         outputFormat: "imagebitmap",
         priority: "realtime",
         videoElements: activeVideoElements,
@@ -424,19 +452,20 @@ const ProgramPreview: React.FC = () => {
 
           if (result.data instanceof ImageBitmap) {
             if (gpuCache) {
-              // GPU path: upload bitmap as texture, render from GPU, close bitmap
-              const cacheKey = `preview:${epoch}:${timeToRender.toFixed(3)}:${displayWidth}x${displayHeight}`;
+              // GPU path: upload capped-resolution bitmap as texture, render scaled down to display size
+              const cacheKey = `preview:${epoch}:${timeToRender.toFixed(3)}:${profile.maxWidth}x${profile.maxHeight}:${dpr}`;
               gpuCache.uploadTexture(cacheKey, result.data, result.data.width, result.data.height);
               gpuCache.clear();
+              // Scale down from full canvas resolution to display size
               gpuCache.renderTexture(cacheKey, 0, 0, displayWidth, displayHeight);
               result.data.close();
 
               // Evict LRU textures if GPU memory exceeds limit
               gpuCache.evictLRU(GPU_MEMORY_LIMIT_MB);
             } else if (ctx2d) {
-              // Canvas2D fallback path
+              // Canvas2D fallback path: draw full-resolution bitmap scaled down to display size
               ctx2d.clearRect(0, 0, displayWidth, displayHeight);
-              ctx2d.drawImage(result.data, 0, 0);
+              ctx2d.drawImage(result.data, 0, 0, displayWidth, displayHeight);
               result.data.close();
             }
           }
@@ -480,7 +509,7 @@ const ProgramPreview: React.FC = () => {
         scheduler.cancel(lastJobId);
       }
     };
-  }, [useCanvasPreview, clips, tracks, mediaAssets, project, epoch, clock, displayWidth, displayHeight]);
+  }, [useCanvasPreview, clips, tracks, mediaAssets, project, epoch, clock, displayWidth, displayHeight, canvasWidth, canvasHeight]);
 
   // Cleanup video elements on component unmount only
   useEffect(() => {
@@ -514,8 +543,6 @@ const ProgramPreview: React.FC = () => {
   useEffect(() => {
     const currentClockTime = clock.time;
 
-    console.log(`[PreviewPanel] Sync video playback - clockState: ${clockState.state}, time: ${currentClockTime.toFixed(3)}s, videos: ${Object.keys(videoRefs.current).length}`);
-
     Object.values(videoRefs.current).forEach((video) => {
       if (!video) return;
 
@@ -525,11 +552,8 @@ const ProgramPreview: React.FC = () => {
 
       // Skip if video has no source or isn't ready
       if (!video.src || video.readyState < 2) {
-        console.log(`[PreviewPanel] Video ${videoKey} not ready - src: ${!!video.src}, readyState: ${video.readyState}`);
         return;
       }
-
-      console.log(`[PreviewPanel] Video ${videoKey} - readyState: ${video.readyState}, duration: ${video.duration.toFixed(2)}s, paused: ${video.paused}, currentTime: ${video.currentTime.toFixed(3)}s`);
 
       // Audio settings
       video.muted = isMuted || volume === 0;
@@ -547,10 +571,8 @@ const ProgramPreview: React.FC = () => {
           const targetTime = Math.max(0, Math.min(sourceTime, Math.max(0, video.duration - 0.01)));
 
           if (clockState.state !== "playing") {
-            console.log(`[PreviewPanel] Video ${videoKey} - seeking to ${targetTime.toFixed(3)}s (paused)`);
             video.currentTime = targetTime;
           } else if (video.paused) {
-            console.log(`[PreviewPanel] Video ${videoKey} - seeking to ${targetTime.toFixed(3)}s (before play)`);
             video.currentTime = targetTime;
           }
         }
@@ -561,26 +583,20 @@ const ProgramPreview: React.FC = () => {
         if (video.paused) {
           // Only try to play if video is ready
           if (video.readyState >= 3) {
-            console.log(`[PreviewPanel] Video ${videoKey} - calling play() (readyState: ${video.readyState})`);
             const playPromise = video.play();
             if (playPromise !== undefined) {
               playPromise
-                .then(() => {
-                  console.log(`[PreviewPanel] Video ${videoKey} - play() succeeded`);
-                })
+                .then(() => {})
                 .catch((err) => {
                   if (err.name !== "AbortError") {
                     console.warn(`[PreviewPanel] Video ${videoKey} - play() failed:`, err);
                   }
                 });
             }
-          } else {
-            console.log(`[PreviewPanel] Video ${videoKey} - skipping play(), readyState: ${video.readyState} (need >= 3)`);
           }
         }
       } else {
         if (!video.paused) {
-          console.log(`[PreviewPanel] Video ${videoKey} - calling pause()`);
           video.pause();
         }
       }
@@ -664,8 +680,6 @@ const ProgramPreview: React.FC = () => {
   useEffect(() => {
     const currentClockTime = clock.time;
 
-    console.log(`[PreviewPanel] Sync audio playback - clockState: ${clockState.state}, time: ${currentClockTime.toFixed(3)}s, audio clips: ${Object.keys(audioRefs.current).length}`);
-
     Object.values(audioRefs.current).forEach((audio) => {
       if (!audio) return;
 
@@ -675,11 +689,8 @@ const ProgramPreview: React.FC = () => {
 
       // Skip if audio has no source or isn't ready
       if (!audio.src || audio.readyState < 2) {
-        console.log(`[PreviewPanel] Audio ${audioKey} not ready - src: ${!!audio.src}, readyState: ${audio.readyState}`);
         return;
       }
-
-      console.log(`[PreviewPanel] Audio ${audioKey} - readyState: ${audio.readyState}, duration: ${audio.duration.toFixed(2)}s, paused: ${audio.paused}, currentTime: ${audio.currentTime.toFixed(3)}s`);
 
       // Audio settings
       audio.muted = isMuted || volume === 0;
@@ -697,10 +708,8 @@ const ProgramPreview: React.FC = () => {
           const targetTime = Math.max(0, Math.min(sourceTime, Math.max(0, audio.duration - 0.01)));
 
           if (clockState.state !== "playing") {
-            console.log(`[PreviewPanel] Audio ${audioKey} - seeking to ${targetTime.toFixed(3)}s (paused)`);
             audio.currentTime = targetTime;
           } else if (audio.paused) {
-            console.log(`[PreviewPanel] Audio ${audioKey} - seeking to ${targetTime.toFixed(3)}s (before play)`);
             audio.currentTime = targetTime;
           }
         }
@@ -711,26 +720,20 @@ const ProgramPreview: React.FC = () => {
         if (audio.paused) {
           // Only try to play if audio is ready
           if (audio.readyState >= 3) {
-            console.log(`[PreviewPanel] Audio ${audioKey} - calling play() (readyState: ${audio.readyState})`);
             const playPromise = audio.play();
             if (playPromise !== undefined) {
               playPromise
-                .then(() => {
-                  console.log(`[PreviewPanel] Audio ${audioKey} - play() succeeded`);
-                })
+                .then(() => {})
                 .catch((err) => {
                   if (err.name !== "AbortError") {
                     console.warn(`[PreviewPanel] Audio ${audioKey} - play() failed:`, err);
                   }
                 });
             }
-          } else {
-            console.log(`[PreviewPanel] Audio ${audioKey} - skipping play(), readyState: ${audio.readyState} (need >= 3)`);
           }
         }
       } else {
         if (!audio.paused) {
-          console.log(`[PreviewPanel] Audio ${audioKey} - calling pause()`);
           audio.pause();
         }
       }
@@ -923,13 +926,11 @@ const ProgramPreview: React.FC = () => {
                         onLoadedMetadata={(e) => {
                           const video = e.currentTarget;
                           const key = `${clip.id}-${clip.mediaId}`;
-                          console.log(`[PreviewPanel] Video metadata loaded - ${key}, duration: ${video.duration.toFixed(2)}s, readyState: ${video.readyState}`);
                           setPreviewVideoReadyTick((n) => n + 1);
                         }}
                         onCanPlay={(e) => {
                           const video = e.currentTarget;
                           const key = `${clip.id}-${clip.mediaId}`;
-                          console.log(`[PreviewPanel] Video canPlay - ${key}, readyState: ${video.readyState}`);
                         }}
                         onError={(e) => {
                           const key = `${clip.id}-${clip.mediaId}`;
@@ -968,12 +969,10 @@ const ProgramPreview: React.FC = () => {
                         onLoadedMetadata={(e) => {
                           const audio = e.currentTarget;
                           const key = `${clip.id}-${clip.mediaId}`;
-                          console.log(`[PreviewPanel] Audio metadata loaded - ${key}, duration: ${audio.duration.toFixed(2)}s, readyState: ${audio.readyState}`);
                         }}
                         onCanPlay={(e) => {
                           const audio = e.currentTarget;
                           const key = `${clip.id}-${clip.mediaId}`;
-                          console.log(`[PreviewPanel] Audio canPlay - ${key}, readyState: ${audio.readyState}`);
                         }}
                         onError={(e) => {
                           const key = `${clip.id}-${clip.mediaId}`;
@@ -1055,7 +1054,6 @@ const ProgramPreview: React.FC = () => {
                             ref={(el) => {
                               videoRefs.current[`${layer.clipId}-${layer.mediaId}`] = el;
                               if (el) {
-                                console.log(`[PreviewPanel] Video element created (visual) - ${layer.clipId}-${layer.mediaId}, src: ${layer.sourcePath}`);
                               }
                             }}
                             src={layer.sourcePath}
@@ -1064,12 +1062,10 @@ const ProgramPreview: React.FC = () => {
                             preload="auto"
                             onLoadedMetadata={(e) => {
                               const video = e.currentTarget;
-                              console.log(`[PreviewPanel] Video metadata loaded (visual) - ${layer.clipId}-${layer.mediaId}, duration: ${video.duration.toFixed(2)}s, readyState: ${video.readyState}`);
                               setPreviewVideoReadyTick((n) => n + 1);
                             }}
                             onCanPlay={(e) => {
                               const video = e.currentTarget;
-                              console.log(`[PreviewPanel] Video canPlay (visual) - ${layer.clipId}-${layer.mediaId}, readyState: ${video.readyState}`);
                             }}
                             onError={(e) => {
                               console.error(`[PreviewPanel] Video error (visual) - ${layer.clipId}-${layer.mediaId}:`, e.currentTarget.error);

@@ -1,0 +1,505 @@
+/**
+ * Filmstrip Cache
+ *
+ * Owned by RenderEngine. NOT accessible from React.
+ * Manages viewport-bounded thumbnail requests and bitmap lifecycle.
+ *
+ * Architecture:
+ *   RenderEngine → FilmstripCache → Transport → Rust decoder
+ *                                  ↓
+ *                            RenderState.visibleArtifacts
+ *
+ * Ownership:
+ *   - FilmstripCache OWNS all ImageBitmaps
+ *   - Bitmaps closed on: epoch change, eviction, disposal
+ *   - React components BORROW artifacts (read-only)
+ *
+ * Memory Management:
+ *   - Hard budget (default 100MB)
+ *   - LRU eviction by viewport update time
+ *   - Automatic cleanup on clip invalidation
+ *
+ * RAF Batching (Anti-Rerender Storm):
+ *   - Artifacts buffered in pendingArtifacts[]
+ *   - Flushed once per frame via requestAnimationFrame
+ *   - Single React rerender per clip per frame (not per artifact)
+ *   - Professional NLE behavior: batch updates to prevent UI thrashing
+ */
+
+import { SpatialTier, VelocityState, type RenderEpochId } from "./types";
+import { requestProgressiveTiers, type TransportArtifact } from "./transport";
+import { FilmstripTileCache } from "../filmstrip/FilmstripTileCache";
+import { generateViewportTileAddresses, findNearestTileAddress, getTileKey, type FilmstripTileAddress } from "../filmstrip/filmstripTiers";
+
+interface FilmstripCacheEntry {
+  clipId: string;
+  epochId: RenderEpochId;
+  artifacts: TransportArtifact[];
+  cancelFn: (() => void) | null;
+  lastViewportUpdate: number;
+  memoryBytes: number;
+  onUpdate: (artifacts: readonly TransportArtifact[]) => void;
+  /** Current viewport tile addresses for this clip */
+  tileAddresses: FilmstripTileAddress[];
+  /** Current spatial tier */
+  spatialTier: SpatialTier;
+}
+
+interface PendingArtifact {
+  clipId: string;
+  artifact: TransportArtifact;
+}
+
+interface ViewportFilmstripOptions {
+  trimIn: number;
+  trimOut: number;
+  duration: number;
+  clipStartTime: number;
+  clipWidthPx: number;
+  tileWidthPx: number;
+  viewportScrollLeft: number;
+  viewportWidth: number;
+  pixelsPerSecond: number;
+  overscanFactor: number;
+}
+
+/**
+ * Generate timestamps for visible viewport only (not entire clip)
+ *
+ * Professional NLE behavior: Only decode what's visible + overscan.
+ */
+function generateViewportFilmstripTimestamps(options: ViewportFilmstripOptions): number[] {
+  const { trimIn, trimOut, duration, clipStartTime, clipWidthPx, tileWidthPx, viewportScrollLeft, viewportWidth, pixelsPerSecond, overscanFactor } = options;
+
+  // Calculate visible time range
+  const viewportStartPx = viewportScrollLeft;
+  const viewportEndPx = viewportScrollLeft + viewportWidth;
+
+  // Expand with overscan
+  const overscanPx = (viewportWidth * (overscanFactor - 1)) / 2;
+  const expandedStartPx = Math.max(0, viewportStartPx - overscanPx);
+  const expandedEndPx = viewportEndPx + overscanPx;
+
+  // Clip bounds in timeline space
+  const clipStartPx = clipStartTime * pixelsPerSecond;
+  const clipEndPx = clipStartPx + clipWidthPx;
+
+  // Check if clip is visible
+  if (clipEndPx < expandedStartPx || clipStartPx > expandedEndPx) {
+    return []; // Clip not in viewport
+  }
+
+  // Calculate visible portion of clip
+  const visibleClipStartPx = Math.max(clipStartPx, expandedStartPx);
+  const visibleClipEndPx = Math.min(clipEndPx, expandedEndPx);
+
+  // Convert to clip-local time
+  const visibleStartTime = (visibleClipStartPx - clipStartPx) / pixelsPerSecond + trimIn;
+  const visibleEndTime = (visibleClipEndPx - clipStartPx) / pixelsPerSecond + trimIn;
+
+  // Clamp to trim range
+  const start = Math.max(trimIn, Math.min(visibleStartTime, trimOut));
+  const end = Math.max(trimIn, Math.min(visibleEndTime, trimOut));
+
+  if (end <= start) return [];
+
+  // Generate timestamps for visible region
+  const visibleWidthPx = visibleClipEndPx - visibleClipStartPx;
+  const tileCount = Math.max(1, Math.ceil(visibleWidthPx / tileWidthPx));
+  const span = end - start;
+
+  const timestamps: number[] = [];
+  for (let i = 0; i < tileCount; i++) {
+    const ratio = (i + 0.5) / tileCount;
+    const timestamp = start + span * ratio;
+    timestamps.push(Math.min(Math.max(timestamp, 0), duration));
+  }
+
+  return timestamps;
+}
+
+/**
+ * Get tile width for spatial tier
+ */
+function getTileWidthForTier(tier: SpatialTier): number {
+  const widths: Record<SpatialTier, number> = {
+    [SpatialTier.L0]: 48,
+    [SpatialTier.L1]: 72,
+    [SpatialTier.L2]: 96,
+    [SpatialTier.L3]: 128,
+  };
+  return widths[tier] ?? 72;
+}
+
+export class FilmstripCache {
+  private entries = new Map<string, FilmstripCacheEntry>();
+  private memoryBudgetBytes: number;
+  private currentMemoryBytes: number = 0;
+
+  // RAF batching to prevent rerender storms
+  private pendingArtifacts: PendingArtifact[] = [];
+  private rafId: number | null = null;
+
+  /** Tile-addressable cache for zoom transitions and tile-level invalidation */
+  private tileCache: FilmstripTileCache;
+
+  /** Current velocity state — drives aggressive cheating behavior */
+  private velocityState: VelocityState = VelocityState.Stable;
+
+  constructor(memoryBudgetMB: number = 100) {
+    this.memoryBudgetBytes = memoryBudgetMB * 1024 * 1024;
+    this.tileCache = new FilmstripTileCache(memoryBudgetMB);
+  }
+
+  /**
+   * Update velocity state from ISM (Interaction State Machine).
+   * Called by RenderEngine on every scroll/zoom update.
+   */
+  setVelocityState(v: VelocityState): void {
+    this.velocityState = v;
+  }
+
+  /**
+   * Schedule artifact for batched update (RAF-gated)
+   * Prevents React rerender storms during progressive decode
+   */
+  private scheduleArtifactUpdate(clipId: string, artifact: TransportArtifact): void {
+    this.pendingArtifacts.push({ clipId, artifact });
+
+    if (this.rafId === null) {
+      this.rafId = requestAnimationFrame(() => this.flushPendingArtifacts());
+    }
+  }
+
+  /**
+   * Flush all pending artifacts in a single batch (once per frame)
+   * Professional NLE behavior: batch updates to prevent UI thrashing
+   */
+  private flushPendingArtifacts(): void {
+    const updatesByClip = new Map<string, TransportArtifact[]>();
+
+    // Group artifacts by clip
+    for (const { clipId, artifact } of this.pendingArtifacts) {
+      if (!updatesByClip.has(clipId)) {
+        updatesByClip.set(clipId, []);
+      }
+      updatesByClip.get(clipId)!.push(artifact);
+    }
+
+    // Process each clip's artifacts
+    for (const [clipId, artifacts] of updatesByClip) {
+      const entry = this.entries.get(clipId);
+      if (!entry) {
+        // Entry was invalidated during RAF delay - close bitmaps
+        for (const artifact of artifacts) {
+          artifact.bitmap.close();
+        }
+        continue;
+      }
+
+      // Merge artifacts (dedupe by timestamp, keep highest tier)
+      for (const artifact of artifacts) {
+        const existingIdx = entry.artifacts.findIndex((a) => a.timestampMs === artifact.timestampMs);
+
+        if (existingIdx >= 0) {
+          const existing = entry.artifacts[existingIdx];
+          if (artifact.spatialTier > existing.spatialTier) {
+            // Higher tier - replace
+            existing.bitmap.close();
+            entry.memoryBytes -= existing.width * existing.height * 4;
+            this.currentMemoryBytes -= existing.width * existing.height * 4;
+            entry.artifacts[existingIdx] = artifact;
+            entry.memoryBytes += artifact.width * artifact.height * 4;
+            this.currentMemoryBytes += artifact.width * artifact.height * 4;
+          } else {
+            // Lower or same tier - discard new artifact
+            artifact.bitmap.close();
+            continue;
+          }
+        } else {
+          // New timestamp - add
+          entry.artifacts.push(artifact);
+          const sizeBytes = artifact.width * artifact.height * 4;
+          entry.memoryBytes += sizeBytes;
+          this.currentMemoryBytes += sizeBytes;
+        }
+      }
+
+      // Sort by timestamp
+      entry.artifacts.sort((a, b) => a.timestampMs - b.timestampMs);
+
+      // Single update per clip per frame — prevents rerender storm
+      entry.onUpdate([...entry.artifacts]);
+    }
+
+    // Clear pending queue
+    this.pendingArtifacts = [];
+    this.rafId = null;
+  }
+
+  /**
+   * Build artifact array from tile cache for given addresses.
+   * Uses aggressive cheating: missing tiles filled by nearest cached tile.
+   */
+  private _buildArtifactsFromTiles(addresses: FilmstripTileAddress[], clipId: string, spatialTier: SpatialTier): TransportArtifact[] {
+    const artifacts: TransportArtifact[] = [];
+    const usedKeys = new Set<string>();
+
+    for (const addr of addresses) {
+      const exact = this.tileCache.getTile(addr);
+      if (exact) {
+        artifacts.push(exact.artifact);
+        usedKeys.add(getTileKey(addr));
+        continue;
+      }
+
+      // Aggressive cheating: reuse nearest tile within tolerance
+      const nearest = this.tileCache.findNearestTile(
+        clipId,
+        spatialTier,
+        addr.timestamp,
+        0.5, // 500ms tolerance — "good enough" for scroll
+      );
+      if (nearest) {
+        artifacts.push(nearest.artifact);
+      }
+    }
+
+    // Sort by timestamp for consistent rendering
+    artifacts.sort((a, b) => a.timestampMs - b.timestampMs);
+    return artifacts;
+  }
+
+  /**
+   * Request filmstrip artifacts for a clip.
+   * Viewport-bounded, epoch-gated, tile-addressable, aggressive cheating.
+   */
+  requestFilmstrip(options: { clipId: string; videoPath: string; trimIn: number; trimOut: number; duration: number; clipStartTime: number; clipWidthPx: number; spatialTier: SpatialTier; epochId: RenderEpochId; viewportScrollLeft: number; viewportWidth: number; pixelsPerSecond: number; onUpdate: (artifacts: readonly TransportArtifact[]) => void }): void {
+    const { clipId, epochId, onUpdate, videoPath, spatialTier } = options;
+
+    // Cancel existing request if epoch changed
+    const existing = this.entries.get(clipId);
+    if (existing && existing.epochId !== epochId) {
+      existing.cancelFn?.();
+      this._disposeArtifacts(existing.artifacts);
+      this.currentMemoryBytes -= existing.memoryBytes;
+      this.entries.delete(clipId);
+      // Also invalidate tiles for this clip when epoch changes
+      this.tileCache.invalidateClip(clipId);
+    }
+
+    // Generate tile addresses using FIXED grid (not dynamic timestamps)
+    const tileAddresses = generateViewportTileAddresses({
+      clipId,
+      zoomTier: spatialTier,
+      trimIn: options.trimIn,
+      trimOut: options.trimOut,
+      clipStartTime: options.clipStartTime,
+      clipWidthPx: options.clipWidthPx,
+      viewportScrollLeft: options.viewportScrollLeft,
+      viewportWidth: options.viewportWidth,
+      pixelsPerSecond: options.pixelsPerSecond,
+      overscanFactor: 2.0,
+    });
+
+    if (tileAddresses.length === 0) {
+      // Clip not in viewport
+      if (existing) {
+        existing.cancelFn?.();
+        this._disposeArtifacts(existing.artifacts);
+        this.currentMemoryBytes -= existing.memoryBytes;
+        this.entries.delete(clipId);
+      }
+      onUpdate([]);
+      return;
+    }
+
+    // ── Aggressive Cheating: During fast/ballistic scroll, show stale tiles ──
+    if (this.velocityState >= VelocityState.Fast) {
+      // Build artifacts from cached tiles (with nearest-tile fallback)
+      const cachedArtifacts = this._buildArtifactsFromTiles(tileAddresses, clipId, spatialTier);
+      onUpdate(cachedArtifacts);
+
+      // If we have ALL tiles cached, skip the request entirely
+      const allCached = tileAddresses.every((addr) => this.tileCache.hasTile(addr));
+      if (allCached) {
+        return;
+      }
+
+      // Otherwise: defer actual request — only request missing tiles
+      // (fall through to normal request below, but with cached artifacts already shown)
+    }
+
+    // Skip if same epoch and recent viewport update (debounce)
+    if (existing && existing.epochId === epochId) {
+      const timeSinceUpdate = Date.now() - existing.lastViewportUpdate;
+      if (timeSinceUpdate < 100) {
+        // Debounce: return cached artifacts from tiles
+        const cachedArtifacts = this._buildArtifactsFromTiles(tileAddresses, clipId, spatialTier);
+        onUpdate(cachedArtifacts);
+        return;
+      }
+    }
+
+    // Extract timestamps from tile addresses for transport layer
+    const timestampsMs = tileAddresses.map((addr) => addr.timestamp * 1000);
+
+    // Create entry
+    const entry: FilmstripCacheEntry = {
+      clipId,
+      epochId,
+      artifacts: [],
+      cancelFn: null,
+      lastViewportUpdate: Date.now(),
+      memoryBytes: 0,
+      onUpdate,
+      tileAddresses,
+      spatialTier,
+    };
+
+    this.entries.set(clipId, entry);
+
+    // Request artifacts (transport still uses timestamps)
+    const cancelFn = requestProgressiveTiers({
+      videoPath,
+      timestampsMs,
+      startTier: SpatialTier.L0,
+      targetTier: spatialTier,
+      epochId,
+      clipId,
+      onArtifact: (artifact) => {
+        // Check if entry still valid (not invalidated during async decode)
+        const currentEntry = this.entries.get(clipId);
+        if (!currentEntry || currentEntry.epochId !== epochId) {
+          artifact.bitmap.close();
+          return;
+        }
+
+        // Find the tile address this artifact belongs to
+        const matchingAddr = currentEntry.tileAddresses.find((a) => Math.abs(a.timestamp * 1000 - artifact.timestampMs) < 1);
+        if (matchingAddr) {
+          // Store in tile cache for reuse across zoom transitions
+          this.tileCache.setTile(matchingAddr, artifact);
+        }
+
+        // Enforce memory budget BEFORE scheduling
+        const sizeBytes = artifact.width * artifact.height * 4;
+        while (this.currentMemoryBytes + sizeBytes > this.memoryBudgetBytes && this.entries.size > 1) {
+          this._evictLRU(clipId); // Don't evict current clip
+        }
+
+        // Schedule for RAF-batched update (prevents rerender storm)
+        this.scheduleArtifactUpdate(clipId, artifact);
+      },
+      onComplete: () => {
+        const currentEntry = this.entries.get(clipId);
+        if (currentEntry && currentEntry.epochId === epochId) {
+          currentEntry.cancelFn = null;
+        }
+      },
+      onError: (err) => {
+        console.error(`[FilmstripCache] Request failed for ${clipId}:`, err);
+      },
+    });
+
+    entry.cancelFn = cancelFn;
+  }
+
+  /**
+   * Get cached artifacts for a clip (immutable snapshot)
+   */
+  getArtifacts(clipId: string): readonly TransportArtifact[] {
+    return this.entries.get(clipId)?.artifacts ?? [];
+  }
+
+  /**
+   * Invalidate clip (cancel requests, dispose bitmaps)
+   */
+  invalidateClip(clipId: string): void {
+    const entry = this.entries.get(clipId);
+    if (!entry) return;
+
+    entry.cancelFn?.();
+    this._disposeArtifacts(entry.artifacts);
+    this.currentMemoryBytes -= entry.memoryBytes;
+    this.entries.delete(clipId);
+
+    // Remove any pending artifacts for this clip
+    const remainingPending = this.pendingArtifacts.filter((p) => {
+      if (p.clipId === clipId) {
+        p.artifact.bitmap.close();
+        return false;
+      }
+      return true;
+    });
+    this.pendingArtifacts = remainingPending;
+  }
+
+  /**
+   * Dispose all resources
+   */
+  dispose(): void {
+    // Cancel pending RAF
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+
+    // Close any pending artifacts
+    for (const { artifact } of this.pendingArtifacts) {
+      artifact.bitmap.close();
+    }
+    this.pendingArtifacts = [];
+
+    // Dispose all entries
+    for (const entry of this.entries.values()) {
+      entry.cancelFn?.();
+      this._disposeArtifacts(entry.artifacts);
+    }
+    this.entries.clear();
+    this.currentMemoryBytes = 0;
+
+    // Dispose tile cache
+    this.tileCache.dispose();
+  }
+
+  private _disposeArtifacts(artifacts: TransportArtifact[]): void {
+    for (const artifact of artifacts) {
+      try {
+        artifact.bitmap.close();
+      } catch (err) {
+        // Bitmap already closed or invalid
+      }
+    }
+  }
+
+  private _evictLRU(excludeClipId?: string): void {
+    let oldestKey: string | null = null;
+    let oldestTime = Infinity;
+
+    for (const [clipId, entry] of this.entries) {
+      if (clipId === excludeClipId) continue;
+      if (entry.lastViewportUpdate < oldestTime) {
+        oldestTime = entry.lastViewportUpdate;
+        oldestKey = clipId;
+      }
+    }
+
+    if (oldestKey) {
+      this.invalidateClip(oldestKey);
+    }
+  }
+
+  getStats() {
+    const tileStats = this.tileCache.getStats();
+    return {
+      clipCount: this.entries.size,
+      memoryMB: (this.currentMemoryBytes / (1024 * 1024)).toFixed(2),
+      budgetMB: this.memoryBudgetBytes / (1024 * 1024),
+      utilizationPercent: ((this.currentMemoryBytes / this.memoryBudgetBytes) * 100).toFixed(1),
+      tileCount: tileStats.tileCount,
+      tileMemoryMB: (tileStats.memoryBytes / (1024 * 1024)).toFixed(2),
+      tileUtilizationPercent: tileStats.utilizationPercent.toFixed(1),
+    };
+  }
+}

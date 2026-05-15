@@ -56,7 +56,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ asset, isSelected, isUsedI
             <Film className="w-full h-full text-text-muted" />
           </div>
         )}
-        {asset.duration > 0 && <div className="absolute top-1 left-1 bg-black/70 px-1.5 py-0.5 rounded text-[10px] text-white">{formatTime(asset.duration)}</div>}
+        {asset.duration > 0 && <div className="absolute bottom-1 right-1 bg-black/70 px-1.5 py-0.5 rounded text-[10px] text-white">{formatTime(asset.duration)}</div>}
         {/* "Added" badge */}
         {isUsedInTimeline && (
           <div className="absolute top-1 left-1 bg-purple-950/80 px-1 py-px rounded-[2px] text-[8px] text-white flex items-center gap-1">

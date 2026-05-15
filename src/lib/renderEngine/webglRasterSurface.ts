@@ -407,7 +407,7 @@ export function createRasterSurface(canvas: HTMLCanvasElement): AnyRasterSurface
     if (gl) {
       return new WebGLRasterSurface(canvas, gl);
     }
-  } catch {
+  } catch (error) {
     // WebGL context creation can throw in some sandboxed environments
   }
   return new RasterSurface(canvas);

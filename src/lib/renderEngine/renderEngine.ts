@@ -19,6 +19,7 @@ import { HysteresisController } from "./hysteresis";
 import { InteractionStateMachine } from "./ism";
 import { RenderScheduler } from "./renderScheduler";
 import { registerActiveEpoch, unregisterActiveEpoch } from "./transport";
+import { FilmstripCache } from "./FilmstripCache";
 
 // ─── Clip State ───────────────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ export class RenderEngine {
   private _ism: InteractionStateMachine;
   private _hysteresis: HysteresisController;
   private _scheduler: RenderScheduler;
+  private _filmstripCache: FilmstripCache;
   private _clipStates = new Map<string, ClipRenderState>();
   private _ismUnsubscribe: (() => void) | null = null;
 
@@ -54,6 +56,7 @@ export class RenderEngine {
       srpConfig?: SrpConfig;
       qualityPreset?: QualityPreset;
       rendererMode?: RendererMode;
+      filmstripMemoryMB?: number;
     } = {},
   ) {
     this.projectId = projectId;
@@ -63,6 +66,7 @@ export class RenderEngine {
     this._ism = new InteractionStateMachine();
     this._hysteresis = new HysteresisController(SpatialTier.L0, options.srpConfig ?? DEFAULT_SRP_CONFIG);
     this._scheduler = new RenderScheduler();
+    this._filmstripCache = new FilmstripCache(options.filmstripMemoryMB ?? 100);
 
     // Subscribe to ISM updates
     this._ismUnsubscribe = this._ism.subscribe((update) => this._onIsmUpdate(update));
@@ -74,6 +78,9 @@ export class RenderEngine {
     this._currentZoom = update.zoomLevel;
     this._currentVelocityState = update.velocityState;
     this._currentInteractionState = update.interactionState;
+
+    // Propagate velocity to FilmstripCache for aggressive cheating
+    this._filmstripCache.setVelocityState(update.velocityState);
 
     // Reset scheduler idle timer on any interaction
     if (update.interactionState !== InteractionState.Idle) {
@@ -130,6 +137,7 @@ export class RenderEngine {
 
   unregisterClip(clipId: string): void {
     this._scheduler.cancelClip(clipId);
+    this._filmstripCache.invalidateClip(clipId);
     unregisterActiveEpoch(clipId);
     this._clipStates.delete(clipId);
   }
@@ -184,6 +192,36 @@ export class RenderEngine {
 
   getScheduler(): RenderScheduler {
     return this._scheduler;
+  }
+
+  /**
+   * Request filmstrip for a clip (called by ClipFilmstrip via useFilmstrip hook)
+   * Viewport-bounded, epoch-gated, auto-updates RenderState.visibleArtifacts
+   */
+  requestFilmstrip(options: { clipId: string; videoPath: string; trimIn: number; trimOut: number; duration: number; clipStartTime: number; clipWidthPx: number; viewportScrollLeft: number; viewportWidth: number; pixelsPerSecond: number }): void {
+    const state = this._clipStates.get(options.clipId);
+    if (!state) {
+      // Clip not registered - register it first
+      this.registerClip(options.clipId);
+      return this.requestFilmstrip(options);
+    }
+
+    this._filmstripCache.requestFilmstrip({
+      ...options,
+      spatialTier: state.renderState.currentTier.spatialTier,
+      epochId: state.renderState.epochId,
+      onUpdate: (artifacts) => {
+        // Update RenderState.visibleArtifacts
+        state.renderState = {
+          ...state.renderState,
+          visibleArtifacts: artifacts,
+          isFallback: artifacts.length === 0,
+        };
+
+        // Notify subscribers
+        this._notifyListeners(options.clipId, state.renderState);
+      },
+    });
   }
 
   /**
@@ -343,6 +381,7 @@ export class RenderEngine {
       unregisterActiveEpoch(clipId);
     }
     this._scheduler.dispose();
+    this._filmstripCache.dispose();
     this._clipStates.clear();
   }
 

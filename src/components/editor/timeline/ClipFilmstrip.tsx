@@ -44,9 +44,11 @@ export interface ClipFilmstripProps {
   pixelsPerSecond: number;
   stripHeightPx?: number;
   className?: string;
+  viewportScrollLeft?: number;
+  viewportWidth?: number;
 }
 
-export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, stripHeightPx = 40, className }: ClipFilmstripProps) {
+export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, stripHeightPx = 40, className, viewportScrollLeft = 0, viewportWidth = 1200 }: ClipFilmstripProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const surfaceRef = useRef<AnyRasterSurface | null>(null);
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -59,16 +61,18 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
 
   const videoPath = isVideoSource && mediaAsset.path ? normalizePathForTauriInvoke(mediaAsset.path) : "";
 
-  // ── Filmstrip data (replaces all inline extraction orchestration) ─────────
+  // ── Filmstrip data (pure projection from RenderEngine) ─────────────────────
   const { artifacts, isFallback, interactionState, spatialTier } = useFilmstrip({
     clipId: clip.id,
     videoPath,
     trimIn: clip.trimIn,
     trimOut: clip.trimOut,
     duration: mediaAsset.duration ?? 0,
+    clipStartTime: clip.startTime,
     clipWidthPx,
-    stripHeightPx,
-    posterFrame: mediaAsset.posterFrame,
+    viewportScrollLeft,
+    viewportWidth,
+    pixelsPerSecond,
     enabled: isVideoSource && !!videoPath && !!mediaAsset.duration,
   });
 
