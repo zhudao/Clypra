@@ -41,12 +41,12 @@ async fn get_image_metadata(path: &str) -> Result<MediaMetadata, String> {
     let (width, height) = img.dimensions();
     
     // Check for alpha channel
-    let has_alpha = match img.color() {
+    let has_alpha = matches!(
+        img.color(),
         image::ColorType::La8 | image::ColorType::La16 |
         image::ColorType::Rgba8 | image::ColorType::Rgba16 |
-        image::ColorType::Rgba32F => true,
-        _ => false,
-    };
+        image::ColorType::Rgba32F
+    );
     
     // Get file size
     let size = fs::metadata(path)
