@@ -1,5 +1,5 @@
 import React from "react";
-import { Download, ArrowRight, Sparkles, Shield, Terminal } from "lucide-react";
+import { Download, ArrowRight, Sparkles, Shield, Terminal, Monitor, Layers, Play } from "lucide-react";
 
 export const WebShowcase: React.FC = () => {
   return (
