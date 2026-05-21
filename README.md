@@ -2,6 +2,8 @@
 
 <div align="center">
 
+![Clypra Showcase Banner](public/clypra.jpg)
+
 ![Clypra Logo](https://img.shields.io/badge/Clypra-Video%20Editor-blue?style=for-the-badge)
 
 A modern, open-source video editor built with Tauri, React, and TypeScript featuring a professional timeline interface.
