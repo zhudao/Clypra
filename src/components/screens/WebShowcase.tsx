@@ -458,8 +458,8 @@ export const WebShowcase: React.FC = () => {
                   <div className="flex items-start gap-2.5">
                     <CheckCircle2 className="w-4 h-4 text-pink-400 flex-shrink-0 mt-0.5" />
                     <div className="flex flex-col">
-                      <span className="text-xs font-semibold text-white">Native Swift & Kotlin</span>
-                      <span className="text-[10px] text-[#666]">Maximum mobile performance</span>
+                      <span className="text-xs font-semibold text-white">Tauri Mobile Core</span>
+                      <span className="text-[10px] text-[#666]">Native Rust performance</span>
                     </div>
                   </div>
                   <div className="flex items-start gap-2.5">
