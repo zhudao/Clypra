@@ -60,18 +60,21 @@ jobs:
 
             ## Installation
 
-            ### macOS
-            1. Download the `.dmg` file
-            2. Open it and drag Clypra to Applications
-            3. First time: Right-click → Open (to bypass Gatekeeper)
+            ### macOS (Apple Silicon & Intel)
+            The recommended way to install Clypra on macOS is via **Homebrew Cask** to automatically bypass the Gatekeeper security warnings:
+            ```bash
+            # Tap the repository and install the cask
+            brew install AIEraDev/tap/clypra
+            ```
+            Alternatively, download the `.dmg` file below, drag Clypra to your `/Applications` folder, then Right-click (Control-click) the application icon and select **Open** to authorize execution.
 
             ### Windows
-            1. Download the `.msi` file
+            1. Download the `.msi` file below
             2. Run the installer
-            3. If SmartScreen appears, click "More info" → "Run anyway"
+            3. If Windows SmartScreen blocks execution, click **More Info** and select **Run Anyway**
 
             ### Linux
-            1. Download the `.AppImage` file
+            1. Download the `.AppImage` file below
             2. Make it executable: `chmod +x Clypra*.AppImage`
             3. Run it: `./Clypra*.AppImage`
           draft: true

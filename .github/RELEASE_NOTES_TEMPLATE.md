@@ -51,27 +51,28 @@ This is an **alpha release** - expect rough edges:
 
 ## Installation
 
-### macOS
+### macOS (Apple Silicon & Intel)
 
-Download `Clypra_0.1.0-alpha.1_universal.dmg` and drag to Applications folder.
+The recommended way to install Clypra on macOS is via **Homebrew Cask** to automatically bypass the Gatekeeper security warnings:
+
+```bash
+# Add the custom tap and install the cask
+brew install AIEraDev/tap/clypra
+```
+
+Alternatively, download `Clypra_<version>_universal.dmg`, drag Clypra to your `/Applications` folder, then Right-click (Control-click) the application icon and select **Open** to authorize execution.
 
 ### Windows
 
-Download `Clypra_0.1.0-alpha.1_x64_en-US.msi` and run the installer.
+Download the `.msi` setup file and run it. If Windows SmartScreen blocks execution, click **More Info** and select **Run Anyway**.
 
 ### Linux
 
-Download `clypra_0.1.0-alpha.1_amd64.AppImage` and make it executable:
+Download the `.AppImage` file and make it executable:
 
 ```bash
-chmod +x clypra_0.1.0-alpha.1_amd64.AppImage
-./clypra_0.1.0-alpha.1_amd64.AppImage
-```
-
-Or install the `.deb` package:
-
-```bash
-sudo dpkg -i clypra_0.1.0-alpha.1_amd64.deb
+chmod +x Clypra*.AppImage
+./Clypra*.AppImage
 ```
 
 ### Build from Source
