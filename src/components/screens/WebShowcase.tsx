@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Download, ArrowRight, Sparkles, Shield, Terminal, Monitor, Layers, Play, CheckCircle2, Copy, Check } from "lucide-react";
+import { Download, ArrowRight, Sparkles, Shield, Terminal, Monitor, Layers, Play, CheckCircle2, Copy, Check, Smartphone } from "lucide-react";
 
 export const WebShowcase: React.FC = () => {
   const [copiedMac, setCopiedMac] = useState(false);
@@ -277,7 +277,7 @@ export const WebShowcase: React.FC = () => {
 
           {/* Subheading */}
           <p className="text-sm sm:text-base md:text-lg text-[#a1a1aa] leading-relaxed max-w-2xl mx-auto font-sans">
-            Clypra is a modern, high-performance desktop video editor built with Tauri, React, and Rust. Experience the desktop-class NLE timeline, hardware-accelerated rendering, and visual asset pools directly on your machine.
+            Clypra is a modern, high-performance video editor engineered using Tauri, React, and Rust. Experience a professional desktop-class NLE timeline, hardware-accelerated rendering, and visual asset pools directly on your machine—with mobile versions coming soon.
           </p>
 
           {/* Quick Platform Badges */}
@@ -429,6 +429,84 @@ export const WebShowcase: React.FC = () => {
                   <Download className="w-4 h-4" />
                   Download for Linux
                 </a>
+              </div>
+            </div>
+
+            {/* Clypra Mobile Teaser Banner */}
+            <div className="glass-panel rounded-2xl p-8 md:p-10 flex flex-col lg:flex-row gap-8 items-center justify-between transition-all duration-500 hover:border-[#6c63ff]/30 hover:shadow-[0_0_35px_rgba(108,99,255,0.1)] relative overflow-hidden group mt-4 col-span-1 md:col-span-3">
+              {/* Glow effect */}
+              <div className="absolute -right-20 -bottom-20 w-80 h-80 bg-[#6c63ff]/5 rounded-full filter blur-3xl transition-all duration-500 group-hover:bg-[#6c63ff]/10" />
+              <div className="absolute -left-20 -top-20 w-80 h-80 bg-pink-500/3 rounded-full filter blur-3xl transition-all duration-500 group-hover:bg-pink-500/6" />
+              
+              <div className="flex flex-col gap-4 text-left max-w-2xl z-10">
+                <div className="inline-flex self-start items-center gap-2 px-3 py-1 rounded-full border border-pink-500/20 bg-pink-500/10 backdrop-blur-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-pink-500 animate-pulse" />
+                  <span className="text-[9px] font-bold tracking-wider text-pink-400 uppercase font-mono">
+                    Mobile Development
+                  </span>
+                </div>
+                
+                <h4 className="font-extrabold text-white text-2xl md:text-3xl font-outfit">
+                  Clypra Mobile <span className="bg-gradient-to-r from-pink-400 to-[#8b84ff] bg-clip-text text-transparent shimmer-bg">Coming Soon</span>
+                </h4>
+                
+                <p className="text-xs md:text-sm text-[#a1a1aa] leading-relaxed">
+                  We are actively bringing the desktop-class native performance of Clypra to your pocket. Built on the brand-new Tauri v2 mobile core, Clypra Mobile will deliver lightning-fast, GPU-accelerated video editing directly on iOS and Android with seamless cloud workspace synchronization.
+                </p>
+                
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-2">
+                  <div className="flex items-start gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-pink-400 flex-shrink-0 mt-0.5" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-semibold text-white">Native Swift & Kotlin</span>
+                      <span className="text-[10px] text-[#666]">Maximum mobile performance</span>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-pink-400 flex-shrink-0 mt-0.5" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-semibold text-white">Touch-Optimized NLE</span>
+                      <span className="text-[10px] text-[#666]">Intuitive gesture timeline</span>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-pink-400 flex-shrink-0 mt-0.5" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-semibold text-white">Workspace Sync</span>
+                      <span className="text-[10px] text-[#666]">Seamless edit handover</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex flex-col sm:flex-row lg:flex-col gap-4 w-full sm:w-auto lg:w-72 justify-center items-stretch z-10">
+                {/* iOS coming soon */}
+                <div className="flex items-center gap-3.5 p-4 rounded-xl bg-white/[0.02] border border-white/[0.04] relative group/item hover:bg-white/[0.04] hover:border-white/[0.08] transition-all">
+                  <div className="w-10 h-10 rounded-lg bg-white/[0.03] border border-white/[0.06] flex items-center justify-center text-white text-lg font-bold">
+                    
+                  </div>
+                  <div className="flex flex-col text-left">
+                    <span className="text-xs font-bold text-white">iOS App Store</span>
+                    <span className="text-[9px] text-[#666] font-mono tracking-wide uppercase mt-0.5">For iPhone and iPad</span>
+                  </div>
+                  <div className="absolute right-4 top-4 text-[8px] font-semibold text-[#8b84ff] bg-[#8b84ff]/10 border border-[#8b84ff]/20 px-1.5 py-0.5 rounded uppercase font-mono">
+                    Coming Soon
+                  </div>
+                </div>
+
+                {/* Android coming soon */}
+                <div className="flex items-center gap-3.5 p-4 rounded-xl bg-white/[0.02] border border-white/[0.04] relative group/item hover:bg-white/[0.04] hover:border-white/[0.08] transition-all">
+                  <div className="w-10 h-10 rounded-lg bg-white/[0.03] border border-white/[0.06] flex items-center justify-center text-[#8b84ff]">
+                    <Smartphone className="w-5 h-5" />
+                  </div>
+                  <div className="flex flex-col text-left">
+                    <span className="text-xs font-bold text-white">Google Play Store</span>
+                    <span className="text-[9px] text-[#666] font-mono tracking-wide uppercase mt-0.5">For Android Devices</span>
+                  </div>
+                  <div className="absolute right-4 top-4 text-[8px] font-semibold text-pink-400 bg-pink-500/10 border border-pink-500/20 px-1.5 py-0.5 rounded uppercase font-mono">
+                    Coming Soon
+                  </div>
+                </div>
               </div>
             </div>
 
