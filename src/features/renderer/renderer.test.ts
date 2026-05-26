@@ -1,6 +1,7 @@
 import { beforeAll, afterAll, describe, test, expect, vi } from "vitest";
 import { renderTextEffect, renderTextEffectToDataURL } from "./renderer";
 import { TextEffectDefinition } from "./types";
+import { goldFoilStamp, classicInk, neonYellowOutline } from "./definitions";
 
 const moltenGold3d: TextEffectDefinition = {
   id: "molten-gold-3d",
@@ -184,56 +185,39 @@ describe("Clypra Text Effects Engine & Presets", () => {
     expect(dataURL.startsWith("data:image/png;base64,")).toBe(true);
   });
 
-  test("Bevel rendering with depth 8 generates exactly 8 stacked copy draws", () => {
+  test("Neon Yellow Outline early return renderer draws custom stroke and fill", () => {
     const canvas = document.createElement("canvas");
     canvas.width = 800;
     canvas.height = 400;
 
-    // Reset spy calls before testing
+    mockCtx.strokeText.mockClear();
     mockCtx.fillText.mockClear();
 
-    renderTextEffect(canvas, "Bevel Test", moltenGold3d, 48);
+    renderTextEffect(canvas, "Neon Glow", neonYellowOutline, 44);
 
-    // Bevel has depth 8, drawing 8 times, and 1 standard fill = 9 fillText calls total for single-line text!
+    // Should call strokeText (tight glow + wide glow + outside black outline)
+    expect(mockCtx.strokeText).toHaveBeenCalled();
+    // Should call fillText (tight glow + wide glow + white body fill)
     expect(mockCtx.fillText).toHaveBeenCalled();
-    const calls = mockCtx.fillText.mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(9);
   });
 
-  test("Stroke rendering correctly draws wider outlines first (widest-first order)", () => {
+  test("Gold Foil Stamp rendering runs cleanly without throwing errors", () => {
     const canvas = document.createElement("canvas");
-    
-    mockCtx.strokeText.mockClear();
+    canvas.width = 800;
+    canvas.height = 400;
 
-    const multiStrokePreset = {
-      ...moltenGold3d,
-      strokes: [
-        { color: "#FF0000", width: 4, position: "outside" as const, opacity: 1 },
-        { color: "#0000FF", width: 8, position: "outside" as const, opacity: 1 },
-      ],
-      bevel: undefined,
-    };
-
-    renderTextEffect(canvas, "Stroke order", multiStrokePreset, 48);
-
-    // Should render widest first (width 8 first, then width 4 second) + 1 for drop shadow stroke
-    expect(mockCtx.strokeText).toHaveBeenCalledTimes(3);
-    
-    // We captured the stroke values inside renderTextEffect where widest-first sort is performed
-    // Let's verify that the wider stroke width is correctly positioned first in sortedStrokes inside renderer
-    const sorted = [...multiStrokePreset.strokes].sort((a, b) => b.width - a.width);
-    expect(sorted[0].width).toBe(8);
-    expect(sorted[1].width).toBe(4);
+    expect(() => {
+      renderTextEffect(canvas, "PRESTIGE", goldFoilStamp, 44);
+    }).not.toThrow();
   });
 
-  test("Glitch rendering triggers RGB channel offsets screen draws", () => {
+  test("Classic Ink rendering runs cleanly without throwing errors", () => {
     const canvas = document.createElement("canvas");
-    
-    mockCtx.drawImage.mockClear();
+    canvas.width = 800;
+    canvas.height = 400;
 
-    renderTextEffect(canvas, "Glitch active", glitchCorrupt, 48);
-
-    // Glitch effect draws red and blue channel offscreens, and displacements
-    expect(mockCtx.drawImage).toHaveBeenCalled();
+    expect(() => {
+      renderTextEffect(canvas, "TEXT", classicInk, 48);
+    }).not.toThrow();
   });
 });

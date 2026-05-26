@@ -1,8 +1,8 @@
-import { Download, Star } from "lucide-react";
 import { useRef, useEffect } from "react";
+import { Download, Star } from "lucide-react";
 import { type TextEffectPreset } from "@/constants/textEffects";
-import { renderTextEffect } from "../../features/renderer/renderer";
-import { allEffects } from "../../features/renderer/definitions";
+import { renderTextEffect } from "@/features/renderer/renderer";
+import { allEffects } from "@/features/renderer/definitions";
 
 interface EffectCardProps {
   effect: TextEffectPreset;
@@ -13,15 +13,6 @@ interface EffectCardProps {
   onPreview: () => void;
 }
 
-const getFontFamilyStack = (fontFamily: string) => {
-  const f = fontFamily?.toLowerCase() || "";
-  if (f.includes("outfit")) return '"Outfit", sans-serif';
-  if (f.includes("poppins")) return '"Poppins", sans-serif';
-  if (f.includes("roboto")) return '"Roboto", sans-serif';
-  if (f.includes("inter")) return '"Inter Variable", sans-serif';
-  return fontFamily;
-};
-
 export const EffectCard: React.FC<EffectCardProps> = ({ effect, isFavorite, isDownloading, onFavorite, onApply, onPreview }) => {
   const premiumEffect = allEffects.find((e) => e.id === effect.id);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -31,49 +22,15 @@ export const EffectCard: React.FC<EffectCardProps> = ({ effect, isFavorite, isDo
       const canvas = canvasRef.current;
       canvas.width = 160;
       canvas.height = 160;
-      renderTextEffect(canvas, "CLYPRA", premiumEffect, 28);
+      renderTextEffect(canvas, "Default text", premiumEffect, 28);
+
+      if (typeof document !== "undefined" && document.fonts) {
+        document.fonts.ready.then(() => {
+          renderTextEffect(canvas, "Default text", premiumEffect, 28);
+        });
+      }
     }
   }, [effect, premiumEffect]);
-
-  const baseStyle: React.CSSProperties = {
-    fontFamily: getFontFamilyStack(effect.fontFamily),
-    fontWeight: effect.fontWeight,
-    fontStyle: effect.fontStyle,
-  };
-
-  const fillStyle: React.CSSProperties = {
-    ...baseStyle,
-  };
-
-  // Build linear text gradient or solid color
-  if (effect.color.includes(",")) {
-    fillStyle.backgroundImage = `linear-gradient(to bottom, ${effect.color})`;
-    fillStyle.backgroundClip = "text";
-    fillStyle.WebkitBackgroundClip = "text";
-    fillStyle.color = "transparent";
-  } else {
-    fillStyle.color = effect.color;
-  }
-
-  const hasStroke = !!effect.stroke;
-  const strokeStyle: React.CSSProperties = {
-    ...baseStyle,
-    position: "absolute",
-    color: "transparent",
-    zIndex: 1,
-  };
-
-  if (effect.stroke) {
-    strokeStyle.WebkitTextStroke = `${effect.stroke.width * 0.6}px ${effect.stroke.color}`;
-  }
-
-  if (effect.shadow) {
-    if (hasStroke) {
-      strokeStyle.textShadow = `${effect.shadow.offsetX * 0.6}px ${effect.shadow.offsetY * 0.6}px ${effect.shadow.blur * 0.6}px ${effect.shadow.color}`;
-    } else {
-      fillStyle.textShadow = `${effect.shadow.offsetX * 0.6}px ${effect.shadow.offsetY * 0.6}px ${effect.shadow.blur * 0.6}px ${effect.shadow.color}`;
-    }
-  }
 
   return (
     <div onClick={onPreview} className="w-full aspect-square bg-surface-raised/40 hover:bg-surface-raised/80 border border-border/40 hover:border-accent/40 rounded-xl relative overflow-hidden flex flex-col justify-between p-2.5 transition-all duration-300 group cursor-pointer">
@@ -82,22 +39,9 @@ export const EffectCard: React.FC<EffectCardProps> = ({ effect, isFavorite, isDo
         <Star className={`w-3 h-3 ${isFavorite ? "fill-yellow-400 text-yellow-400!" : ""}`} />
       </button>
 
-      {/* Real-time HTML Styled Visual Preview */}
+      {/* Real-time HTML Styled Visual Canvas Preview */}
       <div className="flex-1 flex items-center justify-center w-full px-1 py-3 select-none relative overflow-hidden">
-        {premiumEffect ? (
-          <canvas ref={canvasRef} className="max-w-full max-h-full block select-none pointer-events-none" />
-        ) : (
-          <>
-            {hasStroke && (
-              <span style={strokeStyle} className="text-lg font-bold tracking-tight text-center wrap-break-word select-none pointer-events-none">
-                CLYPRA
-              </span>
-            )}
-            <span style={{ ...fillStyle, position: hasStroke ? "relative" : "static", zIndex: 2 }} className="text-lg font-bold tracking-tight text-center wrap-break-word select-none">
-              CLYPRA
-            </span>
-          </>
-        )}
+        <canvas ref={canvasRef} className="max-w-full max-h-full block select-none pointer-events-none" />
       </div>
 
       {/* Footer Info / Apply Download Button */}

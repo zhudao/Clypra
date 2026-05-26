@@ -380,11 +380,14 @@ export function invalidateEvaluationCache(epoch: number) {
  */
 export function normalizeFontFamily(family: string): string {
   const f = family.toLowerCase();
+
   if (f === "inter") return "Inter";
-  if (f.includes("outfit")) return "Outfit";
-  if (f.includes("poppins")) return "Poppins";
-  if (f.includes("roboto")) return "Roboto";
   if (f.includes("inter")) return "Inter Variable";
+  if (f.includes("montserrat")) return "Montserrat Variable";
+  if (f.includes("geist")) return "Geist Variable";
+  if (f.includes("space grotesk") || f.includes("grotesk")) return "Space Grotesk Variable";
+  if (f.includes("outfit")) return "Outfit Variable";
+  if (f.includes("roboto")) return "Roboto Variable";
+
   return family;
 }
-

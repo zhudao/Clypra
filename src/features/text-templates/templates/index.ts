@@ -1,5 +1,11 @@
-import { TemplateDefinition } from '../types';
+import { TemplateDefinition } from "../types";
 
+// ============================================================================
+// ALL TEMPLATES COMMENTED OUT - STARTING FROM SCRATCH
+// ============================================================================
+// Uncomment imports and add to array as needed
+
+/*
 import broadcastTicker from './broadcast-ticker.meta';
 import cinematicOpener from './cinematic-opener.meta';
 import cleanLowerThird from './clean-lower-third.meta';
@@ -15,21 +21,22 @@ import statCallout from './stat-callout.meta';
 import typewriter from './typewriter.meta';
 import verticalShortTitle from './vertical-short-title.meta';
 import youtubeEndcard from './youtube-endcard.meta';
+*/
 
 export const ALL_TEMPLATES: TemplateDefinition[] = [
-  broadcastTicker,
-  cinematicOpener,
-  cleanLowerThird,
-  documentaryCard,
-  glitchTitle,
-  kineticWordReveal,
-  minimalFadeTitle,
-  neonTitleSlam,
-  quoteCard,
-  socialCaptionPop,
-  splitReveal,
-  statCallout,
-  typewriter,
-  verticalShortTitle,
-  youtubeEndcard
+  // broadcastTicker,
+  // cinematicOpener,
+  // cleanLowerThird,
+  // documentaryCard,
+  // glitchTitle,
+  // kineticWordReveal,
+  // minimalFadeTitle,
+  // neonTitleSlam,
+  // quoteCard,
+  // socialCaptionPop,
+  // splitReveal,
+  // statCallout,
+  // typewriter,
+  // verticalShortTitle,
+  // youtubeEndcard
 ];

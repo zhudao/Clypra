@@ -58,12 +58,24 @@ export const interpolateColor = (color1: string, color2: string, factor: number)
  * @param font - Font parameters.
  * @param fontSize - Font size in pixels.
  */
-export const applyFontConfig = (
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  font: TextEffectDefinition["font"],
-  fontSize: number
-) => {
-  ctx.font = `${font.style} ${font.weight} ${fontSize}px ${font.family}`;
+export const applyFontConfig = (ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, font: TextEffectDefinition["font"], fontSize: number) => {
+  let family = font.family;
+  const f = family.toLowerCase();
+  if (f.includes("inter")) {
+    family = '"Inter Variable", sans-serif';
+  } else if (f.includes("montserrat")) {
+    family = '"Montserrat Variable", sans-serif';
+  } else if (f.includes("geist")) {
+    family = '"Geist Variable", sans-serif';
+  } else if (f.includes("space grotesk") || f.includes("grotesk")) {
+    family = '"Space Grotesk Variable", sans-serif';
+  } else if (f.includes("outfit")) {
+    family = '"Outfit Variable", sans-serif';
+  } else if (f.includes("roboto")) {
+    family = '"Roboto Variable", sans-serif';
+  }
+
+  ctx.font = `${font.style} ${font.weight} ${fontSize}px ${family}`;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
   if (typeof (ctx as any).letterSpacing !== "undefined") {
@@ -80,13 +92,18 @@ export const applyFontConfig = (
  * @param x - Center anchor X.
  * @param y - Center anchor Y.
  */
-export const clipToText = (
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  lines: string[],
-  fontSize: number,
-  font: TextEffectDefinition["font"],
-  x: number,
-  y: number
-) => {
+export const clipToText = (ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, lines: string[], fontSize: number, font: TextEffectDefinition["font"], x: number, y: number) => {
   ctx.globalCompositeOperation = "source-atop";
+};
+
+export const getFontFamilyStack = (fontFamily: string) => {
+  const f = fontFamily?.toLowerCase() || "";
+  if (f.includes("inter")) return '"Inter Variable", sans-serif';
+  if (f.includes("montserrat")) return '"Montserrat Variable", sans-serif';
+  if (f.includes("geist")) return '"Geist Variable", sans-serif';
+  if (f.includes("space grotesk") || f.includes("grotesk")) return '"Space Grotesk Variable", sans-serif';
+  if (f.includes("outfit")) return '"Outfit Variable", sans-serif';
+  if (f.includes("roboto")) return '"Roboto Variable", sans-serif';
+
+  return fontFamily;
 };

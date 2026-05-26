@@ -1,20 +1,11 @@
 import { useRef, useEffect } from "react";
-import { LottiePlayer } from "../../features/text-templates/LottiePlayer";
-import { renderTextEffect } from "../../features/renderer/renderer";
-import { allEffects } from "../../features/renderer/definitions";
-
-const getFontFamilyStack = (fontFamily: string) => {
-  const f = fontFamily?.toLowerCase() || "";
-  if (f.includes("outfit")) return '"Outfit", sans-serif';
-  if (f.includes("poppins")) return '"Poppins", sans-serif';
-  if (f.includes("roboto")) return '"Roboto", sans-serif';
-  if (f.includes("inter")) return '"Inter Variable", sans-serif';
-  return fontFamily;
-};
+import { LottiePlayer } from "@/features/text-templates/LottiePlayer";
+import { renderTextEffect } from "@/features/renderer/renderer";
+import { allEffects } from "@/features/renderer/definitions";
 
 export const TextSourcePreview: React.FC<{ preset: any }> = ({ preset }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const previewText = "CLYPRA";
+  const previewText = "Default text";
   const isTemplate = preset?.presetType === "template" || !!preset?.lottieData;
   const styleId = preset?.styleId || preset?.id;
   const premiumEffect = styleId ? allEffects.find((e) => e.id === styleId) : null;
@@ -26,6 +17,13 @@ export const TextSourcePreview: React.FC<{ preset: any }> = ({ preset }) => {
     canvas.height = 360;
 
     renderTextEffect(canvas, previewText, premiumEffect, 44);
+
+    if (typeof document !== "undefined" && document.fonts) {
+      document.fonts.ready.then(() => {
+        // Redraw once fonts have finished loading
+        renderTextEffect(canvas, previewText, premiumEffect, 44);
+      });
+    }
   }, [previewText, premiumEffect, isTemplate]);
 
   if (!preset) return null;
@@ -38,77 +36,10 @@ export const TextSourcePreview: React.FC<{ preset: any }> = ({ preset }) => {
     );
   }
 
-  if (premiumEffect) {
-    return (
-      <div className="w-full aspect-video bg-black flex items-center justify-center relative p-8 shadow-[0_0_40px_rgba(0,0,0,0.8)] border border-white/5 overflow-hidden">
-        <canvas ref={canvasRef} className="max-w-full max-h-full block select-none pointer-events-none" />
-      </div>
-    );
-  }
-
-  // Build dynamic CSS styles
-  const baseStyle: React.CSSProperties = {
-    fontFamily: getFontFamilyStack(preset.fontFamily),
-    fontWeight: preset.fontWeight,
-    fontStyle: preset.fontStyle,
-  };
-
-  const fillStyle: React.CSSProperties = {
-    ...baseStyle,
-  };
-
-  // Solid or gradient color
-  const color = preset.color || "#ffffff";
-  if (color.includes(",")) {
-    fillStyle.backgroundImage = `linear-gradient(to bottom, ${color})`;
-    fillStyle.backgroundClip = "text";
-    fillStyle.WebkitBackgroundClip = "text";
-    fillStyle.color = "transparent";
-  } else {
-    fillStyle.color = color;
-  }
-
-  const hasStroke = !!preset.stroke;
-  const strokeStyle: React.CSSProperties = {
-    ...baseStyle,
-    position: "absolute",
-    color: "transparent",
-    zIndex: 1,
-  };
-
-  if (preset.stroke) {
-    strokeStyle.WebkitTextStroke = `${preset.stroke.width * 1.2}px ${preset.stroke.color}`; // slightly larger stroke for monitor size
-  }
-
-  if (preset.shadow) {
-    if (hasStroke) {
-      strokeStyle.textShadow = `${preset.shadow.offsetX * 1.2}px ${preset.shadow.offsetY * 1.2}px ${preset.shadow.blur * 1.2}px ${preset.shadow.color}`;
-    } else {
-      fillStyle.textShadow = `${preset.shadow.offsetX * 1.2}px ${preset.shadow.offsetY * 1.2}px ${preset.shadow.blur * 1.2}px ${preset.shadow.color}`;
-    }
-  }
-
-  // Draw background box if specified
-  const bgStyle: React.CSSProperties = preset.background
-    ? {
-        backgroundColor: preset.background.color,
-        padding: `${preset.background.padding * 1.2}px`,
-        borderRadius: `${preset.background.borderRadius * 1.2}px`,
-      }
-    : {};
-
+  // Always use Canvas display since all effects are registered procedurally
   return (
     <div className="w-full aspect-video bg-black flex items-center justify-center relative p-8 shadow-[0_0_40px_rgba(0,0,0,0.8)] border border-white/5 overflow-hidden">
-      <div style={bgStyle} className="flex items-center justify-center relative select-none">
-        {hasStroke && (
-          <span style={strokeStyle} className="text-3xl sm:text-4xl md:text-5xl font-bold tracking-tight text-center wrap-break-word select-none pointer-events-none">
-            {previewText}
-          </span>
-        )}
-        <span style={{ ...fillStyle, position: hasStroke ? "relative" : "static", zIndex: 2 }} className="text-3xl sm:text-4xl md:text-5xl font-bold tracking-tight text-center wrap-break-word select-none">
-          {previewText}
-        </span>
-      </div>
+      <canvas ref={canvasRef} className="max-w-full max-h-full block select-none pointer-events-none" />
     </div>
   );
 };

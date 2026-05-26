@@ -51,9 +51,7 @@ export const frostedGlassEtch: TextEffectDefinition = {
   font: { family: "Cinzel", weight: 300, style: "normal", letterSpacing: 4, lineHeight: 1.2 },
   fills: [{ type: "solid", color: "rgba(235, 247, 250, 0.35)" }],
   strokes: [],
-  shadows: [
-    { type: "drop", color: "#000000", blur: 2, offsetX: 1.5, offsetY: 1.5, opacity: 0.5 },
-  ],
+  shadows: [{ type: "drop", color: "#000000", blur: 2, offsetX: 1.5, offsetY: 1.5, opacity: 0.5 }],
   frostedGlass: {
     enabled: true,
     etchOpacity: 0.35,
@@ -82,9 +80,7 @@ export const burnedWoodPyrography: TextEffectDefinition = {
   font: { family: "Cinzel Decorative", weight: 900, style: "normal", letterSpacing: 1, lineHeight: 1.1 },
   fills: [{ type: "solid", color: "#060302" }],
   strokes: [],
-  shadows: [
-    { type: "drop", color: "rgba(6, 3, 2, 0.98)", blur: 3, offsetX: 0, offsetY: 0, opacity: 0.98 },
-  ],
+  shadows: [{ type: "drop", color: "rgba(6, 3, 2, 0.98)", blur: 3, offsetX: 0, offsetY: 0, opacity: 0.98 }],
   burnedWood: {
     enabled: true,
     woodTone: "Honey Oak",
@@ -117,12 +113,8 @@ export const victorianOrnate: TextEffectDefinition = {
       ],
     },
   ],
-  strokes: [
-    { color: "#ffffff", width: 0.5, position: "outside", opacity: 0.7 },
-  ],
-  shadows: [
-    { type: "drop", color: "#150e04", blur: 0, offsetX: 7.5, offsetY: 7.5, opacity: 0.9 },
-  ],
+  strokes: [{ color: "#ffffff", width: 0.5, position: "outside", opacity: 0.7 }],
+  shadows: [{ type: "drop", color: "#150e04", blur: 0, offsetX: 7.5, offsetY: 7.5, opacity: 0.9 }],
   victorianOrnate: {
     enabled: true,
     bgType: "Oxblood",
@@ -178,11 +170,156 @@ export const calligraphyInk: TextEffectDefinition = {
   },
 };
 
-export const allEffects: TextEffectDefinition[] = [
-  glowYellow,
-  newspaperOffset,
-  frostedGlassEtch,
-  burnedWoodPyrography,
-  victorianOrnate,
-  calligraphyInk,
-];
+export const goldFoilStamp: TextEffectDefinition = {
+  id: "gold-foil-stamp",
+  name: "Gold Foil Stamp",
+  category: "metallic",
+  description: "Opulent gold foil hot stamp debossed deep into premium dark, heavy-textured cardstock paper.",
+  tags: ["classic", "gold", "foil", "emboss", "stamp", "premium"],
+  font: { family: "Cinzel", weight: 900, style: "normal", letterSpacing: 14, lineHeight: 1.1 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  goldFoilStamp: {
+    enabled: true,
+    goldTone: "#e5c158",
+    foilContrast: 0.85,
+    debossDepth: 3.5,
+    bevelHighlight: 0.7,
+    bgColor: "transparent",
+    paperTexture: 0,
+  },
+};
+
+export const classicInk: TextEffectDefinition = {
+  id: "classic-ink",
+  name: "Classic Ink",
+  category: "classic",
+  description: "Sophisticated 1940s Hollywood title card style with ivory gradients, sharp graphite outlines, and soft charcoal drop shadows.",
+  tags: ["classic", "serif", "retro", "ink", "editorial", "clean"],
+  font: { family: "Georgia", weight: 700, style: "normal", letterSpacing: 7, lineHeight: 1.15 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  classicInk: {
+    enabled: true,
+    ivoryTone: "#fdfbf7",
+    midTone: "#dcd9ce",
+    darkTone: "#b0ada0",
+    strokeColor: "#53514a",
+    shadowColor: "rgba(28, 26, 23, 0.82)",
+    highlightIntensity: 0.15,
+  },
+};
+
+export const neonYellowOutline: TextEffectDefinition = {
+  id: "neon-yellow-outline",
+  name: "Neon Yellow Outline",
+  category: "neon",
+  description: "High-impact neon outline with a white letter body, crisp black stroke, and radiating yellow bloom glow.",
+  tags: ["neon", "yellow", "outline", "glow", "dark", "bold"],
+  font: { family: "Geist Variable", weight: 900, style: "normal", letterSpacing: 0, lineHeight: 1 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  neonYellowOutline: {
+    enabled: true,
+    glowColor: "#FFFF00",
+    glowTightBlur: 4,
+    glowWideBlur: 10,
+    strokeColor: "#000000",
+    strokeWidth: 5.5,
+    fillColor: "#FFFFFF",
+  },
+};
+
+export const classicEngraved: TextEffectDefinition = {
+  id: "classic-engraved",
+  name: "Classic Engraved",
+  category: "classic",
+  description: "Presidential stationery engraved letters that sink inward with dark bronze gradient, inner shadows, and bright inner highlights. The visual opposite of Classic Ink.",
+  tags: ["classic", "engraved", "serif", "bronze", "editorial", "recessed"],
+  font: { family: "Georgia", weight: 700, style: "normal", letterSpacing: 6, lineHeight: 1.15 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  classicEngraved: {
+    enabled: true,
+    bronzeDark: "#5C3D2E",
+    bronzeLight: "#8B6914",
+    creamEdge: "#FAF0E6",
+    innerShadowColor: "rgba(30, 15, 5, 0.85)",
+    innerHighlightColor: "rgba(255, 248, 230, 0.6)",
+  },
+};
+
+export const classicSerifGold: TextEffectDefinition = {
+  id: "classic-serif-gold",
+  name: "Classic Serif Gold",
+  category: "classic",
+  description: "Luxury editorial gold with champagne-to-amber gradient, 5-layer bevel extrusion, warm-brown stroke, and diagonal specular highlight.",
+  tags: ["classic", "gold", "serif", "luxury", "editorial", "bevel"],
+  font: { family: "Georgia", weight: 700, style: "normal", letterSpacing: 7, lineHeight: 1.15 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  classicSerifGold: {
+    enabled: true,
+    champagneTop: "#F5E6C8",
+    richGold: "#DAA520",
+    deepAmber: "#B8860B",
+    baseBright: "#D4A843",
+    strokeColor: "#6B4226",
+    bevelDepth: 5,
+    bevelDark: "#8B6914",
+    bevelLight: "#F5DEB3",
+    highlightIntensity: 0.18,
+  },
+};
+
+export const classicStamp: TextEffectDefinition = {
+  id: "classic-stamp",
+  name: "Classic Stamp",
+  category: "classic",
+  description: "Rubber stamp pressed with heavy ink. Flat deep red fill with rough ink-bleed edges, mild inner shadow, and hard offset drop shadow.",
+  tags: ["classic", "stamp", "rubber", "ink", "red", "grunge"],
+  font: { family: "Impact", weight: 900, style: "normal", letterSpacing: 5, lineHeight: 1.1 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  classicStamp: {
+    enabled: true,
+    inkColor: "#8B1A1A",
+    innerShadowColor: "rgba(60, 10, 10, 0.7)",
+    roughness: 0.8,
+    hardShadowOffset: 4,
+  },
+};
+
+export const classicNeonSign: TextEffectDefinition = {
+  id: "classic-neon-sign",
+  name: "Classic Neon Sign",
+  category: "classic",
+  description: "1950s diner neon with hollow transparent letters, warm white core, triple amber-orange glow layers, and floor reflection.",
+  tags: ["classic", "neon", "sign", "diner", "hollow", "retro", "glow"],
+  font: { family: "Impact", weight: 900, style: "normal", letterSpacing: 8, lineHeight: 1.1 },
+  fills: [],
+  strokes: [],
+  shadows: [],
+  classicNeonSign: {
+    enabled: true,
+    coreColor: "#FFFAF0",
+    coreWidth: 3,
+    glowTight: "#FFFFFF",
+    glowTightBlur: 8,
+    glowMid: "#FFB347",
+    glowMidBlur: 30,
+    glowWide: "#CC4400",
+    glowWideBlur: 80,
+    reflectionOpacity: 0.2,
+    reflectionFade: 80,
+  },
+};
+
+// export const allEffects: TextEffectDefinition[] = [glowYellow, newspaperOffset, frostedGlassEtch, burnedWoodPyrography, victorianOrnate, calligraphyInk, goldFoilStamp, classicInk, neonYellowOutline, classicEngraved, classicSerifGold, classicStamp, classicNeonSign];
+export const allEffects: TextEffectDefinition[] = [neonYellowOutline];

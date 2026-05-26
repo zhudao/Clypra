@@ -302,7 +302,7 @@ function AppearanceTab() {
   const { theme, fontFamily, customTheme, setTheme, setFontFamily } = useSettingsStore();
   const [showCustomEditor, setShowCustomEditor] = useState(false);
   const themeKeys: Theme[] = ["dark", "midnight", "ocean", "forest"];
-  const fontKeys: FontFamily[] = ["inter", "system", "mono", "roboto", "poppins", "outfit"];
+  const fontKeys: FontFamily[] = ["inter", "montserrat", "geist", "outfit", "roboto", "space-grotesk", "system", "mono"];
 
   return (
     <div className="space-y-7">

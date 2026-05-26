@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 export type Theme = "dark" | "midnight" | "ocean" | "forest" | "custom";
-export type FontFamily = "inter" | "system" | "mono" | "roboto" | "poppins" | "outfit";
+export type FontFamily = "inter" | "montserrat" | "geist" | "outfit" | "roboto" | "space-grotesk" | "system" | "mono";
 export type FrameRate = 24 | 30 | 60;
 
 interface SettingsStore {
@@ -363,20 +363,24 @@ export function getThemeColors(t: Theme, customColors?: Record<string, string> |
 // Font family definitions
 const fontFamilies: Record<FontFamily, string> = {
   inter: '"Inter Variable", sans-serif',
+  montserrat: '"Montserrat Variable", sans-serif',
+  geist: '"Geist Variable", sans-serif',
+  outfit: '"Outfit Variable", sans-serif',
+  roboto: '"Roboto Variable", sans-serif',
+  "space-grotesk": '"Space Grotesk Variable", sans-serif',
   system: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   mono: '"JetBrains Mono", "Fira Code", Consolas, monospace',
-  roboto: '"Roboto", sans-serif',
-  poppins: '"Poppins", sans-serif',
-  outfit: '"Outfit", sans-serif',
 };
 
 export const FONT_META: Record<FontFamily, { name: string; stack: string }> = {
   inter: { name: "Inter", stack: fontFamilies.inter },
+  montserrat: { name: "Montserrat", stack: fontFamilies.montserrat },
+  geist: { name: "Geist", stack: fontFamilies.geist },
+  outfit: { name: "Outfit", stack: fontFamilies.outfit },
+  roboto: { name: "Roboto", stack: fontFamilies.roboto },
+  "space-grotesk": { name: "Space Grotesk", stack: fontFamilies["space-grotesk"] },
   system: { name: "System", stack: fontFamilies.system },
   mono: { name: "Mono", stack: fontFamilies.mono },
-  roboto: { name: "Roboto", stack: fontFamilies.roboto },
-  poppins: { name: "Poppins", stack: fontFamilies.poppins },
-  outfit: { name: "Outfit", stack: fontFamilies.outfit },
 };
 
 export function applyTheme(theme: Theme, customColors?: Record<string, string> | null) {
