@@ -295,3 +295,6 @@ register(CrimsonKineticMontserratComicsHalftone80pxGlowDefinition, CrimsonKineti
 
 import { CrimsonNeueBebasNeueSolid100pxGlowEngine, CrimsonNeueBebasNeueSolid100pxGlowDefinition } from "./effects/CrimsonNeueBebasNeueSolid100pxGlow";
 register(CrimsonNeueBebasNeueSolid100pxGlowDefinition, CrimsonNeueBebasNeueSolid100pxGlowEngine);
+
+import { StarkContourRalewayEmpty100pxStroke2Engine, StarkContourRalewayEmpty100pxStroke2Definition } from "./effects/StarkContourRalewayEmpty100pxStroke2";
+register(StarkContourRalewayEmpty100pxStroke2Definition, StarkContourRalewayEmpty100pxStroke2Engine);

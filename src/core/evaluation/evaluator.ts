@@ -390,6 +390,12 @@ export function normalizeFontFamily(family: string): string {
   if (f.includes("roboto condensed")) return "Roboto Condensed";
   if (f.includes("roboto variable")) return "Roboto Variable";
   if (f === "roboto") return "Roboto Variable";
+  if (f.includes("open sans")) return "Open Sans Variable";
+  if (f.includes("raleway")) return "Raleway Variable";
+  if (f.includes("oswald")) return "Oswald Variable";
+  if (f.includes("playfair display")) return "Playfair Display Variable";
+  if (f.includes("nunito")) return "Nunito Variable";
+  if (f.includes("dancing script")) return "Dancing Script Variable";
 
   return family;
 }
