@@ -25,13 +25,65 @@ export const renderTextEffectToContext = (ctx: CanvasRenderingContext2D | Offscr
   // ── Fallback generic renderer ────────────────────────────────────────────
   // Reached only for effects that are not registered in the registry.
   const lines = text.split("\n");
-  const lineHeightPx = fontSize * effect.font.lineHeight;
-  let textWidth = 0;
-  lines.forEach((line) => {
-    textWidth = Math.max(textWidth, ctx.measureText(line).width);
+  const lineHeightPx = fontSize * (effect.font.lineHeight || 1.2);
+  const totalHeight = (lines.length - 1) * lineHeightPx;
+  const startY = _y - totalHeight / 2;
+
+  const fill = effect.fills?.[0];
+  const stroke = effect.strokes?.[0];
+  const shadow = effect.shadows?.[0];
+
+  ctx.save();
+
+  // Apply Drop Shadow
+  if (shadow) {
+    ctx.shadowColor = shadow.color || "rgba(0,0,0,0.5)";
+    ctx.shadowBlur = shadow.blur ?? 5;
+    ctx.shadowOffsetX = shadow.offsetX ?? 0;
+    ctx.shadowOffsetY = shadow.offsetY ?? 0;
+  }
+
+  // Set Fill Style
+  const hasFill = !fill || fill.type !== "none";
+  if (hasFill) {
+    if (fill && fill.type === "gradient") {
+      const stops = fill.gradient?.stops || [];
+      const grad = ctx.createLinearGradient(_x, startY - fontSize / 2, _x, startY + totalHeight + fontSize / 2);
+      stops.forEach((stop: any) => {
+        const offset = typeof stop.offset === "number" ? stop.offset : (stop.position ?? 0);
+        grad.addColorStop(offset, stop.color);
+      });
+      ctx.fillStyle = grad;
+    } else {
+      ctx.fillStyle = fill?.color || "#ffffff";
+    }
+  }
+
+  // Set Stroke Style
+  const hasStroke = !!stroke;
+  if (hasStroke) {
+    ctx.strokeStyle = stroke.color || "#000000";
+    ctx.lineWidth = stroke.width ?? 2;
+    ctx.lineJoin = stroke.lineJoin || "round";
+  }
+
+  // Draw lines
+  lines.forEach((line, i) => {
+    const currentY = startY + i * lineHeightPx;
+    if (hasFill) {
+      ctx.fillText(line, _x, currentY);
+    }
+    if (hasStroke) {
+      // Disable shadow for outline/stroke to keep it crisp
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.strokeText(line, _x, currentY);
+    }
   });
-  void lineHeightPx;
-  void textWidth;
+
+  ctx.restore();
 };
 
 /**
