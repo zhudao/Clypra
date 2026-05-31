@@ -135,74 +135,101 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
 
       let count = 0;
 
-      // Loop through all visual/audio clips
-      for (const mediaClip of audioOrVideoClips) {
-        const asset = mediaAssets.find((a) => a.id === mediaClip.mediaId);
-        if (!asset) continue;
+      // Check the Tauri internals presence to prevent execution before Tauri bridge is ready
+      // IMPORTANT: Only use Tauri commands in actual desktop app, never in web/production
+      const isTauri = typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__ && typeof invoke === "function";
 
-        const pathStr = asset.path || "";
-        if (!pathStr) continue;
+      console.log("[Clypra:Captions] Environment check:", {
+        isTauri,
+        hasWindow: typeof window !== "undefined",
+        hasTauriInternals: !!(window as any).__TAURI_INTERNALS__,
+        hasInvoke: typeof invoke === "function",
+      });
 
-        // Check the Tauri internals presence to prevent execution before Tauri bridge is ready
-        const isTauri = typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__;
+      if (isTauri) {
+        console.log("[Clypra:Captions] Running in Tauri desktop mode - using local Whisper AI");
 
-        if (isTauri) {
-          // ─── 1. AUDIO EXTRACTION ───
-          setCaptioningState("analyzing");
-          setCaptioningProgress(25);
+        // Loop through all visual/audio clips
+        for (const mediaClip of audioOrVideoClips) {
+          const asset = mediaAssets.find((a) => a.id === mediaClip.mediaId);
+          if (!asset) continue;
 
-          const tempAudioPath = await invoke<string>("extract_audio_track", { path: pathStr });
+          const pathStr = asset.path || "";
+          if (!pathStr) continue;
 
-          // ─── 2. LOCAL SPEECH TRANSCRIPTION ───
-          setCaptioningState("transcribing");
-          setCaptioningProgress(60);
+          try {
+            // ─── 1. AUDIO EXTRACTION ───
+            setCaptioningState("analyzing");
+            setCaptioningProgress(25);
 
-          const resultJsonStr = await invoke<string>("transcribe_audio_local", { audioPath: tempAudioPath });
-          const result = JSON.parse(resultJsonStr);
+            const tempAudioPath = await invoke<string>("extract_audio_track", { path: pathStr });
 
-          if (result.error) {
-            throw new Error(result.error);
-          }
+            // ─── 2. LOCAL SPEECH TRANSCRIPTION ───
+            setCaptioningState("transcribing");
+            setCaptioningProgress(60);
 
-          // ─── 3. TIMELINE STITCHING ───
-          setCaptioningState("stitching");
-          setCaptioningProgress(90);
+            const resultJsonStr = await invoke<string>("transcribe_audio_local", { audioPath: tempAudioPath });
+            const result = JSON.parse(resultJsonStr);
 
-          const segments = result.segments || [];
-          if (segments.length > 0) {
-            timeline.withBatch(() => {
-              segments.forEach((seg: any) => {
-                // Whisper timestamps are relative to the audio file.
-                // In Clypra, we need to map them relative to the clip's start time on the timeline,
-                // adjusting for any trimIn offsets.
-                const relativeStart = seg.start - mediaClip.trimIn;
+            if (result.error) {
+              throw new Error(result.error);
+            }
 
-                // Only place segments that fall within the visible/active trimmed duration of the clip
-                if (relativeStart >= 0 && relativeStart < mediaClip.duration) {
-                  const startTime = mediaClip.startTime + relativeStart;
-                  const segmentDuration = Math.min(seg.end - seg.start, mediaClip.duration - relativeStart);
+            // ─── 3. TIMELINE STITCHING ───
+            setCaptioningState("stitching");
+            setCaptioningProgress(90);
 
-                  const textClip = createTextClip({
-                    trackId: targetTrackId!,
-                    startTime,
-                    duration: segmentDuration,
-                    text: seg.text,
-                    canvasWidth: project?.canvasWidth || 1920,
-                    canvasHeight: project?.canvasHeight || 1080,
-                    fontSize: 32,
-                    bold: true,
-                    position: "bottom",
-                    styleId: "neon-crimson",
-                    fontFamily: "Outfit Variable",
-                  });
+            const segments = result.segments || [];
+            if (segments.length > 0) {
+              timeline.withBatch(() => {
+                segments.forEach((seg: any) => {
+                  // Whisper timestamps are relative to the audio file.
+                  // In Clypra, we need to map them relative to the clip's start time on the timeline,
+                  // adjusting for any trimIn offsets.
+                  const relativeStart = seg.start - mediaClip.trimIn;
 
-                  timeline.addClip(textClip);
-                  count++;
-                }
+                  // Only place segments that fall within the visible/active trimmed duration of the clip
+                  if (relativeStart >= 0 && relativeStart < mediaClip.duration) {
+                    const startTime = mediaClip.startTime + relativeStart;
+                    const segmentDuration = Math.min(seg.end - seg.start, mediaClip.duration - relativeStart);
+
+                    const textClip = createTextClip({
+                      trackId: targetTrackId!,
+                      startTime,
+                      duration: segmentDuration,
+                      text: seg.text,
+                      canvasWidth: project?.canvasWidth || 1920,
+                      canvasHeight: project?.canvasHeight || 1080,
+                      fontSize: 32,
+                      bold: true,
+                      position: "bottom",
+                      styleId: "neon-crimson",
+                      fontFamily: "Outfit Variable",
+                    });
+
+                    timeline.addClip(textClip);
+                    count++;
+                  }
+                });
               });
-            });
+            }
+          } catch (invokeError: any) {
+            console.error("[Clypra:Captions] Tauri invoke failed for clip:", mediaClip.id, invokeError);
+            // Continue to next clip instead of failing entire operation
+            continue;
           }
-        } else {
+        }
+      } else {
+        console.log("[Clypra:Captions] Running in web/browser mode - using contextual caption simulator");
+
+        // Loop through all visual/audio clips
+        for (const mediaClip of audioOrVideoClips) {
+          const asset = mediaAssets.find((a) => a.id === mediaClip.mediaId);
+          if (!asset) continue;
+
+          const pathStr = asset.path || "";
+          if (!pathStr) continue;
+
           // Fallback context mock if not running in Tauri (e.g. browser testing or missing backend)
           await new Promise((resolve) => setTimeout(resolve, 600));
           setCaptioningState("transcribing");
@@ -259,11 +286,11 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
       const session = getActiveSessionOrNull();
       session?.transportAuthority?.seek(0);
     } catch (err: any) {
-      console.error("[Transcription Error]", err);
+      console.error("[Clypra:Captions] Transcription Error:", err);
       // Fallback gracefully with error UI
       setCaptioningState("idle");
       setCaptioningProgress(0);
-      alert(`Local transcription failed: ${err.message || err}. Running in fallback contextual simulator...`);
+      alert(`Captioning failed: ${err.message || err}. Please try again or check the console for details.`);
     }
   };
 
