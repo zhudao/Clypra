@@ -17,8 +17,9 @@
 
 import type { EvaluatedScene, EvaluatedMediaLayer, EvaluatedTextLayer } from "../evaluation/types";
 import { getResourceCache } from "../resources/ResourceCache";
-import { renderTextEffectToContext } from "../../features/text-effects/renderer";
-import { allTextEffects } from "../../features/text-effects/registry";
+import { _buildConfig } from "../../features/text-effects/registry";
+import { defaultConfig as engineDefaultConfig, evaluateScene, textEffectConfigToScene, type TextEffectConfig } from "@clypra/engine";
+import { useEffectsStore } from "../../features/text-effects/store/effectsStore";
 
 /**
  * Global pool for OffscreenCanvas to prevent GC stalls during rendering/export.
@@ -354,52 +355,39 @@ function drawLoadingPlaceholder(ctx: CanvasRenderingContext2D | OffscreenCanvasR
  * Preview MUST use this same code path.
  */
 function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, layer: EvaluatedTextLayer, width: number, height: number, scaleX: number, scaleY: number): void {
-  // If we have a styleId matching our core text effects, use core procedural renderer
+  // If we have a styleId, look up the full effect definition from the effects
+  // store cache (API-fetched definitions live here, allTextEffects is always empty).
   if (layer.styleId) {
-    const effect = allTextEffects.find((e) => e.id === layer.styleId);
-    if (effect) {
-      const overriddenEffect = {
-        ...effect,
-        font: {
-          ...effect.font,
-          family: layer.fontFamily || effect.font.family,
-        },
-      };
+    const effectDef = useEffectsStore.getState().definitions[layer.styleId];
+    if (effectDef) {
       const fontSize = layer.fontSize * scaleY;
-      const totalHeight = layer.text.split("\n").length * fontSize * overriddenEffect.font.lineHeight;
-      let startY: number;
-      switch (layer.verticalAlign) {
-        case "top":
-          startY = -height / 2 + (fontSize * overriddenEffect.font.lineHeight) / 2;
-          break;
-        case "bottom":
-          startY = height / 2 - totalHeight + (fontSize * overriddenEffect.font.lineHeight) / 2;
-          break;
-        case "middle":
-        default:
-          startY = -totalHeight / 2 + (fontSize * overriddenEffect.font.lineHeight) / 2;
-          break;
-      }
-      let textX: number;
-      switch (layer.textAlign) {
-        case "left":
-          textX = -width / 2;
-          break;
-        case "right":
-          textX = width / 2;
-          break;
-        case "center":
-        default:
-          textX = 0;
-          break;
-      }
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(-width / 2, -height / 2, width, height);
-      ctx.clip();
+      const effectPadding = fontSize * 0.5;
+      const offW = Math.max(1, Math.ceil(width + effectPadding * 2));
+      const offH = Math.max(1, Math.ceil(height + effectPadding * 2));
+      const offscreen = canvasPool.acquire(offW, offH);
+      const offCtx = offscreen.getContext("2d", { alpha: true }) as OffscreenCanvasRenderingContext2D | null;
+      if (offCtx) {
+        offCtx.setTransform(1, 0, 0, 1, 0, 0);
+        offCtx.clearRect(0, 0, offW, offH);
 
-      renderTextEffectToContext(ctx, layer.text, overriddenEffect, fontSize, textX, startY + totalHeight / 2 - (fontSize * overriddenEffect.font.lineHeight) / 2, width, height);
-      ctx.restore();
+        // Use evaluateScene — the correct full engine pipeline that applies
+        // ctx.filter for stroke blur, glow compositing, bevel, and all post-fx.
+        const builtCfg = _buildConfig(effectDef, layer.text, fontSize, offW, offH, layer.time, layer.clipStartTime, layer.clipDuration);
+        const engineConfig: TextEffectConfig = {
+          ...engineDefaultConfig,
+          ...builtCfg,
+          // _buildConfig uses width/height — engine expects canvasWidth/canvasHeight.
+          canvasWidth: offW,
+          canvasHeight: offH,
+          fontFamily: layer.fontFamily || effectDef.font?.family,
+        } as TextEffectConfig;
+
+        offCtx.clearRect(0, 0, offW, offH);
+        evaluateScene(textEffectConfigToScene(engineConfig), layer.time ?? 0, offCtx as unknown as CanvasRenderingContext2D);
+
+        ctx.drawImage(offscreen, 0, 0, offW, offH, -width / 2 - effectPadding, -height / 2 - effectPadding, offW, offH);
+      }
+      canvasPool.release(offscreen);
       return;
     }
   }
@@ -616,6 +604,12 @@ function mapBlendMode(blendMode: string): GlobalCompositeOperation {
     darken: "darken",
     lighten: "lighten",
     add: "lighter",
+    mask: "source-in",
+    "mask-inverted": "source-out",
+    "source-in": "source-in",
+    "source-out": "source-out",
+    "destination-in": "destination-in",
+    "destination-out": "destination-out",
   };
 
   return map[blendMode] || "source-over";

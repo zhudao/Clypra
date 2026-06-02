@@ -34,6 +34,7 @@ A modern, open-source video editor built with Tauri, React, and TypeScript featu
 ## Download & Installation
 
 ### macOS (Apple Silicon & Intel)
+
 The recommended way to install Clypra on macOS is via **Homebrew Cask** to automatically bypass the Gatekeeper security warnings:
 
 ```bash
@@ -42,16 +43,16 @@ brew install AIEraDev/tap/clypra
 ```
 
 Alternatively, download the direct installer from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest):
-* **macOS Universal DMG**
-  *(If using the DMG, drag Clypra to your `/Applications` folder, then Right-click/Control-click the icon and select **Open** to authorize execution).*
+
+- **macOS Universal DMG** _(If using the DMG, drag Clypra to your `/Applications` folder, then Right-click/Control-click the icon and select **Open** to authorize execution)._
 
 ### Windows
-* **Windows x64 MSI Installer**: Download from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest)
-  *(If SmartScreen blocks execution, click **More Info** and select **Run Anyway**).*
+
+- **Windows x64 MSI Installer**: Download from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest) _(If SmartScreen blocks execution, click **More Info** and select **Run Anyway**)._
 
 ### Linux
-* **Linux x64 AppImage**: Download from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest)
-  *(Make the file executable using `chmod +x Clypra*.AppImage`, then run).*
+
+- **Linux x64 AppImage**: Download from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest) _(Make the file executable using `chmod +x Clypra_.AppImage`, then run).\*
 
 ## Project Structure
 
@@ -108,9 +109,37 @@ cd clypra
 # Install dependencies
 npm install
 
+# Configure API key (required for text effects and templates)
+cp .env.example .env
+# Edit .env and add your Clypra API key
+
 # Run in development mode
 npm run tauri dev
 ```
+
+### API Configuration
+
+Clypra uses the Clypra API for text effects and templates. To enable these features:
+
+1. Copy the `.env.example` file to `.env`:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Add your API key to the `.env` file:
+
+   ```
+   VITE_CLYPRA_API_KEY=your_api_key_here
+   ```
+
+3. **Important**: Never commit the `.env` file to version control. It's already included in `.gitignore`.
+
+The API key is used to authenticate requests to:
+
+- Text effects library
+- Text templates library
+- Lottie animations
 
 ### Building from Source
 

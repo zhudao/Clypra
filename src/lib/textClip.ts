@@ -95,6 +95,7 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     height,
     opacity: 1.0,
     rotation: 0,
+    aspectRatioLocked: false,
     text,
     fontSize,
     fontFamily,

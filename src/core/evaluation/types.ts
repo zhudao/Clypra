@@ -114,7 +114,17 @@ export interface EvaluatedMediaLayer extends BaseVisualLayer {
 export interface EvaluatedTextLayer extends BaseVisualLayer {
   readonly layerType: "text";
 
+  /** The current playhead time in seconds */
+  readonly time?: number;
+
+  /** The clip start time on timeline */
+  readonly clipStartTime?: number;
+
+  /** The clip duration */
+  readonly clipDuration?: number;
+
   // ─── Text Content ─────────────────────────────────────────────────────────
+
 
   /** Text content to render */
   readonly text: string;

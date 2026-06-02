@@ -11,6 +11,8 @@ import { useFileDrop } from "@/hooks/useFileDrop";
 import { useProjectStore } from "@/store/projectStore";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
+import { useHistoryStore } from "@/store/historyStore";
+import { DeleteClipCommand } from "@/core/history/commands/DeleteClipCommand";
 import type { VideoMetadata } from "@/types";
 import type { MediaTabProps } from "./types";
 import { generateId } from "@/lib/id";
@@ -137,20 +139,26 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
               ? {
                   label: "Remove from Timeline",
                   onClick: () => {
-                    const { removeClip, normalizeTrack, removeEmptyNonMainTracks, withBatch } = useTimelineStore.getState();
+                    const { normalizeTrack, removeEmptyNonMainTracks, withBatch } = useTimelineStore.getState();
+                    const { execute, beginTransaction, commitTransaction } = useHistoryStore.getState();
                     const affectedTracks = new Set<string>();
 
                     // Find all clips using this media asset
                     const clipsToRemove = clips.filter((c) => c.mediaId === contextMenu.mediaId);
 
-                    withBatch(() => {
-                      // Remove all clips using this asset
-                      clipsToRemove.forEach((clip) => {
-                        affectedTracks.add(clip.trackId);
-                        removeClip(clip.id);
-                      });
+                    // Use transaction to group all deletes into a single undo/redo unit
+                    beginTransaction("Remove from Timeline");
 
-                      // Normalize affected tracks to close gaps
+                    // Remove all clips using this asset
+                    clipsToRemove.forEach((clip) => {
+                      affectedTracks.add(clip.trackId);
+                      execute(new DeleteClipCommand(clip.id));
+                    });
+
+                    commitTransaction();
+
+                    // Normalize affected tracks to close gaps (not part of undo/redo)
+                    withBatch(() => {
                       affectedTracks.forEach((trackId) => normalizeTrack(trackId));
                       removeEmptyNonMainTracks(Array.from(affectedTracks));
                     });

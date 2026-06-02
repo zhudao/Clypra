@@ -6,12 +6,13 @@
  * ─── How to add a new effect ──────────────────────────────────────────────────
  *
  *  1. Paste the studio-generated file into src/features/text-effects/effects/
- *  2. Add exactly two lines at the bottom of the "REGISTERED EFFECTS" section:
+ *  2. Add exactly one line at the bottom of the "REGISTERED EFFECTS" section:
  *
- *       import { MyEffectEngine, MyEffectDefinition } from "./effects/MyEffect";
- *       register(MyEffectDefinition, MyEffectEngine);
+ *       import { MyEffectEngine } from "./effects/MyEffect";
+ *       register("my-effect-id", MyEffectEngine);
  *
- *  That's it. The renderer, allTextEffects, and everything else update automatically.
+ *  That's it. The renderer and everything else update automatically.
+ *  Effect definitions are now fetched dynamically from the API.
  *
  * ─── Studio known issue ───────────────────────────────────────────────────────
  *  If the generated drawFrame references an undefined `className` variable, remove
@@ -20,7 +21,7 @@
  */
 
 import type { TextEffectDefinition } from "./types/types";
-import { getFontFamilyStack } from "./lib/helpers";
+import { resolveFontFamilyName, wrapText } from "./lib/helpers";
 
 // ─── Internal registry state ──────────────────────────────────────────────────
 
@@ -29,21 +30,21 @@ type EngineInstance = { drawFrame(ctx: CanvasRenderingContext2D | OffscreenCanva
 type EffectEngineClass = new (config: EffectConfig) => EngineInstance;
 
 const _engines = new Map<string, EffectEngineClass>();
-const _definitions: TextEffectDefinition[] = [];
+const _definitions: TextEffectDefinition[] = []; // Empty - definitions now fetched from API
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Register an effect. Call once per effect — see the header for the two-line pattern.
+ * Register an effect engine by ID.
+ * Definitions are fetched dynamically from the API; only engines are registered locally.
  */
-export function register(definition: TextEffectDefinition, Engine: EffectEngineClass): void {
-  _engines.set(definition.id, Engine);
-  _definitions.push(definition);
+export function register(id: string, Engine: EffectEngineClass): void {
+  _engines.set(id, Engine);
 }
 
 /**
- * All registered effect definitions — replaces the old allEffects / allTextEffects export.
- * The array is mutated by register() at module init time, so all imports see the full list.
+ * All registered effect definitions.
+ * @deprecated This array is now empty. Use effectsStore to fetch definitions from the API.
  */
 export const allTextEffects: TextEffectDefinition[] = _definitions;
 
@@ -60,11 +61,28 @@ export function hasRegisteredEngine(id: string): boolean {
 /**
  * Renders a registered effect to any 2D canvas context.
  * Internally maps TextEffectDefinition → flat engine config and calls drawFrame.
+ * The effect definition must be provided (typically fetched from the API).
  */
-export function renderRegisteredEffect(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, effect: TextEffectDefinition, text: string, fontSize: number, canvasWidth: number, canvasHeight: number): void {
+export function renderRegisteredEffect(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, effect: TextEffectDefinition, text: string, fontSize: number, canvasWidth: number, canvasHeight: number, time?: number, clipStartTime?: number, clipDuration?: number): void {
   const Engine = _engines.get(effect.id);
   if (!Engine) return;
-  const config = _buildConfig(effect, text, fontSize, canvasWidth, canvasHeight);
+
+  // Dynamic Bounding Box Word-Wrapping: Wrap sentences to fit canvasWidth * 0.8 boundary!
+  ctx.save();
+  ctx.font = `${effect.font?.style || "normal"} ${effect.font?.weight || "bold"} ${fontSize}px "${resolveFontFamilyName(effect.font?.family || "Arial")}"`;
+  if (typeof (ctx as any).letterSpacing !== "undefined") {
+    (ctx as any).letterSpacing = `${effect.font?.letterSpacing || 0}px`;
+  }
+  const maxWidth = canvasWidth * 0.8;
+  const rawLines = text.split("\n");
+  const wrappedLines: string[] = [];
+  rawLines.forEach((rl) => {
+    wrappedLines.push(...wrapText(ctx, rl, maxWidth));
+  });
+  ctx.restore();
+  const wrappedText = wrappedLines.join("\n");
+
+  const config = _buildConfig(effect, wrappedText, fontSize, canvasWidth, canvasHeight, time, clipStartTime, clipDuration);
   new Engine(config).drawFrame(ctx);
 }
 
@@ -72,7 +90,7 @@ export function renderRegisteredEffect(ctx: CanvasRenderingContext2D | Offscreen
 // All studio-generated engines share the same flat config shape (SolarisInkConfig-style).
 // This function maps the structured definition once, so individual engine classes
 // never need a fromDefinition method.
-export function _buildConfig(effect: TextEffectDefinition, text: string, fontSize: number, canvasWidth: number, canvasHeight: number): EffectConfig {
+export function _buildConfig(effect: TextEffectDefinition, text: string, fontSize: number, canvasWidth: number, canvasHeight: number, time?: number, clipStartTime?: number, clipDuration?: number): EffectConfig {
   const fill = effect.fills?.[0];
   const stroke = effect.strokes?.[0];
   const shadow = effect.shadows?.[0];
@@ -88,15 +106,22 @@ export function _buildConfig(effect: TextEffectDefinition, text: string, fontSiz
     width: canvasWidth,
     height: canvasHeight,
     text,
+    time: time ?? 0,
+    clipStartTime: clipStartTime ?? 0,
+    clipDuration: clipDuration ?? 5.0,
 
-    // Font — resolve through getFontFamilyStack so engines receive the correct CSS name
-    fontFamily: getFontFamilyStack(effect.font.family),
+    // Font — resolve to exact Fontsource name (bare, no quotes — engines quote it themselves)
+    fontFamily: resolveFontFamilyName(effect.font.family),
     fontWeight: effect.font.weight,
     fontStyle: effect.font.style,
     fontSize,
     letterSpacing: effect.font.letterSpacing,
     lineHeight: effect.font.lineHeight,
   };
+
+  if (effect.animation) {
+    config.animation = effect.animation;
+  }
 
   // Fill — default to "none" when no fills are defined (not "solid")
   if (fill) {
@@ -170,7 +195,7 @@ export function _buildConfig(effect: TextEffectDefinition, text: string, fontSiz
   }
 
   // 2. Auto-forward unrecognized Top-Level keys (e.g. isGlitchEffect, decaySpeed)
-  const standardKeys = new Set(["id", "name", "category", "description", "tags", "font", "fills", "strokes", "shadows", "glows", "bevel", "panel"]);
+  const standardKeys = new Set(["id", "name", "category", "description", "tags", "font", "fills", "strokes", "shadows", "glows", "bevel", "panel", "text"]);
   for (const key of Object.keys(effect)) {
     if (!standardKeys.has(key)) {
       config[key] = (effect as any)[key];
@@ -225,88 +250,3 @@ export function _buildConfig(effect: TextEffectDefinition, text: string, fontSiz
 
   return config;
 }
-
-// ─── REGISTERED EFFECTS ───────────────────────────────────────────────────────
-// Add new effects below. Pattern per effect:
-//   import { MyEngine, MyDefinition } from "./effects/MyEffect";
-//   register(MyDefinition, MyEngine);
-// ─────────────────────────────────────────────────────────────────────────────
-
-// SolarisInk
-import { SolarisInkEngine, SolarisInkDefinition } from "./effects/SolarisInk";
-register(SolarisInkDefinition, SolarisInkEngine);
-
-// BiolumeTrench
-import { BiolumeTrenchEngine, BiolumeTrenchDefinition } from "./effects/BiolumeTrench";
-register(BiolumeTrenchDefinition, BiolumeTrenchEngine);
-
-// BitDecay
-import { BitDecayEngine, BitDecayDefinition } from "./effects/BitDecay";
-register(BitDecayDefinition, BitDecayEngine);
-
-// NeonCrimson
-import { NeonCrimsonEngine, NeonCrimsonDefinition } from "./effects/NeonCrimson";
-register(NeonCrimsonDefinition, NeonCrimsonEngine);
-
-// VoltSector
-import { VoltSectorEngine, VoltSectorDefinition } from "./effects/VoltSector";
-register(VoltSectorDefinition, VoltSectorEngine);
-
-// MintGlacé
-import { MintGlacéEngine, MintGlacéDefinition } from "./effects/MintGlacé";
-register(MintGlacéDefinition, MintGlacéEngine);
-
-// LiquidObsidianPlasmaChrome
-import { LiquidObsidianPlasmaChromeEngine, LiquidObsidianPlasmaChromeDefinition } from "./effects/LiquidObsidianPlasmaChrome";
-register(LiquidObsidianPlasmaChromeDefinition, LiquidObsidianPlasmaChromeEngine);
-
-import { VibrantComicExplosionEngine, VibrantComicExplosionDefinition } from "./effects/VibrantComicExplosion";
-register(VibrantComicExplosionDefinition, VibrantComicExplosionEngine);
-
-import { NeonCyberStickerEngine, NeonCyberStickerDefinition } from "./effects/NeonCyberSticker";
-register(NeonCyberStickerDefinition, NeonCyberStickerEngine);
-
-import { GlossyYellowBubbleGelEngine, GlossyYellowBubbleGelDefinition } from "./effects/GlossyYellowBubbleGel";
-register(GlossyYellowBubbleGelDefinition, GlossyYellowBubbleGelEngine);
-
-import { RetroComicEngine, RetroComicDefinition } from "./effects/RetroComic";
-register(RetroComicDefinition, RetroComicEngine);
-
-import { EditorialVellumEngine, EditorialVellumDefinition } from "./effects/EditorialVellum";
-register(EditorialVellumDefinition, EditorialVellumEngine);
-
-import { CarbonShiftEngine, CarbonShiftDefinition } from "./effects/CarbonShift";
-register(CarbonShiftDefinition, CarbonShiftEngine);
-
-import { StealthContourEngine, StealthContourDefinition } from "./effects/StealthContour";
-register(StealthContourDefinition, StealthContourEngine);
-
-import { ToxBrimEngine, ToxBrimDefinition } from "./effects/ToxBrim";
-register(ToxBrimDefinition, ToxBrimEngine);
-
-import { VoltKineticChalkStrokeEngine, VoltKineticChalkStrokeDefinition } from "./effects/VoltKineticChalkStroke";
-register(VoltKineticChalkStrokeDefinition, VoltKineticChalkStrokeEngine);
-
-import { InfraredDriftNoiseGlowEngine, InfraredDriftNoiseGlowDefinition } from "./effects/InfraredDriftNoiseGlow";
-register(InfraredDriftNoiseGlowDefinition, InfraredDriftNoiseGlowEngine);
-
-import { CrimsonKineticHalftoneGlowEngine, CrimsonKineticHalftoneGlowDefinition } from "./effects/CrimsonKineticHalftoneGlow";
-register(CrimsonKineticHalftoneGlowDefinition, CrimsonKineticHalftoneGlowEngine);
-
-import { CrimsonNeueSolidShadowEngine, CrimsonNeueSolidShadowDefinition } from "./effects/CrimsonNeueSolidShadow";
-register(CrimsonNeueSolidShadowDefinition, CrimsonNeueSolidShadowEngine);
-
-import { StarkContourEmptyStrokeEngine, StarkContourEmptyStrokeDefinition } from "./effects/StarkContourEmptyStroke";
-register(StarkContourEmptyStrokeDefinition, StarkContourEmptyStrokeEngine);
-
-import { InfraContourAestheticEngine, InfraContourAestheticDefinition } from "./effects/InfraContourAesthetic";
-register(InfraContourAestheticDefinition, InfraContourAestheticEngine);
-
-import { LumenBrimVividGradientEngine, LumenBrimVividGradientDefinition } from "./effects/LumenBrimVividGradient";
-register(LumenBrimVividGradientDefinition, LumenBrimVividGradientEngine);
-
-import { SolarisShiftClassicSolidBevelEngine, SolarisShiftClassicSolidBevelDefinition } from "./effects/SolarisShiftClassicSolidBevel";
-register(SolarisShiftClassicSolidBevelDefinition, SolarisShiftClassicSolidBevelEngine);
-
-import { AmberPunchVividGradientBevelEngine, AmberPunchVividGradientBevelDefinition } from "./effects/AmberPunchVividGradientBevel";
-register(AmberPunchVividGradientBevelDefinition, AmberPunchVividGradientBevelEngine);

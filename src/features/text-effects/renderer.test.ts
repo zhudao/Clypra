@@ -1,10 +1,56 @@
 import { beforeAll, afterAll, describe, test, expect, vi } from "vitest";
-import { renderTextEffect, renderTextEffectToDataURL } from "./renderer";
+import { renderTextEffect, renderTextEffectToDataURL, renderTextEffectAsync } from "./renderer";
 import { TextEffectDefinition } from "./types/types";
-import { SolarisInkDefinition } from "./effects/SolarisInk";
-import { BiolumeTrenchDefinition } from "./effects/BiolumeTrench";
-import { BitDecayDefinition } from "./effects/BitDecay";
-import { NeonCrimsonDefinition } from "./effects/NeonCrimson";
+const SolarisInkDefinition: TextEffectDefinition = {
+  id: "solaris-ink",
+  name: "Solaris Ink",
+  category: "metallic",
+  description: "Solaris Ink text effect",
+  tags: ["solar", "ink"],
+  font: { family: "Inter", weight: 700, style: "normal", letterSpacing: 0, lineHeight: 1.2 },
+  fills: [{ type: "solid", color: "#FFA751" }],
+  strokes: [{ color: "#FFA751", width: 2, position: "outside", opacity: 1 }],
+  shadows: [],
+  glows: [],
+};
+
+const BiolumeTrenchDefinition: TextEffectDefinition = {
+  id: "biolume-trench",
+  name: "Biolume Trench",
+  category: "gradient",
+  description: "Biolume Trench text effect",
+  tags: ["biolume", "trench"],
+  font: { family: "Inter", weight: 700, style: "normal", letterSpacing: 0, lineHeight: 1.2 },
+  fills: [{ type: "solid", color: "#FFE259" }],
+  strokes: [{ color: "#FFA751", width: 2, position: "outside", opacity: 1 }],
+  shadows: [],
+  glows: [],
+};
+
+const BitDecayDefinition: TextEffectDefinition = {
+  id: "bit-decay",
+  name: "Bit Decay",
+  category: "retro",
+  description: "Bit Decay text effect",
+  tags: ["bit", "decay"],
+  font: { family: "Inter", weight: 700, style: "normal", letterSpacing: 0, lineHeight: 1.2 },
+  fills: [{ type: "solid", color: "#FFE259" }],
+  strokes: [{ color: "#FFA751", width: 2, position: "outside", opacity: 1 }],
+  shadows: [],
+};
+
+const NeonCrimsonDefinition: TextEffectDefinition = {
+  id: "neon-crimson",
+  name: "NeonCrimson",
+  category: "neon",
+  description: "Neon Crimson text effect",
+  tags: ["neon", "crimson"],
+  font: { family: "Inter", weight: 700, style: "normal", letterSpacing: 0, lineHeight: 1.2 },
+  fills: [],
+  strokes: [{ color: "#FFA751", width: 2, position: "outside", opacity: 1 }],
+  shadows: [],
+  glows: [],
+};
 
 const moltenGold3d: TextEffectDefinition = {
   id: "molten-gold-3d",
@@ -132,6 +178,19 @@ beforeAll(() => {
   });
 
   HTMLCanvasElement.prototype.toDataURL = vi.fn(() => "data:image/png;base64,mockedDataURL");
+
+  const mockFonts = {
+    check: vi.fn(() => true),
+    load: vi.fn(() => Promise.resolve()),
+    ready: Promise.resolve(),
+  };
+  if (typeof document !== "undefined") {
+    // @ts-ignore
+    document.fonts = mockFonts;
+  } else {
+    // @ts-ignore
+    global.document = { fonts: mockFonts };
+  }
 });
 
 afterAll(() => {
@@ -397,6 +456,15 @@ describe("Clypra Text Effects Engine & Presets", () => {
       expect(dataURL).toBeDefined();
       expect(typeof dataURL).toBe("string");
       expect(dataURL.startsWith("data:image/png;base64,")).toBe(true);
+    });
+  });
+
+  describe("renderTextEffectAsync", () => {
+    test("should load fonts and render without throwing", async () => {
+      const canvas = document.createElement("canvas");
+      await expect(
+        renderTextEffectAsync(canvas, "CLYPRA", SolarisInkDefinition, 48)
+      ).resolves.not.toThrow();
     });
   });
 });

@@ -314,7 +314,11 @@ export const LottiePlayer = forwardRef<LottiePlayerHandle, LottiePlayerProps>(
       anim.addEventListener('DOMLoaded', () => {
         setLoadState('ready');
         if (initialFrame !== undefined) {
-          anim.goToAndStop(initialFrame, true);
+          if (autoplay) {
+            anim.goToAndPlay(initialFrame, true);
+          } else {
+            anim.goToAndStop(initialFrame, true);
+          }
         }
         onReadyRef.current?.();
       });

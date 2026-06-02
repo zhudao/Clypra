@@ -18,6 +18,8 @@
  */
 
 export enum PreviewQualityTier {
+  /** PlaybackHigh: 75% res, no DPR */
+  PlaybackHigh = "playback_high",
   /** Playback: half res, no DPR — prioritizes frame rate */
   Playback = "playback",
   /** Interaction: quarter res, prioritizes latency */
@@ -84,6 +86,20 @@ export class PreviewQualityManager {
     const viewportMaxHeight = this.viewportHeight * this.dpr;
 
     switch (tier) {
+      case PreviewQualityTier.PlaybackHigh: {
+        // 75% resolution, NO DPR
+        const scale = Math.min(0.75, this.viewportWidth / this.sequenceWidth, this.viewportHeight / this.sequenceHeight);
+        const w = this.sequenceWidth * scale;
+        const h = this.sequenceHeight * scale;
+        return {
+          maxWidth: Math.floor(w),
+          maxHeight: Math.floor(h),
+          dprScale: 1.0,
+          useDpr: false,
+          estimatedVRAMBytes: w * h * 4,
+        };
+      }
+
       case PreviewQualityTier.Playback: {
         // Half resolution, NO DPR — frame rate over fidelity
         const scale = Math.min(0.5, this.viewportWidth / this.sequenceWidth, this.viewportHeight / this.sequenceHeight);
@@ -146,9 +162,20 @@ export class PreviewQualityManager {
    *   - Idle → Idle (full res, viewport-capped)
    *   - Export mode → Export (full res, no cap)
    */
-  selectTierForInteraction(isPlaying: boolean, isInteracting: boolean, isExporting: boolean = false): PreviewQualityTier {
+  selectTierForInteraction(
+    isPlaying: boolean,
+    isInteracting: boolean,
+    isExporting: boolean = false,
+    playbackQuality: "full" | "high" | "medium" | "low" = "high"
+  ): PreviewQualityTier {
     if (isExporting) return PreviewQualityTier.Export;
-    if (isPlaying) return PreviewQualityTier.Playback;
+    if (isPlaying) {
+      if (playbackQuality === "full") return PreviewQualityTier.Idle;
+      if (playbackQuality === "high") return PreviewQualityTier.PlaybackHigh;
+      if (playbackQuality === "medium") return PreviewQualityTier.Playback;
+      if (playbackQuality === "low") return PreviewQualityTier.Interaction;
+      return PreviewQualityTier.PlaybackHigh;
+    }
     if (isInteracting) return PreviewQualityTier.Interaction;
     return PreviewQualityTier.Idle;
   }

@@ -15,6 +15,9 @@ src-tauri/target/
 *.log
 *.tmp
 
+# Scratch/experimental files
+scratch/
+
 # Editor/IDE
 .vscode/
 .idea/

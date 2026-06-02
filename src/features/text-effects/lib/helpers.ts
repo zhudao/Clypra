@@ -132,3 +132,80 @@ export const getFontFamilyStack = (fontFamily: string) => {
   const fallback = isMono ? "monospace" : isSerif ? "serif" : isCursive ? "cursive" : "sans-serif";
   return `"${fontFamily}", ${fallback}`;
 };
+
+/**
+ * Resolves a font family name to its exact Fontsource-registered name.
+ * Returns the BARE name without CSS quotes or fallback stacks.
+ *
+ * Use this when the caller will add its own quoting (e.g. engine ctx.font strings).
+ * Use getFontFamilyStack() when you need a full CSS font-family value with fallbacks.
+ *
+ * @param fontFamily - Raw font family name from effect definitions (e.g. "Montserrat")
+ * @returns Exact registered name (e.g. "Montserrat Variable")
+ */
+export const resolveFontFamilyName = (fontFamily: string): string => {
+  const f = fontFamily?.toLowerCase() || "";
+
+  // Google Web Fonts (Variable) — Fontsource registers these with " Variable" suffix
+  if (f.includes("inter")) return "Inter Variable";
+  if (f.includes("montserrat")) return "Montserrat Variable";
+  if (f.includes("geist")) return "Geist Variable";
+  if (f.includes("space grotesk") || f.includes("grotesk")) return "Space Grotesk Variable";
+  if (f.includes("outfit")) return "Outfit Variable";
+  if (f.includes("roboto variable")) return "Roboto Variable";
+  if (f.includes("roboto condensed")) return "Roboto Condensed";
+  if (f === "roboto") return "Roboto Variable";
+  if (f.includes("open sans")) return "Open Sans Variable";
+  if (f.includes("raleway")) return "Raleway Variable";
+  if (f.includes("oswald")) return "Oswald Variable";
+  if (f.includes("playfair display")) return "Playfair Display Variable";
+  if (f.includes("nunito")) return "Nunito Variable";
+  if (f.includes("dancing script")) return "Dancing Script Variable";
+
+  // Google Web Fonts (Non-Variable / Static) — name matches registration
+  if (f === "lato") return "Lato";
+  if (f === "anton") return "Anton";
+  if (f === "bebas neue") return "Bebas Neue";
+  if (f === "poppins") return "Poppins";
+  if (f === "permanent marker") return "Permanent Marker";
+  if (f === "bangers") return "Bangers";
+  if (f === "press start 2p") return "Press Start 2P";
+  if (f === "pacifico") return "Pacifico";
+
+  // System / unknown fonts — return as-is
+  return fontFamily;
+};
+
+/**
+ * Wraps a block of text into multiple lines based on maximum pixel width bounds.
+ * Preserves deliberate formatting of short words and splits long sentences elegantly.
+ */
+export const wrapText = (
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  text: string,
+  maxWidth: number
+): string[] => {
+  const words = text.split(" ");
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    const metrics = ctx.measureText(testLine);
+
+    if (metrics.width > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.length > 0 ? lines : [text];
+};
+

@@ -7,6 +7,7 @@ import { useUIStore } from "@/store/uiStore";
 import { generateId } from "@/lib/id";
 // import { useSettingsStore } from "@/store/settingsStore";
 import { useHistoryStore } from "@/store/historyStore";
+import { DeleteClipCommand } from "@/core/history/commands/DeleteClipCommand";
 import { SuccessToast } from "@/components/ui/SuccessToast";
 import { DEFAULT_SRP_CONFIG, SpatialTier } from "@/lib/renderEngine/types";
 import { clampTimelineZoom, formatCadenceSeconds, getSrpTierForZoom, getTimelineTemporalDetail, getZoomFromRatio, getZoomRatio, snapTimelineZoomToTierAnchors, TIMELINE_TIER_LABELS, TIMELINE_ZOOM_MAX, TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_STEP } from "@/lib/timelineZoom";
@@ -149,16 +150,24 @@ export const TimelineToolbar: React.FC = () => {
   const handleDeleteSelectedClips = () => {
     if (selectedClipIds.length === 0) return;
 
-    const { clips, removeClip, normalizeTrack, removeEmptyNonMainTracks, withBatch } = useTimelineStore.getState();
+    const { clips, normalizeTrack, removeEmptyNonMainTracks, withBatch } = useTimelineStore.getState();
+    const { execute, beginTransaction, commitTransaction } = useHistoryStore.getState();
     const affectedTracks = new Set<string>();
 
+    // Use transaction to group all deletes into a single undo/redo unit
+    beginTransaction("Delete Clips");
+
+    selectedClipIds.forEach((clipId) => {
+      const clip = clips.find((c) => c.id === clipId);
+      if (!clip) return;
+      affectedTracks.add(clip.trackId);
+      execute(new DeleteClipCommand(clipId));
+    });
+
+    commitTransaction();
+
+    // Normalize tracks after deletion (not part of undo/redo)
     withBatch(() => {
-      selectedClipIds.forEach((clipId) => {
-        const clip = clips.find((c) => c.id === clipId);
-        if (!clip) return;
-        affectedTracks.add(clip.trackId);
-        removeClip(clipId);
-      });
       affectedTracks.forEach((trackId) => normalizeTrack(trackId));
       removeEmptyNonMainTracks(Array.from(affectedTracks));
     });

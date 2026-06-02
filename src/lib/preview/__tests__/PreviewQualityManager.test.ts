@@ -52,6 +52,21 @@ describe("PreviewQualityManager", () => {
     expect(profile.useDpr).toBe(false);
   });
 
+  it("playback high tier uses 75% res without DPR on large viewport", () => {
+    const manager = new PreviewQualityManager({
+      sequenceWidth: 1920,
+      sequenceHeight: 1080,
+      viewportWidth: 1600,
+      viewportHeight: 900,
+      dpr: 2,
+    });
+
+    const profile = manager.getRenderProfile(PreviewQualityTier.PlaybackHigh);
+    expect(profile.maxWidth).toBe(1440); // 1920 * 0.75
+    expect(profile.maxHeight).toBe(810); // 1080 * 0.75
+    expect(profile.useDpr).toBe(false);
+  });
+
   it("interaction tier uses quarter res for latency", () => {
     const manager = new PreviewQualityManager({
       sequenceWidth: 1920,
@@ -93,7 +108,11 @@ describe("PreviewQualityManager", () => {
 
     expect(manager.selectTierForInteraction(false, false, false)).toBe(PreviewQualityTier.Idle);
     expect(manager.selectTierForInteraction(false, true, false)).toBe(PreviewQualityTier.Interaction);
-    expect(manager.selectTierForInteraction(true, false, false)).toBe(PreviewQualityTier.Playback);
+    expect(manager.selectTierForInteraction(true, false, false)).toBe(PreviewQualityTier.PlaybackHigh);
+    expect(manager.selectTierForInteraction(true, false, false, "full")).toBe(PreviewQualityTier.Idle);
+    expect(manager.selectTierForInteraction(true, false, false, "high")).toBe(PreviewQualityTier.PlaybackHigh);
+    expect(manager.selectTierForInteraction(true, false, false, "medium")).toBe(PreviewQualityTier.Playback);
+    expect(manager.selectTierForInteraction(true, false, false, "low")).toBe(PreviewQualityTier.Interaction);
     expect(manager.selectTierForInteraction(false, false, true)).toBe(PreviewQualityTier.Export);
   });
 
