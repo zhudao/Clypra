@@ -11,8 +11,16 @@ import { createTextClip, TEXT_PRESETS } from "@/lib/textClip";
 import { autoAdaptSequenceForFirstVisualClip } from "@/lib/sequenceAutoAspect";
 import { DEFAULT_PLACEMENT_POLICY, resolveAddToTimelinePlacement, resolveDefaultFitModeForAsset } from "@/lib/placementPolicy";
 import { getPlaybackClock } from "@/hooks/usePlaybackClock";
+import { useWindowSize } from "@/hooks/useWindowSize";
+import { MobileEditorLayout } from "./MobileEditorLayout";
 
 export const EditorLayout: React.FC = () => {
+  const { width } = useWindowSize();
+
+  if (width < 768) {
+    return <MobileEditorLayout />;
+  }
+
   const { tracks, clips, addClip, addTrack, insertTrackAt, getTimelineEndTime } = useTimelineStore();
   const { mediaAssets, project, updateProject } = useProjectStore();
 

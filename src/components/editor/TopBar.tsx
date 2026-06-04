@@ -8,6 +8,7 @@ import { useTimelineStore } from "@/store/timelineStore";
 import { useHistoryStore } from "@/store/historyStore";
 import { exportFrameAndDownload } from "@/lib/exportFrame";
 import { useTauriFullscreen } from "@/hooks/useTauriFullscreen";
+import { platform } from "@/core/platform";
 
 // Lazy load ExportDialog (code splitting)
 const ExportDialog = lazy(() => import("../ui/ExportDialog").then((m) => ({ default: m.ExportDialog })));
@@ -50,13 +51,13 @@ export const TopBar: React.FC = () => {
       {/* Native title bar area - content positioned in the title bar */}
       <div className="h-[37px] flex items-center justify-between gap-3 bg-transparent" data-tauri-drag-region style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
         {/* Left side - starts after traffic lights */}
-        <div className={`flex items-center gap-3 ${isFullscreen ? "" : "pl-16"}`} data-tauri-drag-region>
+        <div className={`flex items-center gap-2 ${platform.type === "tauri" && !isFullscreen ? "pl-16" : ""}`} data-tauri-drag-region>
           <Button variant="ghost" size="icon-sm" onClick={closeProject} title="Back to Home" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
             <Home className="w-4 h-4" />
           </Button>
           <div className="w-px h-5 bg-border/50" />
-          <Film className="w-4 h-4 text-accent-soft" />
-          <span className="text-xs font-semibold text-text-primary truncate max-w-[200px]" title={project?.name}>
+          <Film className="w-4 h-4 text-accent-soft hidden sm:block" />
+          <span className="text-xs font-semibold text-text-primary truncate max-w-[80px] sm:max-w-[200px]" title={project?.name}>
             {project?.name}
           </span>
         </div>
@@ -72,7 +73,7 @@ export const TopBar: React.FC = () => {
         <div className="flex items-center gap-1.5">
           {/* Undo/Redo indicator */}
           {(historyState.canUndo || historyState.canRedo) && (
-            <div className="flex items-center gap-1 text-[10px] text-text-muted mr-1">
+            <div className="hidden sm:flex items-center gap-1 text-[10px] text-text-muted mr-1">
               <span title={`${historyState.position + 1} undo actions available`}>{historyState.position + 1} undo</span>
               {historyState.canRedo && (
                 <>

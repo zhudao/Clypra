@@ -134,7 +134,7 @@ export function EffectGrid({ searchQuery = "" }: EffectGridProps) {
       </div>
 
       {/* ── Grid body ───────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin">
+      <div className="flex-1 overflow-y-auto p-1 scrollbar-thin">
         {indexLoading && <GridSkeleton />}
 
         {indexError && (
@@ -154,7 +154,7 @@ export function EffectGrid({ searchQuery = "" }: EffectGridProps) {
         )}
 
         {!indexLoading && !indexError && filteredItems.length > 0 && (
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {filteredItems.map((effect) => (
               <EffectCard key={effect.id} effect={convertToEffectDefinition(effect)} isFavorite={favorites.includes(effect.id)} isDownloading={downloadingIds.includes(effect.id)} isDownloaded={downloadedEffects.includes(effect.id)} onFavorite={(e) => handleToggleFavorite(effect.id, e)} onApply={(e) => handleDownloadAndApply(effect, e)} onPreview={() => handlePreview(effect)} />
             ))}
@@ -167,7 +167,7 @@ export function EffectGrid({ searchQuery = "" }: EffectGridProps) {
 
 function GridSkeleton() {
   return (
-    <div className="grid grid-cols-2 gap-2 p-1.5">
+    <div className="grid grid-cols-3 gap-1.5">
       {Array.from({ length: 9 }).map((_, i) => (
         <div key={i} className="rounded-xl bg-white/5 animate-pulse aspect-square" style={{ animationDelay: `${i * 45}ms` }} />
       ))}
