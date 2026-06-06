@@ -26,6 +26,7 @@ describe("generateViewportTileAddresses", () => {
   it("returns empty when clip is outside viewport", () => {
     const addresses = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L1,
       trimIn: 0,
       trimOut: 60,
@@ -42,6 +43,7 @@ describe("generateViewportTileAddresses", () => {
   it("generates fixed-grid addresses for visible portion", () => {
     const addresses = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L1, // 5s interval
       trimIn: 0,
       trimOut: 60,
@@ -68,6 +70,7 @@ describe("generateViewportTileAddresses", () => {
   it("uses overscan to include offscreen tiles", () => {
     const noOverscan = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L1,
       trimIn: 0,
       trimOut: 60,
@@ -81,6 +84,7 @@ describe("generateViewportTileAddresses", () => {
 
     const withOverscan = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L1,
       trimIn: 0,
       trimOut: 60,
@@ -98,6 +102,7 @@ describe("generateViewportTileAddresses", () => {
   it("clamps to trim range", () => {
     const addresses = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L1,
       trimIn: 10,
       trimOut: 20,
@@ -119,6 +124,7 @@ describe("generateViewportTileAddresses", () => {
     // Same clip at different zoom tiers should have consistent grid alignment
     const l1 = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L1,
       trimIn: 0,
       trimOut: 60,
@@ -132,6 +138,7 @@ describe("generateViewportTileAddresses", () => {
 
     const l2 = generateViewportTileAddresses({
       clipId: "clip-1",
+      videoPath: "/test.mp4",
       zoomTier: SpatialTier.L2,
       trimIn: 0,
       trimOut: 60,
