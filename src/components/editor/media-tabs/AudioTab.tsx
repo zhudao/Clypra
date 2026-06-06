@@ -40,10 +40,10 @@ export const AudioTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
 
   return (
     <>
-      <div className="flex gap-1 overflow-x-auto scrollbar-none border-b border-border p-1">
+      <div className="flex gap-1 overflow-x-auto scrollbar-none border-b border-border p-1" style={{ scrollbarWidth: "none" }}>
         {AUDIO_LIBRARY_CATEGORIES.map((category) => (
-          <button key={category} onClick={() => setActiveCategory(category)} className={`shrink-0 rounded px-2 py-1 text-[11px] font-semibold capitalize transition-colors ${activeCategory === category ? "bg-accent text-white" : "text-text-muted hover:bg-surface-raised hover:text-text-primary"}`}>
-            {category === "sfx" ? "SFX" : category}
+          <button key={category} onClick={() => setActiveCategory(category)} className={`shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-semibold capitalize transition-colors ${activeCategory === category ? "bg-accent text-white" : "text-text-muted hover:bg-surface-raised hover:text-text-primary"}`}>
+            {category === "sfx" ? "SFX" : category === "ui" ? "UI" : category}
           </button>
         ))}
       </div>
@@ -104,7 +104,10 @@ const AudioItem: React.FC<{ item: AudioLibraryItem; onAddToTimeline: () => void 
       return;
     }
     audio.currentTime = 0;
-    void audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    void audio
+      .play()
+      .then(() => setIsPlaying(true))
+      .catch(() => setIsPlaying(false));
   };
 
   return (
