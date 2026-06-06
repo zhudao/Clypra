@@ -1,4 +1,27 @@
-export type AudioLibraryCategory = "music" | "sfx" | "ambient" | "ui" | "transition" | "impact" | "voice";
+export type AudioLibraryCategory =
+  | "music"
+  | "lo-fi"
+  | "chill"
+  | "cinematic"
+  | "epic"
+  | "upbeat"
+  | "corporate"
+  | "hip-hop"
+  | "trap"
+  | "electronic"
+  | "synth"
+  | "acoustic"
+  | "indie"
+  | "jazz"
+  | "soul"
+  | "ambient"
+  | "background"
+  | "sfx"
+  | "transition"
+  | "impact"
+  | "ui"
+  | "notifications"
+  | "voice";
 
 export interface AudioLibraryItem {
   id: string;
@@ -42,7 +65,7 @@ const getHeaders = (): HeadersInit => {
   return headers;
 };
 
-export const AUDIO_LIBRARY_CATEGORIES: AudioLibraryCategory[] = ["music", "sfx", "ambient", "ui", "transition", "impact", "voice"];
+export const AUDIO_LIBRARY_CATEGORIES: AudioLibraryCategory[] = ["music", "lo-fi", "chill", "cinematic", "epic", "upbeat", "corporate", "hip-hop", "trap", "electronic", "synth", "acoustic", "indie", "jazz", "soul", "ambient", "background", "sfx", "transition", "impact", "ui", "notifications", "voice"];
 
 export const ClypraAudioApi = {
   async getAudioIndex(): Promise<AudioLibraryItem[]> {
