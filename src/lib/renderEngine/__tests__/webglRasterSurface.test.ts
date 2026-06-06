@@ -41,6 +41,8 @@ function makeGl() {
     FLOAT: 0x1406,
     TEXTURE0: 0x84c0,
     TRIANGLES: 0x0004,
+    NO_ERROR: 0,
+    getError: vi.fn(() => 0),
     createShader: vi.fn(() => ({})),
     shaderSource: vi.fn(),
     compileShader: vi.fn(),
@@ -53,8 +55,8 @@ function makeGl() {
     getProgramInfoLog: vi.fn(() => ""),
     deleteShader: vi.fn(),
     getAttribLocation: vi.fn((_program: unknown, name: string) => {
-      if (name === "a_posRect") return 0;
-      if (name === "a_uvRect") return 1;
+      if (name === "a_pos") return 0;
+      if (name === "a_uv") return 1;
       return -1;
     }),
     createVertexArray: vi.fn(() => ({})),
@@ -99,8 +101,8 @@ describe("WebGLRasterSurface", () => {
       tileWidthPx: 60,
     });
 
-    expect(gl.getAttribLocation).toHaveBeenCalledWith(expect.anything(), "a_posRect");
-    expect(gl.getAttribLocation).toHaveBeenCalledWith(expect.anything(), "a_uvRect");
+    expect(gl.getAttribLocation).toHaveBeenCalledWith(expect.anything(), "a_pos");
+    expect(gl.getAttribLocation).toHaveBeenCalledWith(expect.anything(), "a_uv");
     expect(gl.getAttribLocation).not.toHaveBeenCalledWith(expect.anything(), "a_tileIdx");
     expect(gl.enableVertexAttribArray).toHaveBeenCalledWith(0);
     expect(gl.enableVertexAttribArray).toHaveBeenCalledWith(1);
@@ -140,10 +142,45 @@ describe("WebGLRasterSurface", () => {
 
     // Portrait bitmap (90x160) in 96x40 tile: fits width, crops height vertically
     // The implementation uses center-crop: fits width to tile, crops excess height
-    expect(vertices[0]).toBeCloseTo(-1, 4); // left edge at tile start
-    expect(vertices[2]).toBeCloseTo(2, 4); // width spans full tile
+    expect(vertices[0]).toBeCloseTo(-1, 4); // TL position x0
+    expect(vertices[8]).toBeCloseTo(1, 4); // TR position x1
     // UV coordinates should map to the visible portion of the bitmap
-    expect(vertices[6]).toBeGreaterThan(0); // u coordinate
-    expect(vertices[7]).toBeGreaterThan(0); // v coordinate
+    expect(vertices[10]).toBeGreaterThan(0); // TR uv u1 (positive width)
+    expect(vertices[3]).toBeGreaterThan(0); // TL uv v0 (cropped offset)
+  });
+
+  it("interpolates target timestamps using trim boundaries if provided", () => {
+    const canvas = { width: 0, height: 0 } as HTMLCanvasElement;
+    const gl = makeGl();
+    const surface = new WebGLRasterSurface(canvas, gl);
+
+    const art5 = makeArtifact(5000);
+    const art10 = makeArtifact(10000);
+    const art15 = makeArtifact(15000);
+    const art20 = makeArtifact(20000);
+    const art25 = makeArtifact(25000);
+    const artifacts = [art5, art10, art15, art20, art25];
+
+    surface.drawFilmstrip(artifacts, {
+      clipWidthPx: 180,
+      stripHeightPx: 40,
+      dpr: 1,
+      tileWidthPx: 60,
+      trimIn: 10,
+      trimOut: 20,
+    });
+
+    const vertices = vi.mocked(gl.bufferData).mock.calls[0][1] as Float32Array;
+
+    // u0 for art10 (column 1): 80/512 + (6/71) * (80/512) = 0.16945
+    expect(vertices[2]).toBeCloseTo(0.16945, 4);
+
+    // u0 for art15 (column 2): 160/512 + (6/71) * (80/512) = 0.32570
+    expect(vertices[26]).toBeCloseTo(0.32570, 4);
+
+    // u0 for art15 (column 2): 160/512 + (6/71) * (80/512) = 0.32570
+    expect(vertices[50]).toBeCloseTo(0.32570, 4);
+
+    surface.dispose();
   });
 });
