@@ -68,11 +68,13 @@ const moltenGold3d: TextEffectDefinition = {
   fills: [
     {
       type: "linear",
-      angle: 90,
-      stops: [
-        { position: 0, color: "#FFE259" },
-        { position: 1, color: "#FFA751" },
-      ],
+      gradient: {
+        angle: 90,
+        stops: [
+          { color: "#FFE259", offset: 0 },
+          { color: "#FFA751", offset: 100 },
+        ],
+      },
     },
   ],
   strokes: [{ color: "#FFA751", width: 2, position: "outside", opacity: 1 }],
@@ -462,10 +464,7 @@ describe("Clypra Text Effects Engine & Presets", () => {
   describe("renderTextEffectAsync", () => {
     test("should load fonts and render without throwing", async () => {
       const canvas = document.createElement("canvas");
-      await expect(
-        renderTextEffectAsync(canvas, "CLYPRA", SolarisInkDefinition, 48)
-      ).resolves.not.toThrow();
+      await expect(renderTextEffectAsync(canvas, "CLYPRA", SolarisInkDefinition, 48)).resolves.not.toThrow();
     });
   });
 });
-
