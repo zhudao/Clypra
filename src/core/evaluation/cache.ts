@@ -229,17 +229,47 @@ export function resetEvaluationCache(): void {
  * This is a simple hash of clip IDs and key properties.
  * Changes when clips are added/removed/modified.
  */
-export function computeClipVersion(clips: Array<{ id: string; startTime: number; duration: number; trackId: string }>): string {
+export function computeClipVersion(clips: Array<Record<string, any>>, transitions: Array<Record<string, any>> = []): string {
   // Stable sort with deterministic tie-breaker, then hash
-  const signature = clips
+  const clipSignature = clips
     .slice()
     .sort((a, b) => {
       if (a.startTime !== b.startTime) return a.startTime - b.startTime;
       if (a.trackId !== b.trackId) return a.trackId.localeCompare(b.trackId);
       return a.id.localeCompare(b.id);
     })
-    .map((c) => `${c.id}:${c.trackId}:${c.startTime.toFixed(3)}:${c.duration.toFixed(3)}`)
+    .map((c) =>
+      [
+        c.id,
+        "text" in c ? "text" : c.mediaId ? "media" : "unknown",
+        c.trackId,
+        c.mediaId ?? "",
+        Number(c.startTime ?? 0).toFixed(3),
+        Number(c.duration ?? 0).toFixed(3),
+        Number(c.trimIn ?? 0).toFixed(3),
+        Number(c.trimOut ?? 0).toFixed(3),
+        Number(c.x ?? 0).toFixed(3),
+        Number(c.y ?? 0).toFixed(3),
+        Number(c.width ?? 0).toFixed(3),
+        Number(c.height ?? 0).toFixed(3),
+        Number(c.opacity ?? 1).toFixed(3),
+        Number(c.rotation ?? 0).toFixed(3),
+        c.text ?? "",
+        c.styleId ?? "",
+        c.templateId ?? "",
+        c.styleDefinition?.id ?? "",
+        c.effectStackVersion ?? "",
+      ].join(":"),
+    )
     .join("|");
+
+  const transitionSignature = transitions
+    .slice()
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    .map((t) => [t.id, t.type, t.fromItemId, t.toItemId, t.alignment, t.easing, t.placement?.trackId, Number(t.placement?.startTime ?? 0).toFixed(3), Number(t.placement?.duration ?? 0).toFixed(3), t.effects?.version ?? 0].join(":"))
+    .join("|");
+
+  const signature = `${clipSignature}::transitions::${transitionSignature}`;
 
   // Use a simple hash function
   return hashString(signature);

@@ -261,4 +261,21 @@ describe("computeClipVersion", () => {
 
     expect(hash1).not.toBe(hash2);
   });
+
+  it("generates different hash when render-affecting clip fields change", () => {
+    const base = [{ id: "c1", trackId: "t1", mediaId: "m1", startTime: 0, duration: 10, trimIn: 0, trimOut: 10, x: 0, y: 0, width: 100, height: 100, opacity: 1, rotation: 0 }];
+    const changedTrim = [{ ...base[0], trimIn: 2, trimOut: 12 }];
+    const changedStyle = [{ ...base[0], text: "Hello", styleId: "neon" }];
+
+    expect(computeClipVersion(base)).not.toBe(computeClipVersion(changedTrim));
+    expect(computeClipVersion(base)).not.toBe(computeClipVersion(changedStyle));
+  });
+
+  it("generates different hash when transition settings change", () => {
+    const clips = [{ id: "c1", trackId: "t1", startTime: 0, duration: 10 }];
+    const fade = [{ id: "tr1", type: "fade", fromItemId: "c1", toItemId: "c2", alignment: "center", easing: "linear", placement: { trackId: "t1", startTime: 4.5, duration: 1 }, effects: { version: 0 } }];
+    const dissolve = [{ ...fade[0], type: "dissolve" }];
+
+    expect(computeClipVersion(clips, fade)).not.toBe(computeClipVersion(clips, dissolve));
+  });
 });

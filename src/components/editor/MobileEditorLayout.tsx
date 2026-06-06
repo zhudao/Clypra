@@ -22,7 +22,7 @@ import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibrar
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 export const MobileEditorLayout: React.FC = () => {
-  const { tracks, clips, addClip, addTrack, insertTrackAt, getTimelineEndTime } = useTimelineStore();
+  const { tracks, clips, addClip, addTrack, insertTrackAt, getTimelineEndTime, createTransitionBetweenClips } = useTimelineStore();
   const { mediaAssets, project, updateProject, addMediaAsset } = useProjectStore();
   const { selectedClipIds } = useUIStore();
   const { undo, redo, state: historyState } = useHistoryStore();
@@ -32,6 +32,22 @@ export const MobileEditorLayout: React.FC = () => {
   const [mediaSheetOpen, setMediaSheetOpen] = useState(false);
   const [activeMediaTab, setActiveMediaTab] = useState<TabType>("media");
   const [propertiesSheetOpen, setPropertiesSheetOpen] = useState(false);
+
+  const findAdjacentClipsAtPlayhead = () => {
+    const playheadTime = getPlaybackClock().time;
+    for (const track of tracks.filter((candidate) => candidate.type !== "audio" && !candidate.locked)) {
+      const sorted = clips.filter((clip) => clip.trackId === track.id).sort((a, b) => a.startTime - b.startTime);
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const left = sorted[i];
+        const right = sorted[i + 1];
+        const cutTime = left.startTime + left.duration;
+        if (Math.abs(cutTime - right.startTime) <= 0.001 && Math.abs(playheadTime - cutTime) <= 0.25) {
+          return [left.id, right.id] as const;
+        }
+      }
+    }
+    return null;
+  };
 
   const handleAddToTimeline = (item: any, type: string) => {
     // Close sheet when adding an item to timeline to reveal change
@@ -169,16 +185,30 @@ export const MobileEditorLayout: React.FC = () => {
 
       if (!targetTrackId) return;
 
-      addClip(
-        createClipFromAsset({
-          asset: mediaAsset,
-          trackId: targetTrackId,
-          startTime: placement.startTime,
-          width: project?.canvasWidth || 1920,
-          height: project?.canvasHeight || 1080,
-          fitMode: resolveDefaultFitModeForAsset(mediaAsset),
-        }),
-      );
+	      addClip(
+	        createClipFromAsset({
+	          asset: mediaAsset,
+	          trackId: targetTrackId,
+	          startTime: placement.startTime,
+	          width: project?.canvasWidth || 1920,
+	          height: project?.canvasHeight || 1080,
+	          fitMode: resolveDefaultFitModeForAsset(mediaAsset),
+	        }),
+	      );
+    } else if (type === "transitions") {
+      const selectedPair = selectedClipIds.length === 2 ? ([selectedClipIds[0], selectedClipIds[1]] as const) : null;
+      const pair = selectedPair ?? findAdjacentClipsAtPlayhead();
+      if (!pair) {
+        useProjectStore.getState().showToast("Select two adjacent clips or place the playhead at a cut", "warning");
+        return;
+      }
+      const transitionType = item?.preview === "dissolve" || item?.name?.toLowerCase?.() === "dissolve" ? "dissolve" : "fade";
+      const result = createTransitionBetweenClips(pair[0], pair[1], transitionType, Number(item?.duration) || 0.5);
+      if (result.error) {
+        useProjectStore.getState().showToast(result.error, "warning");
+      } else {
+        useProjectStore.getState().showToast(`${item?.name || "Transition"} added`);
+      }
     }
   };
 

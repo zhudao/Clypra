@@ -10,12 +10,79 @@ describe("timelineStore clip operations", () => {
     useTimelineStore.setState({
       tracks: [],
       clips: [],
+      transitions: [],
       mainVideoTrackId: null,
       epoch: 0,
       zoomLevel: 1,
       scrollLeft: 0,
       pixelsPerSecond: 100,
       rippleEditEnabled: false,
+    });
+  });
+
+  describe("transitions", () => {
+    const makeClip = (id: string, startTime: number): Clip => ({
+      id,
+      trackId: "track-1",
+      mediaId: `media-${id}`,
+      startTime,
+      duration: 5,
+      trimIn: 0,
+      trimOut: 5,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      opacity: 1,
+      rotation: 0,
+    });
+
+    it("creates a transition between adjacent visual clips", () => {
+      useTimelineStore.setState({
+        tracks: [{ id: "track-1", type: "video", name: "Video", muted: false, locked: false, visible: true, height: 68 }],
+        clips: [makeClip("left", 0), makeClip("right", 5)],
+        transitions: [],
+      });
+
+      const result = useTimelineStore.getState().createTransitionBetweenClips("left", "right", "dissolve", 1);
+
+      expect(result.error).toBeNull();
+      expect(useTimelineStore.getState().transitions).toHaveLength(1);
+      expect(useTimelineStore.getState().transitions[0]).toMatchObject({
+        type: "dissolve",
+        fromItemId: "left",
+        toItemId: "right",
+        placement: { startTime: 4.5, duration: 1 },
+      });
+    });
+
+    it("rejects transitions across gaps and locked tracks", () => {
+      useTimelineStore.setState({
+        tracks: [{ id: "track-1", type: "video", name: "Video", muted: false, locked: true, visible: true, height: 68 }],
+        clips: [makeClip("left", 0), makeClip("right", 6)],
+        transitions: [],
+      });
+
+      expect(useTimelineStore.getState().createTransitionBetweenClips("left", "right", "fade", 1).error).toBe("Unlock the track before adding a transition");
+
+      useTimelineStore.setState({
+        tracks: [{ id: "track-1", type: "video", name: "Video", muted: false, locked: false, visible: true, height: 68 }],
+      });
+
+      expect(useTimelineStore.getState().createTransitionBetweenClips("left", "right", "fade", 1).error).toBe("Move clips together before adding a transition");
+    });
+
+    it("removes transitions attached to deleted clips", () => {
+      useTimelineStore.setState({
+        tracks: [{ id: "track-1", type: "video", name: "Video", muted: false, locked: false, visible: true, height: 68 }],
+        clips: [makeClip("left", 0), makeClip("right", 5)],
+        transitions: [],
+      });
+      useTimelineStore.getState().createTransitionBetweenClips("left", "right", "fade", 1);
+
+      useTimelineStore.getState().removeClip("left");
+
+      expect(useTimelineStore.getState().transitions).toHaveLength(0);
     });
   });
 

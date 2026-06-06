@@ -163,7 +163,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     // Let timelineStore reset its own state
     try {
       const { useTimelineStore } = await import("./timelineStore");
-      useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [] });
+      useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [] });
     } catch (err) {
       console.error("[CreateProject] Failed to hydrate timeline:", err);
     }
@@ -203,7 +203,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 	      });
     } catch (err) {
       // On error, reset timeline to empty state
-      import("./timelineStore").then(({ useTimelineStore }) => useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [] })).catch((resetErr) => console.error("[LoadProject] Failed to reset timeline:", resetErr));
+      import("./timelineStore").then(({ useTimelineStore }) => useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [] })).catch((resetErr) => console.error("[LoadProject] Failed to reset timeline:", resetErr));
     }
 
     // Initialize runtime LAST — stores are now fully populated
@@ -341,7 +341,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     // Let timelineStore clear its own state
     import("./timelineStore")
       .then(({ useTimelineStore }) => {
-        useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [] });
+        useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [] });
       })
       .catch((err) => {
         console.error("[CloseProject] Failed to reset timeline:", err);

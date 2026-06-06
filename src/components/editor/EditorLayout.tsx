@@ -14,6 +14,7 @@ import { getPlaybackClock } from "@/hooks/usePlaybackClock";
 import { useWindowSize } from "@/hooks/useWindowSize";
 import { MobileEditorLayout } from "./MobileEditorLayout";
 import type { MediaAsset } from "@/types";
+import { useUIStore } from "@/store/uiStore";
 import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibraryStore";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -24,8 +25,24 @@ export const EditorLayout: React.FC = () => {
     return <MobileEditorLayout />;
   }
 
-  const { tracks, clips, addClip, addTrack, insertTrackAt, getTimelineEndTime } = useTimelineStore();
+  const { tracks, clips, addClip, addTrack, insertTrackAt, getTimelineEndTime, createTransitionBetweenClips } = useTimelineStore();
   const { mediaAssets, project, updateProject, addMediaAsset } = useProjectStore();
+  const { selectedClipIds } = useUIStore();
+
+  const findAdjacentClipsAtPlayhead = () => {
+    const playheadTime = getPlaybackClock().time;
+    for (const track of tracks.filter((candidate) => candidate.type !== "audio" && !candidate.locked)) {
+      const sorted = clips.filter((clip) => clip.trackId === track.id).sort((a, b) => a.startTime - b.startTime);
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const left = sorted[i];
+        const right = sorted[i + 1];
+        const cutTime = left.startTime + left.duration;
+        const isAtCut = Math.abs(cutTime - right.startTime) <= 0.001 && Math.abs(playheadTime - cutTime) <= 0.25;
+        if (isAtCut) return [left.id, right.id] as const;
+      }
+    }
+    return null;
+  };
   const { getCachedFile } = useAudioLibraryStore();
 
   const handleAddToTimeline = (item: any, type: string) => {
@@ -177,9 +194,22 @@ export const EditorLayout: React.FC = () => {
           fitMode: resolveDefaultFitModeForAsset(mediaAsset),
         }),
       );
+    } else if (type === "transitions") {
+      const selectedPair = selectedClipIds.length === 2 ? ([selectedClipIds[0], selectedClipIds[1]] as const) : null;
+      const pair = selectedPair ?? findAdjacentClipsAtPlayhead();
+      if (!pair) {
+        useProjectStore.getState().showToast("Select two adjacent clips or place the playhead at a cut", "warning");
+        return;
+      }
+      const transitionType = item?.preview === "dissolve" || item?.name?.toLowerCase?.() === "dissolve" ? "dissolve" : "fade";
+      const result = createTransitionBetweenClips(pair[0], pair[1], transitionType, Number(item?.duration) || 0.5);
+      if (result.error) {
+        useProjectStore.getState().showToast(result.error, "warning");
+      } else {
+        useProjectStore.getState().showToast(`${item?.name || "Transition"} added`);
+      }
     } else {
-      // Handle other types (audio, stickers, effects, transitions, captions)
-      // TODO: Implement handlers for other types
+      // Handle other types (stickers, effects, captions)
     }
   };
 

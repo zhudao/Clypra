@@ -349,7 +349,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose }) =
       setError(err instanceof Error ? err.message : "Export failed");
       setPhase("error");
     }
-  }, [outputPath, project, clips, tracks, mediaAssets, epoch, selectedPreset, sequenceDuration]);
+  }, [outputPath, project, clips, tracks, transitions, mediaAssets, epoch, selectedPreset, sequenceDuration]);
 
   // ─── Reveal in Finder ──────────────────────────────────────────────
   const handleRevealInFinder = useCallback(async () => {

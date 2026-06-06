@@ -217,7 +217,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
 
   // ─── 5. Transitions ───────────────────────────────────────────────────────
   const evaluatedTransitions: EvaluatedTransition[] = transitionWindows
-    .map((transition) => {
+    .map<EvaluatedTransition | null>((transition) => {
       const outgoingLayer = visualLayers.find((layer) => layer.clipId === transition.fromClip.id);
       const incomingLayer = visualLayers.find((layer) => layer.clipId === transition.toClip.id);
       if (!outgoingLayer || !incomingLayer) return null;
