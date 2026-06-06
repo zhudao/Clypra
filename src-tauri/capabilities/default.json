@@ -15,7 +15,15 @@
       "allow": [{ "path": "$APPCACHE" }, { "path": "$APPCACHE/**/*" }, { "path": "$APPLOCALDATA" }, { "path": "$APPLOCALDATA/**/*" }]
     },
     {
+      "identifier": "fs:allow-read-file",
+      "allow": [{ "path": "$APPCACHE" }, { "path": "$APPCACHE/**/*" }, { "path": "$APPLOCALDATA" }, { "path": "$APPLOCALDATA/**/*" }]
+    },
+    {
       "identifier": "fs:allow-write",
+      "allow": [{ "path": "$APPCACHE" }, { "path": "$APPCACHE/**/*" }, { "path": "$APPLOCALDATA" }, { "path": "$APPLOCALDATA/**/*" }]
+    },
+    {
+      "identifier": "fs:allow-write-file",
       "allow": [{ "path": "$APPCACHE" }, { "path": "$APPCACHE/**/*" }, { "path": "$APPLOCALDATA" }, { "path": "$APPLOCALDATA/**/*" }]
     },
     {
