@@ -19,7 +19,8 @@ import type { EvaluatedScene, EvaluatedMediaLayer, EvaluatedTextLayer } from "..
 import { getResourceCache } from "../resources/ResourceCache";
 import { defaultConfig as engineDefaultConfig, evaluateScene as engineEvaluateScene, textEffectConfigToScene, type TextEffectConfig, _buildConfig, layerToTextEffectConfig, CanvasDevice, TextEffectBuilder } from "@clypra/engine";
 import { useEffectsStore } from "../../features/text-effects/store/effectsStore";
-
+import { invalidateEvaluationCache } from "../evaluation/evaluator";
+import { useTimelineStore } from "../../store/timelineStore";
 
 /**
  * Raster target configuration.
@@ -343,13 +344,7 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
     const effectDef = useEffectsStore.getState().definitions[layer.styleId];
     if (effectDef) {
       const authoredFontSize = layer.fontSize;
-      const builder = TextEffectBuilder.fromDefinition(
-        effectDef,
-        layer.text,
-        authoredFontSize,
-        offW,
-        offH
-      );
+      const builder = TextEffectBuilder.fromDefinition(effectDef, layer.text, authoredFontSize, offW, offH);
 
       const builtCfg = builder.buildConfig();
       if (layer.time !== undefined) (builtCfg as any).time = layer.time;
@@ -361,7 +356,7 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
         if (layer.color.includes(",")) {
           const stops = layer.color.split(",").map((c, idx, arr) => ({
             color: c.trim(),
-            offset: Math.round((idx / (arr.length - 1)) * 100)
+            offset: Math.round((idx / (arr.length - 1)) * 100),
           }));
           builder.setFillGradient(90, stops);
         } else {
@@ -375,50 +370,59 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
         weight: typeof layer.fontWeight === "number" ? layer.fontWeight : layer.fontWeight === "bold" ? 700 : 400,
         style: layer.fontStyle || "normal",
         letterSpacing: layer.letterSpacing ?? 0,
-        lineHeight: layer.lineHeight ?? 1.2
+        lineHeight: layer.lineHeight ?? 1.2,
       });
 
       builder.setCanvas({
         posX: layer.textAlign || "center",
-        posY: layer.verticalAlign === "middle" ? "middle" : (layer.verticalAlign || "middle")
+        posY: layer.verticalAlign === "middle" ? "middle" : layer.verticalAlign || "middle",
       });
 
       // Override stroke if user explicitly configured it or disabled it
-      if (layer.stroke) {
-        builder.setStroke({
-          enabled: true,
-          color: layer.stroke.color,
-          width: layer.stroke.width * scaleY
-        });
-      } else {
-        builder.setStroke({ enabled: false });
+      if (layer.stroke !== undefined) {
+        if (layer.stroke) {
+          builder.setStroke({
+            enabled: true,
+            color: layer.stroke.color,
+            width: layer.stroke.width * scaleY,
+          });
+        } else {
+          builder.setStroke({ enabled: false });
+        }
       }
+      // If layer.stroke is undefined, don't override - let effect definition control it
 
       // Override shadow if user explicitly configured it or disabled it
-      if (layer.shadow) {
-        builder.setShadow({
-          enabled: true,
-          color: layer.shadow.color,
-          blur: layer.shadow.blur * scaleY,
-          offsetX: layer.shadow.offsetX * scaleX,
-          offsetY: layer.shadow.offsetY * scaleY
-        });
-      } else {
-        builder.setShadow({ enabled: false });
+      if (layer.shadow !== undefined) {
+        if (layer.shadow) {
+          builder.setShadow({
+            enabled: true,
+            color: layer.shadow.color,
+            blur: layer.shadow.blur * scaleY,
+            offsetX: layer.shadow.offsetX * scaleX,
+            offsetY: layer.shadow.offsetY * scaleY,
+          });
+        } else {
+          builder.setShadow({ enabled: false });
+        }
       }
+      // If layer.shadow is undefined, don't override - let effect definition control it
 
       // Override background panel if user explicitly configured it or disabled it
-      if (layer.background) {
-        builder.setPanel({
-          enabled: true,
-          color: layer.background.color,
-          radius: layer.background.borderRadius * scaleY,
-          paddingX: layer.background.padding * scaleX,
-          paddingY: layer.background.padding * scaleY
-        });
-      } else {
-        builder.setPanel({ enabled: false });
+      if (layer.background !== undefined) {
+        if (layer.background) {
+          builder.setPanel({
+            enabled: true,
+            color: layer.background.color,
+            radius: layer.background.borderRadius * scaleY,
+            paddingX: layer.background.padding * scaleX,
+            paddingY: layer.background.padding * scaleY,
+          });
+        } else {
+          builder.setPanel({ enabled: false });
+        }
       }
+      // If layer.background is undefined, don't override - let effect definition control it
 
       engineConfig = builder.buildConfig();
     } else {
@@ -433,7 +437,8 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
           return { prefetchingIds: next };
         });
 
-        store.fetchDefinitionOnlyById(layer.styleId)
+        store
+          .fetchDefinitionOnlyById(layer.styleId)
           .then(() => {
             // Once resolved, remove from prefetchingIds (definitions cache is now populated)
             useEffectsStore.setState((s) => {
@@ -441,6 +446,11 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
               next.delete(layer.styleId!);
               return { prefetchingIds: next };
             });
+
+            // Invalidate evaluated scene cache for current epoch and trigger redraw
+            const currentEpoch = useTimelineStore.getState().epoch;
+            invalidateEvaluationCache(currentEpoch);
+            useTimelineStore.getState().incrementEpoch();
           })
           .catch((err) => {
             useEffectsStore.setState((s) => {
@@ -459,6 +469,13 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
         canvasHeight: offH,
         fontSize,
         fontFamily: layer.fontFamily,
+        strokeWidth: layer.stroke ? layer.stroke.width * scaleY : plainConfig.strokeWidth * scaleY,
+        shadowBlur: layer.shadow ? layer.shadow.blur * scaleY : plainConfig.shadowBlur * scaleY,
+        shadowOffsetX: layer.shadow ? layer.shadow.offsetX * scaleX : plainConfig.shadowOffsetX * scaleX,
+        shadowOffsetY: layer.shadow ? layer.shadow.offsetY * scaleY : plainConfig.shadowOffsetY * scaleY,
+        panelRadius: layer.background ? layer.background.borderRadius * scaleY : plainConfig.panelRadius * scaleY,
+        panelPaddingX: layer.background ? layer.background.padding * scaleX : plainConfig.panelPaddingX * scaleX,
+        panelPaddingY: layer.background ? layer.background.padding * scaleY : plainConfig.panelPaddingY * scaleY,
       } as any;
     }
   } else {
@@ -470,6 +487,13 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
       canvasHeight: offH,
       fontSize,
       fontFamily: layer.fontFamily,
+      strokeWidth: layer.stroke ? layer.stroke.width * scaleY : plainConfig.strokeWidth * scaleY,
+      shadowBlur: layer.shadow ? layer.shadow.blur * scaleY : plainConfig.shadowBlur * scaleY,
+      shadowOffsetX: layer.shadow ? layer.shadow.offsetX * scaleX : plainConfig.shadowOffsetX * scaleX,
+      shadowOffsetY: layer.shadow ? layer.shadow.offsetY * scaleY : plainConfig.shadowOffsetY * scaleY,
+      panelRadius: layer.background ? layer.background.borderRadius * scaleY : plainConfig.panelRadius * scaleY,
+      panelPaddingX: layer.background ? layer.background.padding * scaleX : plainConfig.panelPaddingX * scaleX,
+      panelPaddingY: layer.background ? layer.background.padding * scaleY : plainConfig.panelPaddingY * scaleY,
     } as any;
   }
 
@@ -490,7 +514,6 @@ function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRende
 }
 
 // wrapText helper was removed since wrapping is handled natively inside the engine.
-
 
 /**
  * Map blend mode to canvas composite operation.

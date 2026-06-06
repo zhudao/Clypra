@@ -184,23 +184,55 @@ export const SourcePreview: React.FC = () => {
       if (!targetTrackId) return;
 
       const preset = sourceTextPreset;
+
+      // Extract styleId for text effects
+      // IMPORTANT: The preset is the full TextEffectDefinition that was fetched during preview.
+      // The preview flow (EffectGrid.handlePreview) calls ClypraApi.getFullEffect() which:
+      //   1. Fetches the definition from the API
+      //   2. Caches it in ClypraApi._effectsCache
+      //   3. Syncs it to effectsStore.definitions[id]
+      // This ensures the rasterizer will find the cached definition when rendering the clip.
+      const styleId = preset.presetType === "effect" ? preset.id : undefined;
+
+      // Log the full text effect definition to verify caching
+      console.log("[SourcePreview] Adding text effect to timeline:", {
+        presetType: preset.presetType,
+        styleId,
+        presetId: preset.id,
+        presetName: preset.name,
+        fullPreset: preset,
+      });
+
+      // When adding a text effect, we should NOT override individual properties
+      // because the rasterizer uses TextEffectBuilder.fromDefinition() which
+      // reads all styling from the cached effect definition.
+      // However, if individual properties (stroke, shadow, background) are explicitly
+      // set to undefined/null, the rasterizer DISABLES them (see lines 395-416 in rasterizer.ts).
+      //
+      // Solution: Only pass properties that are truly user overrides, not properties
+      // extracted from the effect definition itself.
       const textClip = createTextClip({
         trackId: targetTrackId,
         startTime,
-        duration: 3.0, // standard 3s duration for text clips added from preview
+        duration: 3.0,
         text: preset.text || "CLYPRA",
         canvasWidth: project?.canvasWidth || 1920,
         canvasHeight: project?.canvasHeight || 1080,
-        fontFamily: preset.fontFamily,
-        color: preset.color,
-        fontSize: preset.fontSize || 48,
-        fontWeight: preset.fontWeight,
-        fontStyle: preset.fontStyle,
-        stroke: preset.stroke,
-        shadow: preset.shadow,
-        background: preset.background,
-        styleId: preset.presetType === "effect" ? preset.id : undefined,
+        // When styleId is present, the engine will use the effect definition for ALL styling
+        // Do NOT pass fontFamily, color, fontSize, fontWeight, fontStyle, stroke, shadow, background
+        // from the preset - let the definition be the source of truth
+        styleId,
         templateId: preset.presetType === "template" ? preset.id : undefined,
+        // Only fontSize is needed to calculate the text bounding box
+        fontSize: preset.fontSize || (styleId ? 96 : 48),
+      });
+
+      console.log("[SourcePreview] Created text clip:", {
+        clipId: textClip.id,
+        styleId: textClip.styleId,
+        text: textClip.text,
+        fontFamily: textClip.fontFamily,
+        fontSize: textClip.fontSize,
       });
 
       addClip(textClip);
