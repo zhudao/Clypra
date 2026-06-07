@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { Search, Smile, Download, Loader2, Sparkles, AlertCircle } from "lucide-react";
+import { NetworkError } from "@/components/ui/NetworkError";
 import type { TabProps } from "./types";
 import { STICKER_CATEGORIES, ClypraStickersApi, type StickerCategory, type StickerItem } from "@/features/stickers/api/clypraStickersApi";
 
@@ -9,19 +10,27 @@ export const StickersTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const [stickers, setStickers] = useState<StickerItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isNetworkError, setIsNetworkError] = useState(false);
 
   // Fetch stickers from API by category
-  useEffect(() => {
+  const fetchStickers = () => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setIsNetworkError(false);
 
     ClypraStickersApi.getStickersByCategory(activeCategory)
       .then((nextStickers) => {
         if (!cancelled) setStickers(nextStickers);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load stickers");
+        if (!cancelled) {
+          const errorMessage = err instanceof Error ? err.message : "Failed to load stickers";
+          setError(errorMessage);
+          // Detect network errors
+          const isNetwork = errorMessage.toLowerCase().includes("network") || errorMessage.toLowerCase().includes("fetch") || errorMessage.toLowerCase().includes("connection") || errorMessage.toLowerCase().includes("offline");
+          setIsNetworkError(isNetwork);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -30,6 +39,11 @@ export const StickersTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
     return () => {
       cancelled = true;
     };
+  };
+
+  useEffect(() => {
+    const cleanup = fetchStickers();
+    return cleanup;
   }, [activeCategory]);
 
   const filteredStickers = useMemo(() => {
@@ -95,7 +109,9 @@ export const StickersTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
           </div>
         )}
 
-        {!loading && error && (
+        {!loading && error && isNetworkError && <NetworkError message="No internet connection." onRetry={fetchStickers} />}
+
+        {!loading && error && !isNetworkError && (
           <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300 flex items-start gap-2">
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span>{error}</span>
