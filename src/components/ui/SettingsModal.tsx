@@ -530,9 +530,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Settings" size="lg">
-      <div className="flex flex-col md:flex-row min-h-[420px]">
+      <div className="flex flex-col md:flex-row min-h-[420px] max-h-[79vh]">
         {/* Sidebar */}
-        <div className="w-full md:w-[160px] shrink-0 border-b md:border-b-0 md:border-r border-white/6 p-2 flex flex-row md:flex-col gap-1 overflow-x-auto scrollbar-none">
+        <aside className="w-full md:w-[160px] shrink-0 border-b md:border-b-0 md:border-r border-white/6 p-2 flex flex-row md:flex-col gap-1 overflow-x-auto md:overflow-x-visible md:overflow-y-auto scrollbar-none">
           {TABS.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -543,16 +543,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               </button>
             );
           })}
-        </div>
+        </aside>
 
         {/* Content */}
-        <div className="flex-1 p-5 overflow-y-auto">
+        <main className="flex-1 p-5 overflow-y-auto">
           {activeTab === "appearance" && <AppearanceTab />}
           {activeTab === "editor" && <EditorTab />}
           {activeTab === "captions" && <WhisperSettings />}
           {activeTab === "cache" && <CacheSettings />}
           {activeTab === "about" && <AboutTab />}
-        </div>
+        </main>
       </div>
     </Modal>
   );
