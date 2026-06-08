@@ -77,9 +77,10 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
   const sortedClips = activeClips.sort((a, b) => {
     const roleOrder = getRoleOrder(a.role) - getRoleOrder(b.role);
     if (roleOrder !== 0) return roleOrder;
-    // Lower track index (top in UI) renders on top (later in array)
-    // Higher track index (bottom in UI) renders below (earlier in array)
-    const trackOrder = a.trackIndex - b.trackIndex;
+    // Top track in UI (lower trackIndex) should draw LAST (higher array index) to appear on top
+    // Bottom track in UI (higher trackIndex) should draw FIRST (lower array index) to appear below
+    // So we want: higher trackIndex → earlier in array → draws first → appears below
+    const trackOrder = b.trackIndex - a.trackIndex;
     if (trackOrder !== 0) return trackOrder;
     const zOrder = a.zIndex - b.zIndex;
     if (zOrder !== 0) return zOrder;
@@ -88,7 +89,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
 
   // Debug: Log the sorting order
   if (sortedClips.length > 0) {
-    console.log(`[evaluateTimelineScene] Sorted ${sortedClips.length} clips for rendering (last = on top):`);
+    console.log(`[evaluateTimelineScene] Sorted ${sortedClips.length} clips for rendering (array order = draw order, last = on top):`);
     sortedClips.forEach((clip, idx) => {
       console.log(`  [${idx}] Clip ${clip.id} - trackIndex: ${clip.trackIndex}, role: ${clip.role}, zIndex: ${clip.zIndex}`);
     });
