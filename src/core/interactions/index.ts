@@ -1,10 +1,12 @@
 /**
- * Interactions Module
+ * Interactions - Imperative interaction controllers
  *
- * Unified interaction abstraction layer.
- * All editing operations flow through this layer to ensure
- * consistent command execution and history tracking.
+ * High-frequency user interactions (transform, viewport) that operate
+ * at >4Hz and should not trigger React re-renders on every update.
  */
 
+export { TransformController, getTransformController, resetTransformController, type TransformListener } from "./TransformController";
+
+export { ViewportController, getViewportController, resetViewportController, type Viewport, type ViewportListener } from "./ViewportController";
+
 export { EditingActions } from "./EditingActions";
-export type { SplitIntent, SplitResult } from "./EditingActions";

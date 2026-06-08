@@ -75,13 +75,29 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
   const sortedClips = activeClips.sort((a, b) => {
     const roleOrder = getRoleOrder(a.role) - getRoleOrder(b.role);
     if (roleOrder !== 0) return roleOrder;
-    // Higher track index renders below lower index (top track in UI = on top)
-    const trackOrder = b.trackIndex - a.trackIndex;
+    // CRITICAL: Lower trackIndex (top in UI) must draw LAST to appear on top
+    // The rasterizer draws array elements in order: [0] first, [last] last
+    // Canvas compositing: last drawn = on top
+    // So: higher trackIndex → earlier in array, lower trackIndex → later in array
+    const trackOrder = b.trackIndex - a.trackIndex; // DESC: higher index first (draws early/below), lower index last (draws late/on top)
     if (trackOrder !== 0) return trackOrder;
     const zOrder = a.zIndex - b.zIndex;
     if (zOrder !== 0) return zOrder;
     return a.evaluationPriority - b.evaluationPriority;
   });
+
+  // TRACE: Z-order verification (can be removed after validation)
+  if (sortedClips.length > 0) {
+    console.log(
+      "[TRACE][EVALUATOR] Sorted order:",
+      sortedClips.map((c, idx) => ({
+        idx,
+        trackIndex: c.trackIndex,
+        role: c.role,
+        clipId: c.id.substring(0, 8),
+      })),
+    );
+  }
 
   // ─── 3. Evaluate Visual Layers ────────────────────────────────────────────
 
@@ -170,6 +186,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       sourcePath,
       posterFrame: asset.posterFrame,
       sourceTime,
+      sourceRotation: asset.rotation,
       x: evalX,
       y: evalY,
       width: evalW,
@@ -192,7 +209,10 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
   for (const clip of sortedClips) {
     const asset = assetMap.get(clip.mediaId);
     const track = trackMap.get(clip.trackId);
-    const hasAudio = clip.role === "audio" || (asset?.type === "video" && clip.role === "primary");
+    // Audio layer creation:
+    // - Explicit audio role clips always create audio
+    // - Video assets with primary OR overlay role create audio (video tracks have audio)
+    const hasAudio = clip.role === "audio" || (asset?.type === "video" && (clip.role === "primary" || clip.role === "overlay"));
     if (!hasAudio || !asset) continue;
     if (track?.muted ?? false) continue;
 
@@ -320,7 +340,9 @@ export function evaluateTimelineSceneCached(time: number, clips: Clip[], tracks:
   const cacheKey = { time, epoch, clipVersion };
 
   const cached = cache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    return cached;
+  }
 
   const scene = evaluateTimelineScene(time, clips, tracks, assets, project, transitions);
   cache.set(cacheKey, scene);

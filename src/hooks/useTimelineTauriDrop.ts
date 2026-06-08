@@ -12,7 +12,7 @@ import { DEFAULT_PLACEMENT_POLICY, resolveClipStartTime, resolvePreferredTrackId
 
 const getMediaType = (path: string): "video" | "audio" | "image" => {
   const lower = path.toLowerCase();
-  if (/\.(mp4|mov|avi|mkv|webm|flv)$/i.test(lower)) return "video";
+  if (/\.(mp4|mov|mkv|webm|flv)$/i.test(lower)) return "video";
   if (/\.(mp3|wav|aac|flac|m4a)$/i.test(lower)) return "audio";
   return "image";
 };

@@ -555,6 +555,9 @@ export class FrameScheduler {
     const resourceCache = getResourceCache();
     const loadPromises: Promise<void>[] = [];
 
+    // Map to store loaded resource handles for each layer
+    const layerResourceHandles = new Map<string, RenderResourceHandle>();
+
     // Pre-load all media resources
     for (const layer of scene.visualLayers) {
       if (layer.layerType === "media") {
@@ -594,7 +597,7 @@ export class FrameScheduler {
                 job.abortController.signal.addEventListener("abort", onReady, { once: true });
 
                 // Safety timeout: don't wait forever, let rasterizer handle fallback if it takes too long
-                setTimeout(onReady, 500);
+                // setTimeout(onReady, 500);
               });
               loadPromises.push(waitPromise);
             }
@@ -610,6 +613,8 @@ export class FrameScheduler {
           resourceCache.acquire(layer.sourcePath, type).then((handle) => {
             // Track acquired handle for release after rasterization
             job.acquiredResourceHandles.push(handle);
+            // ✅ FIX: Store the handle so we can attach it to the layer
+            layerResourceHandles.set(layer.layerId, handle);
           }),
           new Promise<void>((_, reject) => {
             job.abortController.signal.addEventListener("abort", () => reject(new Error("Job cancelled")), { once: true });
@@ -628,6 +633,19 @@ export class FrameScheduler {
 
     // Wait for all resources to load
     await Promise.all(loadPromises);
+
+    // ✅ FIX: Attach resource handles to the layers
+    for (const layer of scene.visualLayers) {
+      if (layer.layerType === "media") {
+        const handle = layerResourceHandles.get(layer.layerId);
+        if (handle) {
+          // Mutate the layer to add the resource handle
+          (layer as any).resourceHandle = handle;
+        } else if (layer.mediaType === "image") {
+          console.warn(`[FrameScheduler] No handle found for image layer ${layer.clipId} at ${layer.sourcePath}`);
+        }
+      }
+    }
   }
 
   /**

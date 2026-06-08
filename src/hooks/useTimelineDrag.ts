@@ -181,20 +181,23 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
 
       const originalLeftPx = Math.round(clip.startTime * pps);
 
-      const otherClips = trackClips.filter((c) => c.id !== clipId);
-      let tailTime = 0;
-      withBatch(() => {
-        let currentIterTime = 0;
-        otherClips.forEach((c) => {
-          updateClip(c.id, { startTime: currentIterTime });
-          currentIterTime += c.duration;
-        });
+      // Calculate anchor delta for insert/ripple modes only
+      // In free mode, clips don't shift - visualLeftAnchorDelta should be 0
+      // In insert/ripple modes, clips shift to create gaps - calculate offset
+      const { clipDragMode: dragMode } = useTimelineStore.getState();
+      let visualLeftAnchorDelta = 0;
 
-        tailTime = currentIterTime;
-        updateClip(clipId, { startTime: tailTime });
-      });
-      const leftNewPx = Math.round(tailTime * pps);
-      const visualLeftAnchorDelta = originalLeftPx - leftNewPx;
+      if (dragMode === "insert" || dragMode === "ripple") {
+        // Calculate what the visual offset would be if we moved clip to tail
+        // WITHOUT actually moving it yet - this is preview-only state
+        const otherClips = trackClips.filter((c) => c.id !== clipId);
+        let tailTime = 0;
+        otherClips.forEach((c) => {
+          tailTime += c.duration;
+        });
+        const leftNewPx = Math.round(tailTime * pps);
+        visualLeftAnchorDelta = originalLeftPx - leftNewPx;
+      }
 
       const container = containerRef.current;
       let pointerXContentStart = startX;
@@ -207,7 +210,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
       const nextDragState: DragState = {
         draggingClipId: clipId,
         draggedClipIds,
-        offsetX: visualLeftAnchorDelta,
+        offsetX: 0, // Start at original position - clip stays under cursor
         offsetY: 0,
         pointerXContentStart,
         pointerClientYStart,
@@ -278,8 +281,21 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
     }
 
     const targetTrack = liveTracks.find((t) => t.id === targetTrackId);
-    const isTextClip = "text" in clip;
-    const isTrackTypeMismatch = targetTrack ? (isTextClip ? targetTrack.type !== "text" : targetTrack.type === "text") : false;
+
+    // Validate ALL dragged clips against target track, not just primary
+    let isTrackTypeMismatch = false;
+    if (targetTrack) {
+      for (const draggedId of ds.draggedClipIds) {
+        const draggedClip = clipMapRef.current.get(draggedId) ?? liveClips.find((c) => c.id === draggedId);
+        if (!draggedClip) continue;
+        const isTextClip = "text" in draggedClip;
+        if (isTextClip ? targetTrack.type !== "text" : targetTrack.type === "text") {
+          isTrackTypeMismatch = true;
+          break;
+        }
+      }
+    }
+
     const isInvalidPosition = targetTrack?.locked || isTrackTypeMismatch || false;
     if (isInvalidPosition) {
       const next: DragState = {
@@ -430,24 +446,9 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
       }
 
       const sourceTrackIds = Array.from(new Set(Object.values(dragSnapshot.originalPlacements).map((p) => p.trackId)));
-      const restoreDraggedToOriginal = () => {
-        withBatch(() => {
-          const affectedTracks = new Set<string>();
-          dragSnapshot.draggedClipIds.forEach((id) => {
-            const placement = dragSnapshot.originalPlacements[id];
-            if (!placement) return;
-            affectedTracks.add(placement.trackId);
-            updateClip(id, {
-              trackId: placement.trackId,
-              startTime: placement.startTime,
-            });
-          });
-          affectedTracks.forEach((trackId) => normalizeTrack(trackId));
-        });
-      };
 
       if (dragSnapshot.isInvalidPosition) {
-        restoreDraggedToOriginal();
+        // No restoration needed - we never mutated state during drag start
         dragStateRef.current = null;
         setDragState(null);
         clearQueuedDragMove();
@@ -562,20 +563,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
       const ds = dragStateRef.current;
       if (!ds) return;
 
-      withBatch(() => {
-        const affectedTracks = new Set<string>();
-        ds.draggedClipIds.forEach((id) => {
-          const placement = ds.originalPlacements[id];
-          if (!placement) return;
-          affectedTracks.add(placement.trackId);
-          updateClip(id, {
-            trackId: placement.trackId,
-            startTime: placement.startTime,
-          });
-        });
-        affectedTracks.forEach((trackId) => normalizeTrack(trackId));
-      });
-
+      // No restoration needed - we never mutated state during drag start
       dragStateRef.current = null;
       setDragState(null);
       resumeAutoSave();
@@ -583,7 +571,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [clearQueuedDragMove, normalizeTrack, updateClip, withBatch]);
+  }, [clearQueuedDragMove]);
 
   useEffect(() => {
     return () => {

@@ -35,7 +35,7 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
 
   const getMediaType = (path: string): "video" | "audio" | "image" => {
     const lower = path.toLowerCase();
-    if (/\.(mp4|mov|avi|mkv|webm|flv)$/i.test(lower)) return "video";
+    if (/\.(mp4|mov|mkv|webm|flv)$/i.test(lower)) return "video";
     if (/\.(mp3|wav|aac|flac|m4a)$/i.test(lower)) return "audio";
     return "image";
   };
@@ -101,7 +101,7 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
   });
 
   return (
-    <div ref={containerRef} className={`flex-1 flex flex-col overflow-hidden transition-colors ${isDraggingOver ? "bg-surface-raised/10 transition-colors duration-300" : ""}`}>
+    <div ref={containerRef} className={`flex-1 flex flex-col overflow-hidden transition-colors duration-200 ${isDraggingOver ? "bg-accent/5" : ""}`}>
       <div className="p-1 border-b border-border">
         <Button variant="secondary" size="sm" className="w-full border-dashed cursor-pointer" onClick={importMedia} disabled={isLoading}>
           <CloudUpload className="w-4 h-4" />
@@ -113,7 +113,7 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
         {mediaAssets.length === 0 ? (
           <EmptyState icon={CloudUpload} title="No media imported" description="Import videos, audio, or images to get started" />
         ) : (
-          <div className="grid grid-cols-2 gap-2 p-3">
+          <div className="grid grid-cols-2 gap-2 p-1">
             {mediaAssets.map((asset) => (
               <MediaCard
                 key={asset.id}

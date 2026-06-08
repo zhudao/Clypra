@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle, Download, Eye, Loader2, Music2, Pause, Play, Plus, Search } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/Tooltip";
+import { NetworkError } from "@/components/ui/NetworkError";
 import { AUDIO_LIBRARY_CATEGORIES, ClypraAudioApi, type AudioLibraryCategory, type AudioLibraryItem } from "@/features/audio-library/api/clypraAudioApi";
 import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibraryStore";
 import { DownloadProgress } from "@/components/ui/DownloadProgress";
@@ -15,18 +16,26 @@ export const AudioTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const [items, setItems] = useState<AudioLibraryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isNetworkError, setIsNetworkError] = useState(false);
 
-  useEffect(() => {
+  const fetchAudio = () => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setIsNetworkError(false);
 
     ClypraAudioApi.getAudioByCategory(activeCategory)
       .then((nextItems) => {
         if (!cancelled) setItems(nextItems);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load audio library");
+        if (!cancelled) {
+          const errorMessage = err instanceof Error ? err.message : "Failed to load audio library";
+          setError(errorMessage);
+          // Detect network errors
+          const isNetwork = errorMessage.toLowerCase().includes("network") || errorMessage.toLowerCase().includes("fetch") || errorMessage.toLowerCase().includes("connection") || errorMessage.toLowerCase().includes("offline");
+          setIsNetworkError(isNetwork);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -35,6 +44,11 @@ export const AudioTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
     return () => {
       cancelled = true;
     };
+  };
+
+  useEffect(() => {
+    const cleanup = fetchAudio();
+    return cleanup;
   }, [activeCategory]);
 
   const filteredItems = useMemo(() => {
@@ -68,7 +82,9 @@ export const AudioTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
           </div>
         )}
 
-        {!loading && error && (
+        {!loading && error && isNetworkError && <NetworkError message="No internet connection." onRetry={fetchAudio} />}
+
+        {!loading && error && !isNetworkError && (
           <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300 flex items-start gap-2">
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span>{error}</span>
@@ -134,11 +150,16 @@ const AudioItem: React.FC<AudioItemProps> = ({ item, onAddToTimeline }) => {
       // Download if not already cached
       const cachedFile = await startDownload(item);
 
+      // Convert relative cache path to absolute path for the webview
+      // cachedFile.localPath is relative to AppCache (e.g., "audio-library/filename.wav")
+      const appCache = await import("@tauri-apps/api/path").then((m) => m.appCacheDir());
+      const absolutePath = await import("@tauri-apps/api/path").then((m) => m.join(appCache, cachedFile.localPath));
+
       // Create MediaAsset from cached file
       const mediaAsset: MediaAsset = {
         id: `audio-library-${item.id}`,
         name: item.name || "Library Audio",
-        path: cachedFile.localPath,
+        path: absolutePath, // Use absolute path for media playback
         type: "audio",
         duration: cachedFile.metadata.duration || item.duration,
         size: cachedFile.size,
@@ -150,8 +171,6 @@ const AudioItem: React.FC<AudioItemProps> = ({ item, onAddToTimeline }) => {
 
       // Open in SourcePreview
       previewAsset(mediaAsset);
-
-      console.log("[AudioItem] Preview opened with cached file:", cachedFile.localPath);
     } catch (error) {
       console.error("[AudioItem] Preview failed:", error);
     }

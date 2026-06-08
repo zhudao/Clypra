@@ -46,11 +46,6 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
   if (effectDefinition) {
     // Resolve the definition into the exact flat config the engine constructor expects!
     const effectDefaults = _buildConfig(effectDefinition, textClip.text, textClip.fontSize, textClip.width || 640, textClip.height || 360);
-
-    // Now you have the strict defaults defined by the studio! E.g.:
-    console.log("Strict Default Fill Color:", effectDefaults.fillColor);
-    console.log("Strict Default Bevel Depth:", effectDefaults.bevelDepth);
-    console.log("Strict Default Scanline Toggle:", (effectDefaults as any).isGlitchEffect);
   }
 
   return (

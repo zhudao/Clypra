@@ -302,7 +302,6 @@ export function requestBatchRenderArtifacts(opts: RequestBatchRenderArtifactsOpt
   const { videoPath, timestampsMs, spatialTiers, epochId, clipId, onArtifact, onComplete, onError, requestId } = opts;
 
   const reqId = requestId || generateId("req");
-  console.log(`[Transport DEBUG] requestBatchRenderArtifacts reqId=${reqId} clipId=${clipId} epochId=${epochId} videoPath=${videoPath} timestampsMs=`, timestampsMs);
 
   if (timestampsMs.length === 0) {
     onComplete?.();
@@ -311,14 +310,12 @@ export function requestBatchRenderArtifacts(opts: RequestBatchRenderArtifactsOpt
 
   let cancelled = false;
   const cancel = () => {
-    console.log(`[Transport DEBUG] requestBatchRenderArtifacts cancel() called for reqId=${reqId}`);
     cancelled = true;
   };
 
   let artifactCount = 0;
   const channel = new Channel<BackendRenderArtifact>();
   channel.onmessage = async (raw) => {
-    console.log(`[Transport DEBUG] onmessage received for reqId=${reqId} clipId=${clipId} timestampMs=${raw.timestamp_ms} isEpochValid=${isEpochStillValid(epochId, clipId)} cancelled=${cancelled}`);
     if (cancelled) return;
     if (!isEpochStillValid(epochId, clipId)) {
       return;
@@ -356,7 +353,6 @@ export function requestBatchRenderArtifacts(opts: RequestBatchRenderArtifactsOpt
     onArtifact: channel,
   })
     .then(() => {
-      console.log(`[Transport DEBUG] get_render_artifacts_batch then() reqId=${reqId} cancelled=${cancelled}`);
       if (!cancelled) {
         onComplete?.();
       }

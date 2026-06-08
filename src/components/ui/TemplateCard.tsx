@@ -67,7 +67,6 @@ export const TemplateCard: React.FC<TemplateCardProps> = ({
         })
         .catch((err) => {
           if (abortController.signal.aborted) {
-            console.log(`Fetch cancelled for template ${template.id}`);
             return;
           }
           console.error(`Failed to load Lottie data for template ${template.id}:`, err);

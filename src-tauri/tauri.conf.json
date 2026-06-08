@@ -15,7 +15,10 @@
         "title": "",
         "width": 1100,
         "height": 720,
-        "titleBarStyle": "Overlay"
+        "minWidth": 1100,
+        "minHeight": 720,
+        "titleBarStyle": "Overlay",
+        "devtools": true
       }
     ],
     "security": {

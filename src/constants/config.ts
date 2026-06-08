@@ -26,4 +26,4 @@ export const VIDEO_CONFIG = {
 
 export const DEFAULT_STILL_DURATION_SECONDS = 5;
 
-export const SUPPORTED_VIDEO_FORMATS = ["mp4", "mov", "webm", "mkv", "m4v", "avi"];
+export const SUPPORTED_VIDEO_FORMATS = ["mp4", "mov", "webm", "mkv", "m4v"];

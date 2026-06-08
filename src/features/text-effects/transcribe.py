@@ -31,14 +31,31 @@ def main():
             initial_prompt="The following is a transcription of spoken audio content.",
             language=None,  # Auto-detect language
             task="transcribe",  # Use 'transcribe' for same-language, 'translate' for English translation
+            word_timestamps=True,  # Enable word-level timestamps for karaoke-style highlighting
         )
 
-        # Format the output into exact segments with start, end, and text
+        # Format the output into exact segments with start, end, text, and word-level timestamps
         segments = []
         for seg in result.get("segments", []):
-            segments.append(
-                {"start": seg["start"], "end": seg["end"], "text": seg["text"].strip()}
-            )
+            segment_data = {
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"].strip(),
+            }
+
+            # Include word-level timestamps if available (for caption highlighting)
+            if "words" in seg and seg["words"]:
+                segment_data["words"] = [
+                    {
+                        "word": w["word"],
+                        "start": w["start"],
+                        "end": w["end"],
+                        "probability": w.get("probability", 1.0),
+                    }
+                    for w in seg["words"]
+                ]
+
+            segments.append(segment_data)
 
         print(
             json.dumps({"text": result.get("text", "").strip(), "segments": segments})

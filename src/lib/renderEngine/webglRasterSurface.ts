@@ -154,7 +154,6 @@ export class WebGLRasterSurface {
 
   drawFilmstrip(artifacts: readonly TransportArtifact[], layout: FilmstripLayout): void {
     if (this._disposed || artifacts.length === 0) {
-      console.log(`[WebGLRasterSurface DEBUG] drawFilmstrip early exit: disposed=${this._disposed} artifactsLength=${artifacts.length}`);
       this._clear(layout);
       return;
     }
@@ -165,17 +164,6 @@ export class WebGLRasterSurface {
     const tileCount = Math.max(1, Math.ceil(clipWidthPx / targetTileW));
     const backingW = Math.round(clipWidthPx * dpr);
     const backingH = Math.round(stripHeightPx * dpr);
-
-    console.log(`[WebGLRasterSurface DEBUG] drawFilmstrip layout details:`, {
-      clipWidthPx,
-      stripHeightPx,
-      dpr,
-      targetTileW,
-      tileCount,
-      backingW,
-      backingH,
-      artifactsCount: artifacts.length,
-    });
 
     if (this._canvas.width !== backingW || this._canvas.height !== backingH) {
       this._canvas.width = backingW;
@@ -189,14 +177,6 @@ export class WebGLRasterSurface {
     // ── Upload atlas ────────────────────────────────────────────────────────
     const cols = Math.min(artifacts.length, 16); // max 16 per row
     const { atlasW, atlasH, cellW, cellH, cells } = packAtlas(artifacts, cols);
-
-    console.log(`[WebGLRasterSurface DEBUG] packed atlas details:`, {
-      cols,
-      atlasW,
-      atlasH,
-      cellW,
-      cellH,
-    });
 
     gl.bindTexture(gl.TEXTURE_2D, this._atlasTexture);
     // Allocate atlas
@@ -218,7 +198,6 @@ export class WebGLRasterSurface {
         const col = i % cols;
         const row = Math.floor(i / cols);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, col * cellW, row * cellH, gl.RGBA, gl.UNSIGNED_BYTE, art.bitmap);
-        console.log(`[WebGLRasterSurface DEBUG] uploaded bitmap at index ${i}: ts=${art.timestampMs} width=${art.bitmap.width} height=${art.bitmap.height}`);
       } catch (e) {
         console.warn(`[WebGLRasterSurface] Failed to upload bitmap at index ${i}:`, e);
       }
@@ -241,8 +220,8 @@ export class WebGLRasterSurface {
     const timeSpan = lastTimestamp - firstTimestamp;
 
     // Calculate pixelsPerSecond derived from total clip duration in seconds
-    const duration = hasTrim ? (layout.trimOut! - layout.trimIn!) : (timeSpan / 1000);
-    const pixelsPerSecond = duration > 0 ? (clipWidthPx / duration) : 100;
+    const duration = hasTrim ? layout.trimOut! - layout.trimIn! : timeSpan / 1000;
+    const pixelsPerSecond = duration > 0 ? clipWidthPx / duration : 100;
 
     for (let i = 0; i < tileCount; i++) {
       // Find the artifact closest to this tile's physical timeline position

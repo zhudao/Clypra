@@ -82,9 +82,14 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
 
   // ── RasterSurface lifecycle ───────────────────────────────────────────────
   useEffect(() => {
-    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    surfaceRef.current = createRasterSurface(canvasRef.current);
+    // DEFENSIVE: Only create surface if not already created
+    if (!surfaceRef.current) {
+      surfaceRef.current = createRasterSurface(canvas);
+    }
+
     return () => {
       surfaceRef.current?.dispose();
       surfaceRef.current = null;
@@ -94,8 +99,12 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
   // ── Draw filmstrip whenever artifacts or layout changes ───────────────────
   useEffect(() => {
     const surface = surfaceRef.current;
-    console.log(`[ClipFilmstrip DEBUG] useEffect draw clip=${clip.id} artifactsCount=${artifacts.length} isFallback=${isFallback} surfaceFound=${!!surface}`);
-    if (!surface) return;
+    const canvas = canvasRef.current;
+
+    // DEFENSIVE: Wait for both canvas AND surface to be ready
+    if (!canvas || !surface) {
+      return;
+    }
 
     const dpr = window.devicePixelRatio || 1;
     const layout = {
@@ -108,13 +117,11 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
     };
 
     if (artifacts.length > 0) {
-      console.log(`[ClipFilmstrip DEBUG] drawing filmstrip with ${artifacts.length} artifacts`);
       surface.drawFilmstrip(artifacts, layout);
     } else {
-      console.log(`[ClipFilmstrip DEBUG] drawing placeholder/empty`);
       surface.drawPlaceholder(layout);
     }
-  }, [artifacts, clipWidthPx, stripHeightPx, tileWidthPx]);
+  }, [artifacts, clipWidthPx, stripHeightPx, tileWidthPx, clip.trimIn, clip.trimOut, clip.id]);
 
   // ── Image tile rendering (still-image clips) ──────────────────────────────
   useEffect(() => {

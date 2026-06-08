@@ -1,11 +1,14 @@
 import React, { useRef, useState } from "react";
-import { Wand2, Plus, Download, Upload, Trash2, Play, AlertCircle } from "lucide-react";
+import { Plus, Download, Upload, Trash2, Play, AlertCircle, Sparkles, Settings } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useTimelineStore, getInsertIndexForNewTrack } from "@/store/timelineStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useTransportControls } from "@/hooks/usePlaybackClock";
+import { useCaptionStore } from "@/store/captionStore";
+import { useUIStore } from "@/store/uiStore";
 import { createTextClip } from "@/lib/textClip";
 import { parseSubtitles, serializeSubtitles, formatSubtitleTime } from "@/features/subtitles/parser";
+import { invoke } from "@tauri-apps/api/core";
 import type { TabProps } from "./types";
 import type { TextClip } from "@/types";
 
@@ -13,20 +16,19 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const { clips, tracks, addClip, removeClip, updateClip, withBatch } = useTimelineStore();
   const { project } = useProjectStore();
   const { seek } = useTransportControls();
+  const { captionSettings } = useCaptionStore();
+  const { toggleSettingsModal } = useUIStore();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  const mediaAssets = project?.mediaAssets || [];
 
   // Find the text track designated for captions
-  const captionTrack = tracks.find(
-    (t) => t.type === "text" && (t.name.toLowerCase().includes("caption") || t.name.toLowerCase().includes("subtitle"))
-  ) || tracks.find((t) => t.type === "text");
+  const captionTrack = tracks.find((t) => t.type === "text" && (t.name.toLowerCase().includes("caption") || t.name.toLowerCase().includes("subtitle"))) || tracks.find((t) => t.type === "text");
 
   // Get all text clips belonging to the caption track
-  const captionClips = captionTrack
-    ? (clips.filter((c) => c.trackId === captionTrack.id) as TextClip[]).sort(
-        (a, b) => a.startTime - b.startTime
-      )
-    : [];
+  const captionClips = captionTrack ? (clips.filter((c) => c.trackId === captionTrack.id) as TextClip[]).sort((a, b) => a.startTime - b.startTime) : [];
 
   // Ensure a caption track exists and return its ID
   const ensureCaptionTrackId = (): string => {
@@ -38,9 +40,7 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
 
     // Rename to standard Auto Captions track name
     useTimelineStore.setState((state) => ({
-      tracks: state.tracks.map((t) =>
-        t.id === targetTrackId ? { ...t, name: "Auto Captions" } : t
-      ),
+      tracks: state.tracks.map((t) => (t.id === targetTrackId ? { ...t, name: "Auto Captions" } : t)),
     }));
 
     return targetTrackId;
@@ -81,6 +81,7 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
             fontSize: 32,
             bold: true,
             position: "bottom",
+            textRole: "caption",
             styleId: "neon-crimson",
             fontFamily: "Outfit Variable",
           });
@@ -136,11 +137,126 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
       fontSize: 32,
       bold: true,
       position: "bottom",
+      textRole: "caption",
       styleId: "neon-crimson",
       fontFamily: "Outfit Variable",
     });
 
     addClip(textClip);
+  };
+
+  // Auto-generate captions using Whisper — ZERO CONFIG
+  const handleAutoGenerate = async () => {
+    // Smart defaults — no pre-flight checks blocking the user
+    const model = captionSettings.activeModel || "tiny"; // Default to tiny if none selected
+    const language = captionSettings.language || "auto"; // Default to auto-detect
+
+    // Find video or audio clips on the timeline
+    const mediaClips = clips.filter((clip) => {
+      const asset = mediaAssets.find((a) => a.id === clip.mediaId);
+      return asset && (asset.type === "video" || asset.type === "audio");
+    });
+
+    if (mediaClips.length === 0) {
+      setErrorMsg("No video or audio clips found on the timeline. Add media first.");
+      return;
+    }
+
+    setErrorMsg(null);
+    setIsGenerating(true);
+
+    try {
+      // Auto-download model if needed (Phase 2 — currently model must be pre-downloaded)
+      // TODO: Implement auto-download in Phase 2
+      // const modelState = captionSettings.models[model];
+      // if (modelState.status !== "downloaded") {
+      //   await downloadWhisperModel(model);
+      // }
+
+      const trackId = ensureCaptionTrackId();
+      const canvasWidth = project?.canvasWidth || 1920;
+      const canvasHeight = project?.canvasHeight || 1080;
+      let totalCaptions = 0;
+
+      // Process each media clip
+      for (const mediaClip of mediaClips) {
+        const asset = mediaAssets.find((a) => a.id === mediaClip.mediaId);
+        if (!asset) continue;
+
+        try {
+          // Extract audio from the clip
+          const tempAudioPath = await invoke<string>("extract_audio_track", {
+            path: asset.path,
+          });
+
+          // Transcribe using Whisper with selected/default model and language
+          const resultJsonStr = await invoke<string>("transcribe_audio_local", {
+            audioPath: tempAudioPath,
+            modelSize: model,
+            language: language === "auto" ? null : language,
+          });
+
+          const result = JSON.parse(resultJsonStr);
+
+          if (result.error) {
+            console.error(`Failed to transcribe ${mediaClip.id}:`, result.error);
+            continue;
+          }
+
+          // Add segments to timeline
+          const segments = result.segments || [];
+          withBatch(() => {
+            segments.forEach((seg: any) => {
+              const relativeStart = seg.start - mediaClip.trimIn;
+
+              if (relativeStart >= 0 && relativeStart < mediaClip.duration) {
+                const startTime = mediaClip.startTime + relativeStart;
+                const segmentDuration = Math.min(seg.end - seg.start, mediaClip.duration - relativeStart);
+
+                // Convert word timestamps to clip-relative time
+                const words = seg.words?.map((w: any) => ({
+                  word: w.word,
+                  start: w.start - seg.start, // Convert to clip-relative time
+                  end: w.end - seg.start,
+                  probability: w.probability,
+                }));
+
+                const textClip = createTextClip({
+                  trackId,
+                  startTime,
+                  duration: segmentDuration,
+                  text: seg.text,
+                  canvasWidth,
+                  canvasHeight,
+                  fontSize: 32,
+                  bold: true,
+                  position: "bottom",
+                  textRole: "caption",
+                  words, // Include word-level timestamps
+                  styleId: "neon-crimson",
+                  fontFamily: "Outfit Variable",
+                });
+
+                addClip(textClip);
+                totalCaptions++;
+              }
+            });
+          });
+        } catch (clipError: any) {
+          console.error(`Error processing clip ${mediaClip.id}:`, clipError);
+        }
+      }
+
+      if (totalCaptions > 0) {
+        setErrorMsg(null);
+      } else {
+        setErrorMsg("No captions were generated. Please check your audio contains speech.");
+      }
+    } catch (error: any) {
+      setErrorMsg(error.message || "Failed to generate captions.");
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   // Direct update helpers
@@ -156,48 +272,37 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden p-3 space-y-3">
       {/* Hidden file input */}
-      <input
-        type="file"
-        ref={fileInputRef}
-        onChange={handleFileChange}
-        accept=".srt,.vtt"
-        className="hidden"
-      />
+      <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".srt,.vtt" className="hidden" />
 
       {/* Primary Actions Grid */}
       <div className="grid grid-cols-2 gap-2">
-        <Button
-          variant="secondary"
-          size="sm"
-          className="w-full flex items-center justify-center gap-1.5"
-          onClick={handleImportClick}
-        >
+        <Button variant="secondary" size="sm" className="w-full flex items-center justify-center gap-1.5" onClick={handleImportClick}>
           <Upload className="w-3.5 h-3.5 text-accent" />
           Import Subtitles
         </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          className="w-full flex items-center justify-center gap-1.5"
-          onClick={() => handleExport("srt")}
-          disabled={captionClips.length === 0}
-        >
+        <Button variant="secondary" size="sm" className="w-full flex items-center justify-center gap-1.5" onClick={() => handleExport("srt")} disabled={captionClips.length === 0}>
           <Download className="w-3.5 h-3.5 text-accent" />
           Export SRT
         </Button>
       </div>
 
-      <div className="flex gap-2">
-        <Button
-          variant="default"
-          size="sm"
-          className="flex-1 bg-accent hover:bg-accent/80 text-white flex items-center justify-center gap-1.5"
-          onClick={handleAddManualCaption}
-        >
-          <Plus className="w-4 h-4" />
-          Add Manual Caption
+      {/* Auto-Generate Section — Zero Config UX */}
+      <div className="relative">
+        <Button variant="default" size="sm" className="w-full bg-accent hover:bg-accent/80 text-white flex items-center justify-center gap-1.5" onClick={handleAutoGenerate} disabled={isGenerating}>
+          <Sparkles className="w-4 h-4" />
+          {isGenerating ? "Generating..." : "Auto-Generate Captions"}
         </Button>
+
+        {/* Settings gear — subtle, non-blocking */}
+        <button onClick={toggleSettingsModal} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 opacity-40 hover:opacity-100 transition-opacity" title="Caption settings">
+          <Settings className="w-3.5 h-3.5 text-white" />
+        </button>
       </div>
+
+      <Button variant="secondary" size="sm" className="w-full flex items-center justify-center gap-1.5" onClick={handleAddManualCaption}>
+        <Plus className="w-4 h-4" />
+        Add Manual Caption
+      </Button>
 
       {errorMsg && (
         <div className="p-2.5 bg-destructive/10 border border-destructive/20 text-destructive rounded-lg flex items-start gap-2 text-xs">
@@ -209,35 +314,22 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
       {/* Subtitles timing editor */}
       <div className="flex-1 flex flex-col min-h-0 pt-2 border-t border-border">
         <div className="flex justify-between items-center mb-2">
-          <h4 className="text-xs font-semibold text-text-muted">
-            Caption Timing Editor ({captionClips.length})
-          </h4>
+          <h4 className="text-xs font-semibold text-text-muted">Caption Timing Editor ({captionClips.length})</h4>
         </div>
 
         <div className="flex-1 overflow-y-auto scrollbar-thin space-y-2 pr-1">
           {captionClips.length === 0 ? (
             <div className="h-40 flex flex-col items-center justify-center text-center p-4 border border-dashed border-border rounded-xl">
-              <p className="text-xs text-text-muted max-w-[200px]">
-                No captions on the timeline. Click Add Manual or Import to begin.
-              </p>
+              <p className="text-xs text-text-muted max-w-[200px]">No captions on the timeline. Click Add Manual or Import to begin.</p>
             </div>
           ) : (
             captionClips.map((clip, index) => (
-              <div
-                key={clip.id}
-                className="group flex flex-col p-3 bg-surface-raised hover:bg-surface-raised/80 border border-border/40 rounded-xl transition-all space-y-2 relative"
-              >
+              <div key={clip.id} className="group flex flex-col p-3 bg-surface-raised hover:bg-surface-raised/80 border border-border/40 rounded-xl transition-all space-y-2 relative">
                 {/* Header timing controls */}
                 <div className="flex items-center justify-between text-[10px] text-text-muted">
                   <div className="flex items-center gap-2">
-                    <span className="font-bold text-accent bg-accent/10 px-1.5 py-0.5 rounded">
-                      #{index + 1}
-                    </span>
-                    <button
-                      onClick={() => seek(clip.startTime)}
-                      className="flex items-center gap-1 hover:text-accent font-medium transition-colors"
-                      title="Jump Playhead to Start"
-                    >
+                    <span className="font-bold text-accent bg-accent/10 px-1.5 py-0.5 rounded">#{index + 1}</span>
+                    <button onClick={() => seek(clip.startTime)} className="flex items-center gap-1 hover:text-accent font-medium transition-colors" title="Jump Playhead to Start">
                       <Play className="w-2.5 h-2.5 fill-current" />
                       {formatSubtitleTime(clip.startTime, "vtt").slice(3)}
                     </button>
@@ -245,49 +337,23 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
                     <span>{formatSubtitleTime(clip.startTime + clip.duration, "vtt").slice(3)}</span>
                   </div>
 
-                  <button
-                    onClick={() => removeClip(clip.id)}
-                    className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-destructive transition-all duration-200"
-                    title="Delete Caption"
-                  >
+                  <button onClick={() => removeClip(clip.id)} className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-destructive transition-all duration-200" title="Delete Caption">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
                 {/* Subtitle textarea */}
-                <textarea
-                  value={clip.text}
-                  onChange={(e) => handleTextChange(clip.id, e.target.value)}
-                  className="w-full min-h-[50px] p-2 bg-background/50 focus:bg-background border border-border/50 focus:border-accent rounded-lg text-xs text-text-primary resize-none outline-none transition-colors"
-                  placeholder="Enter subtitle text..."
-                />
+                <textarea value={clip.text} onChange={(e) => handleTextChange(clip.id, e.target.value)} className="w-full min-h-[50px] p-2 bg-background/50 focus:bg-background border border-border/50 focus:border-accent rounded-lg text-xs text-text-primary resize-none outline-none transition-colors" placeholder="Enter subtitle text..." />
 
                 {/* Micro Timing controls */}
                 <div className="grid grid-cols-2 gap-2 text-[10px]">
                   <div className="flex items-center gap-1.5">
                     <span className="shrink-0 text-text-muted">Start:</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={Number(clip.startTime.toFixed(2))}
-                      onChange={(e) =>
-                        handleTimingChange(clip.id, "startTime", parseFloat(e.target.value) || 0)
-                      }
-                      className="w-full px-1.5 py-1 bg-background/30 border border-border/30 rounded text-center outline-none focus:border-accent text-text-primary"
-                    />
+                    <input type="number" step="0.1" value={Number(clip.startTime.toFixed(2))} onChange={(e) => handleTimingChange(clip.id, "startTime", parseFloat(e.target.value) || 0)} className="w-full px-1.5 py-1 bg-background/30 border border-border/30 rounded text-center outline-none focus:border-accent text-text-primary" />
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="shrink-0 text-text-muted">Duration:</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0.1"
-                      value={Number(clip.duration.toFixed(2))}
-                      onChange={(e) =>
-                        handleTimingChange(clip.id, "duration", parseFloat(e.target.value) || 0.1)
-                      }
-                      className="w-full px-1.5 py-1 bg-background/30 border border-border/30 rounded text-center outline-none focus:border-accent text-text-primary"
-                    />
+                    <input type="number" step="0.1" min="0.1" value={Number(clip.duration.toFixed(2))} onChange={(e) => handleTimingChange(clip.id, "duration", parseFloat(e.target.value) || 0.1)} className="w-full px-1.5 py-1 bg-background/30 border border-border/30 rounded text-center outline-none focus:border-accent text-text-primary" />
                   </div>
                 </div>
               </div>

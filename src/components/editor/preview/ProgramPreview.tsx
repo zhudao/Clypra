@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ChevronDown, Expand, Shrink } from "lucide-react";
+import { Expand, Shrink } from "lucide-react";
 import { usePlaybackClock, usePlaybackControls, useTransportControls, getPlaybackClock } from "@/hooks/usePlaybackClock";
 import { useProjectStore } from "@/store/projectStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useUIStore } from "@/store/uiStore";
 import { useSettingsStore } from "@/store/settingsStore";
-import { evaluateTimelineSceneCached } from "@/core/evaluation/evaluator";
 import { getFrameScheduler } from "@/core/scheduler/FrameScheduler";
 import { getActiveSessionOrNull, subscribeToSessionChanges } from "@/core/runtime/ProjectSession";
+import { useViewportState } from "@/hooks/useViewportController";
 import { PreviewTransport } from "./PreviewTransport";
 import { TransformOverlayMemoized as TransformOverlay } from "../transform/TransformOverlay";
 import { SafeOverlay } from "../viewport/SafeOverlay";
@@ -16,7 +16,7 @@ import { calculateDisplayTransform } from "@/lib/coordinateSystem";
 import { GPUTextureCache } from "@/lib/gpuTextureCache";
 import { PreviewQualityManager, PreviewQualityTier } from "@/lib/preview/PreviewQualityManager";
 import { cn } from "@/lib/utils";
-import { AspectRatio, PREVIEW_ASPECT_LABEL } from "@/types";
+import { AspectRatio } from "@/types";
 import { formatTime } from "@/lib/timeFormatting";
 
 import { TelemetryOverlay, type TelemetryStats } from "./TelemetryOverlay";
@@ -24,14 +24,6 @@ import { AspectSelector } from "./AspectSelector";
 import { PlaybackSpeedSelector } from "./PlaybackSpeedSelector";
 import { PlaybackQualitySelector } from "./PlaybackQualitySelector";
 import { VolumeControl } from "./VolumeControl";
-
-const PREVIEW_ASPECT_RATIO: Record<AspectRatio, number | null> = {
-  original: null, // Uses project canvas
-  "16:9": 16 / 9,
-  "9:16": 9 / 16,
-  "1:1": 1,
-  "4:5": 4 / 5,
-};
 
 // Canvas dimensions for each preset (based on common resolutions)
 const CANVAS_DIMENSIONS: Record<Exclude<AspectRatio, "original">, { width: number; height: number }> = {
@@ -53,7 +45,10 @@ export const ProgramPreview: React.FC = () => {
   const transitions = useTimelineStore((s) => s.transitions);
   const epoch = useTimelineStore((s) => s.epoch);
   const clearSelection = useUIStore((s) => s.clearSelection);
-  const { previewViewport } = useUIStore();
+
+  // Get viewport state from controller (throttled to 10fps to prevent render storms)
+  const viewport = useViewportState();
+
   const activeSession = useSyncExternalStore(subscribeToSessionChanges, getActiveSessionOrNull, () => null);
 
   const previewQuality = useSettingsStore((s) => s.previewQuality);
@@ -83,6 +78,44 @@ export const ProgramPreview: React.FC = () => {
   const [showSafeOverlay, setShowSafeOverlay] = useState(false);
   const [telemetryStats, setTelemetryStats] = useState<TelemetryStats | null>(null);
 
+  // Track render count for debugging (after state declarations)
+  const renderCountRef = useRef(0);
+  const prevDepsRef = useRef<any>({});
+  renderCountRef.current++;
+
+  const currentDeps = {
+    projectId: project?.id,
+    mediaAssetsLength: mediaAssets.length,
+    tracksLength: tracks.length,
+    clipsLength: clips.length,
+    transitionsLength: transitions.length,
+    epoch,
+    previewViewportPanX: viewport.panX,
+    previewViewportPanY: viewport.panY,
+    previewViewportZoom: viewport.zoom,
+    clockTime: clockState.time,
+    clockState: clockState.state,
+    clockSpeed: clockState.speed,
+    dimensionsWidth: dimensions.width,
+    dimensionsHeight: dimensions.height,
+  };
+
+  if (renderCountRef.current > 1) {
+    const changes: string[] = [];
+    const prev = prevDepsRef.current;
+    Object.keys(currentDeps).forEach((key) => {
+      const prevVal = prev[key];
+      const currVal = (currentDeps as any)[key];
+      if (prevVal !== currVal) {
+        changes.push(`${key} (${JSON.stringify(prevVal)} → ${JSON.stringify(currVal)})`);
+      }
+    });
+    console.log(`[ProgramPreview] Render #${renderCountRef.current} - Changed: ${changes.length > 0 ? changes.join(", ") : "unknown (no deps changed - likely setState or parent re-render)"}`);
+  } else {
+    console.log(`[ProgramPreview] Render #${renderCountRef.current} - Initial mount`);
+  }
+  prevDepsRef.current = currentDeps;
+
   // =========================================================================
   // 4. REF DECLARATIONS (useRef)
   // =========================================================================
@@ -105,10 +138,10 @@ export const ProgramPreview: React.FC = () => {
   const prevFrameRateRef = useRef<number>(0);
 
   const renderStateRef = useRef({
-	    clips,
-	    tracks,
-	    transitions,
-	    mediaAssets,
+    clips,
+    tracks,
+    transitions,
+    mediaAssets,
     project,
     epoch,
     clock,
@@ -123,10 +156,10 @@ export const ProgramPreview: React.FC = () => {
 
   // Sync refs on every render
   showTelemetryRef.current = showTelemetry;
-	  renderStateRef.current.clips = clips;
-	  renderStateRef.current.tracks = tracks;
-	  renderStateRef.current.transitions = transitions;
-	  renderStateRef.current.mediaAssets = mediaAssets;
+  renderStateRef.current.clips = clips;
+  renderStateRef.current.tracks = tracks;
+  renderStateRef.current.transitions = transitions;
+  renderStateRef.current.mediaAssets = mediaAssets;
   renderStateRef.current.project = project;
   renderStateRef.current.epoch = epoch;
   renderStateRef.current.clock = clock;
@@ -148,8 +181,8 @@ export const ProgramPreview: React.FC = () => {
   // 6. DERIVED MEMOIZED VALUES (useMemo)
   // =========================================================================
   const displayTransform = useMemo(() => {
-    return calculateDisplayTransform({ width: canvasWidth, height: canvasHeight }, previewViewport, dimensions.width, dimensions.height, previewScaleMode);
-  }, [canvasWidth, canvasHeight, previewViewport, dimensions.width, dimensions.height, previewScaleMode]);
+    return calculateDisplayTransform({ width: canvasWidth, height: canvasHeight }, viewport, dimensions.width, dimensions.height, previewScaleMode);
+  }, [canvasWidth, canvasHeight, viewport.panX, viewport.panY, viewport.zoom, dimensions.width, dimensions.height, previewScaleMode]);
 
   const { scale, offsetX, offsetY, displayWidth, displayHeight } = displayTransform;
 
@@ -158,10 +191,6 @@ export const ProgramPreview: React.FC = () => {
   renderStateRef.current.displayHeight = displayHeight;
   renderStateRef.current.canvasWidth = canvasWidth;
   renderStateRef.current.canvasHeight = canvasHeight;
-
-  const scene = useMemo(() => {
-    return evaluateTimelineSceneCached(clockState.time, clips, tracks, mediaAssets, project ?? null, epoch, transitions);
-  }, [tracks, clips, transitions, mediaAssets, clockState.time, project, epoch]);
 
   // =========================================================================
   // 7. EVENT HANDLERS & CALLBACKS (useCallback)
@@ -279,7 +308,16 @@ export const ProgramPreview: React.FC = () => {
   useEffect(() => {
     const updateDimensions = () => {
       if (!containerRef.current) return;
-      setDimensions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight });
+      const newWidth = containerRef.current.clientWidth;
+      const newHeight = containerRef.current.clientHeight;
+
+      // Only update if dimensions actually changed (avoid unnecessary re-renders)
+      setDimensions((prev) => {
+        if (prev.width === newWidth && prev.height === newHeight) {
+          return prev; // Return same reference to prevent re-render
+        }
+        return { width: newWidth, height: newHeight };
+      });
     };
     const resizeObserver = new ResizeObserver(updateDimensions);
     const handleFullscreenChange = () => {
@@ -360,20 +398,36 @@ export const ProgramPreview: React.FC = () => {
     let isActive = true;
     let isRendering = false;
     let lastJobId: string | null = null;
+    let lastRenderedTime: number = -1;
+    let lastRenderedEpoch: number = -1;
     const GPU_MEMORY_LIMIT_MB = 128;
     const renderLoop = () => {
       if (!isActive) return;
+
+      const state = renderStateRef.current;
+      const timeToRender = state.clock.time;
+      const isPlaying = state.clockState.state === "playing";
+      const timeChanged = timeToRender !== lastRenderedTime;
+      const epochChanged = state.epoch !== lastRenderedEpoch;
+      const needsRender = isPlaying || timeChanged || epochChanged;
+
+      // Only render if something changed or we're playing
+      // This prevents infinite RAF loops when idle
+      if (!needsRender) {
+        rafId = requestAnimationFrame(renderLoop);
+        return;
+      }
+
       rafId = requestAnimationFrame(renderLoop);
       if (isRendering) {
         droppedFramesRef.current++;
         return;
       }
       isRendering = true;
-      const state = renderStateRef.current;
-      const timeToRender = state.clock.time;
+      lastRenderedTime = timeToRender;
+      lastRenderedEpoch = state.epoch;
       scheduler.updateTimeline(state.clips, state.tracks, state.mediaAssets, state.project, state.epoch, state.transitions);
       const qm = qualityManagerRef.current;
-      const isPlaying = state.clockState.state === "playing";
       const qualityTier = qm ? qm.selectTierForInteraction(isPlaying, false, false, state.previewQuality) : PreviewQualityTier.Idle;
       const profile = qm ? qm.getRenderProfile(qualityTier) : { maxWidth: state.canvasWidth, maxHeight: state.canvasHeight, dprScale: state.dpr, useDpr: true };
       if (gpuCache) {
@@ -524,7 +578,7 @@ export const ProgramPreview: React.FC = () => {
               />
 
               {/* Transform overlay for selected clips */}
-              <TransformOverlay canvasWidth={canvasWidth} canvasHeight={canvasHeight} scale={scale} viewport={previewViewport} displayOffset={{ x: offsetX, y: offsetY }} displayWidth={displayWidth} displayHeight={displayHeight} currentTime={currentTime} />
+              <TransformOverlay canvasWidth={canvasWidth} canvasHeight={canvasHeight} scale={scale} viewport={viewport} displayOffset={{ x: offsetX, y: offsetY }} displayWidth={displayWidth} displayHeight={displayHeight} currentTime={currentTime} />
 
               {/* Title & Action Safe Areas Overlay */}
               <SafeOverlay visible={showSafeOverlay} displayWidth={displayWidth} displayHeight={displayHeight} displayOffset={{ x: offsetX, y: offsetY }} />

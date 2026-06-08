@@ -74,7 +74,6 @@ export const ClypraApi = {
     if (this._effectsCache.has(cacheKey)) {
       data = this._effectsCache.get(cacheKey)!;
     } else {
-      console.log(`[API] Fetching heavy configuration on-demand for effect: ${id}`);
       const res = await fetch(`${BASE}/effects/${category}/${id}`, {
         cache: "reload",
         headers: getHeaders(),
@@ -124,7 +123,6 @@ export const ClypraApi = {
       return this._lottieCache.get(cacheKey)!;
     }
 
-    console.log(`[API] Fetching heavy Lottie vector data on-demand for template: ${id}`);
     const res = await fetch(`${BASE}/templates/${category}/${id}`, {
       cache: "reload",
       headers: getHeaders(),
@@ -144,7 +142,6 @@ export const ClypraApi = {
   clearLocalCache(): void {
     this._effectsCache.clear();
     this._lottieCache.clear();
-    console.log("[API] Local cache cleared");
   },
 
   /**

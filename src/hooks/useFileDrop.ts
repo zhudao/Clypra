@@ -75,15 +75,39 @@ export const useFileDrop = ({ onDrop, enabled = true }: UseFileDropOptions) => {
         // Only set unlisten if component is still mounted
         if (isMounted) {
           unlisten = () => {
-            unlistenHover();
-            unlistenDrop();
-            unlistenCancel();
+            try {
+              unlistenHover();
+            } catch (e) {
+              // Listener already cleaned up
+            }
+            try {
+              unlistenDrop();
+            } catch (e) {
+              // Listener already cleaned up
+            }
+            try {
+              unlistenCancel();
+            } catch (e) {
+              // Listener already cleaned up
+            }
           };
         } else {
           // Component unmounted before listeners were set up, clean up immediately
-          unlistenHover();
-          unlistenDrop();
-          unlistenCancel();
+          try {
+            unlistenHover();
+          } catch (e) {
+            // Ignore
+          }
+          try {
+            unlistenDrop();
+          } catch (e) {
+            // Ignore
+          }
+          try {
+            unlistenCancel();
+          } catch (e) {
+            // Ignore
+          }
         }
       } catch (error) {
         console.error("[useFileDrop] Failed to setup file drop listener:", error);
@@ -95,7 +119,12 @@ export const useFileDrop = ({ onDrop, enabled = true }: UseFileDropOptions) => {
     return () => {
       isMounted = false;
       if (unlisten) {
-        unlisten();
+        try {
+          unlisten();
+        } catch (error) {
+          // Ignore errors during cleanup (listener may already be unregistered)
+          console.debug("[useFileDrop] Cleanup error (expected):", error);
+        }
       }
     };
   }, [enabled, onDrop]);

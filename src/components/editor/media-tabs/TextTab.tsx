@@ -177,6 +177,14 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
                   const startTime = mediaClip.startTime + relativeStart;
                   const segmentDuration = Math.min(seg.end - seg.start, mediaClip.duration - relativeStart);
 
+                  // Convert word timestamps to clip-relative time
+                  const words = seg.words?.map((w: any) => ({
+                    word: w.word,
+                    start: w.start - seg.start,
+                    end: w.end - seg.start,
+                    probability: w.probability,
+                  }));
+
                   const textClip = createTextClip({
                     trackId: targetTrackId!,
                     startTime,
@@ -187,6 +195,8 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
                     fontSize: 32,
                     bold: true,
                     position: "bottom",
+                    textRole: "caption",
+                    words, // Include word-level timestamps
                     styleId: "neon-crimson",
                     fontFamily: "Outfit Variable",
                   });
@@ -235,6 +245,7 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
                 fontSize: 32,
                 bold: true,
                 position: "bottom",
+                textRole: "caption",
                 styleId: "neon-crimson",
                 fontFamily: "Outfit Variable",
               });

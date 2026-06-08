@@ -12,7 +12,6 @@ const MAX_STILL_CLIP_DURATION_SEC = 60 * 60; // 1 hour guardrail for stills
 const MIN_TRIM_DURATION_SEC = 1;
 const traceResize = (...args: unknown[]) => {
   if (!RESIZE_TRACE) return;
-  console.log("[ClipResizeTrace]", ...args);
 };
 
 interface ClipProps {
@@ -409,8 +408,21 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
   const isClipVideo = mediaAsset?.type === "video";
   const isClipImage = mediaAsset?.type === "image";
 
+  // Check if text clip is a caption or title
+  const textClip = isClipText ? (clip as any) : null;
+  const textRole = textClip?.textRole as "caption" | "title" | undefined;
+  const isCaption = textRole === "caption";
+  const isTitle = textRole === "title";
+
   const getClipStyle = () => {
-    if (isClipText) return "bg-(--color-timeline-text-clip-bg) text-(--color-timeline-text-clip-text)";
+    if (isClipText) {
+      // Differentiate captions (purple) from titles (orange)
+      if (isCaption) {
+        return "bg-[#9333ea] text-white"; // Purple for captions
+      } else {
+        return "bg-[#ea580c] text-white"; // Orange for titles/effects
+      }
+    }
     if (mediaAsset?.type === "audio") return "bg-timeline-clip-audio border-timeline-clip-audio-border";
     return "h-full bg-accent";
   };
@@ -490,7 +502,9 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
 
       {/* Clip content */}
       {"text" in clip ? (
-        <div className="flex h-full w-full items-center px-3">
+        <div className="relative flex h-full w-full items-center px-3">
+          {/* Icon badge for text role differentiation */}
+          {(isCaption || isTitle) && <div className="absolute left-1 top-1 flex items-center justify-center rounded bg-black/30 px-1.5 py-0.5 text-[9px] font-semibold text-white backdrop-blur-sm">{isCaption ? "CC" : "T"}</div>}
           <div className="text-[12px] text-white/95 font-medium tracking-[0.01em] truncate max-w-full select-none pointer-events-none">{(clip as any).text || "Default text"}</div>
         </div>
       ) : (

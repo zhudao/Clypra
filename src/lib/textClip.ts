@@ -44,6 +44,17 @@ export interface CreateTextClipOptions {
   /** Position preset */
   position?: "center" | "top" | "bottom" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
+  /** Text role: caption for subtitles, title for decorative text */
+  textRole?: "caption" | "title";
+
+  /** Word-level timestamps for karaoke-style caption highlighting */
+  words?: Array<{
+    word: string;
+    start: number;
+    end: number;
+    probability?: number;
+  }>;
+
   // Additional style parameters for custom presets/effects/templates
   styleId?: string;
   templateId?: string;
@@ -117,19 +128,7 @@ export function effectBleed(options: { styleId?: string; effectDefinition?: Text
   return { x, y };
 }
 
-export function calculateTextClipSize(options: {
-  text: string;
-  fontFamily: string;
-  fontSize: number;
-  bold?: boolean;
-  fontWeight?: string | number;
-  styleId?: string;
-  effectDefinition?: TextEffectDefinition;
-  stroke?: { width: number };
-  shadow?: { blur: number; offsetX: number; offsetY: number };
-  background?: { padding: number };
-  canvasWidth: number;
-}): { width: number; height: number; bleed: { x: number; y: number }; measuredWidth: number } {
+export function calculateTextClipSize(options: { text: string; fontFamily: string; fontSize: number; bold?: boolean; fontWeight?: string | number; styleId?: string; effectDefinition?: TextEffectDefinition; stroke?: { width: number }; shadow?: { blur: number; offsetX: number; offsetY: number }; background?: { padding: number }; canvasWidth: number }): { width: number; height: number; bleed: { x: number; y: number }; measuredWidth: number } {
   const isBold = options.bold || options.fontWeight === "bold" || (typeof options.fontWeight === "number" && options.fontWeight >= 700);
   const measuredWidth = measureTextWidth(options.text, options.fontFamily, options.fontSize, !!isBold);
   const bleed = effectBleed(options);
@@ -137,22 +136,12 @@ export function calculateTextClipSize(options: {
   const isPanelEffect = options.effectDefinition?.boundingBox?.mode === "panel";
   const layoutBleed = isPanelEffect || !options.styleId ? bleed : { x: 0, y: 0 };
 
-  const baseWidth = isPanelEffect
-    ? measuredWidth
-    : hasDeclaredBounds
-      ? measuredWidth + options.fontSize * 0.4
-      : options.styleId
-        ? measuredWidth * 1.3
-        : measuredWidth + options.fontSize * 0.8;
+  const baseWidth = isPanelEffect ? measuredWidth : hasDeclaredBounds ? measuredWidth + options.fontSize * 0.4 : options.styleId ? measuredWidth * 1.3 : measuredWidth + options.fontSize * 0.8;
 
   const width = Math.min(options.canvasWidth * 0.95, Math.max(120, baseWidth + layoutBleed.x * 2));
   const contentWidth = Math.max(1, width - layoutBleed.x * 2);
   const wrappedLineCount = Math.max(1, Math.ceil(measuredWidth / contentWidth));
-  const baseHeight = isPanelEffect
-    ? options.fontSize * wrappedLineCount
-    : hasDeclaredBounds
-      ? options.fontSize * 1.35 * wrappedLineCount
-      : options.fontSize * (options.styleId ? 1.8 : 1.5) * wrappedLineCount;
+  const baseHeight = isPanelEffect ? options.fontSize * wrappedLineCount : hasDeclaredBounds ? options.fontSize * 1.35 * wrappedLineCount : options.fontSize * (options.styleId ? 1.8 : 1.5) * wrappedLineCount;
   const height = baseHeight + layoutBleed.y * 2;
 
   return { width, height, bleed, measuredWidth };
@@ -163,7 +152,7 @@ export function calculateTextClipSize(options: {
  */
 export function createTextClip(options: CreateTextClipOptions): TextClip {
   const defaultFontSize = options.styleId ? 96 : 48;
-  const { trackId, startTime, duration = 5.0, text = "Text", canvasWidth, canvasHeight, fontSize = defaultFontSize, fontFamily = "Inter, system-ui, sans-serif", color = "#ffffff", bold = false, italic = false, position = "center", styleId, templateId, fontWeight, fontStyle, stroke, shadow, background, effectDefinition } = options;
+  const { trackId, startTime, duration = 5.0, text = "Text", canvasWidth, canvasHeight, fontSize = defaultFontSize, fontFamily = "Inter, system-ui, sans-serif", color = "#ffffff", bold = false, italic = false, position = "center", textRole, words, styleId, templateId, fontWeight, fontStyle, stroke, shadow, background, effectDefinition } = options;
 
   const sizing = calculateTextClipSize({
     text,
@@ -177,20 +166,6 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     shadow,
     background,
     canvasWidth,
-  });
-
-  console.log("[createTextClip] Bounding box calculation:", {
-    text,
-    fontSize,
-    styleId,
-    measuredWidth: sizing.measuredWidth,
-    bleed: sizing.bleed,
-    effectDefinition: effectDefinition
-      ? {
-          id: effectDefinition.id,
-          boundingBox: effectDefinition.boundingBox,
-        }
-      : undefined,
   });
 
   // Calculate position based on preset using the dynamic box sizes
@@ -223,6 +198,8 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     letterSpacing: 0,
     paddingX: 16,
     paddingY: 16,
+    textRole,
+    words, // Include word-level timestamps for karaoke-style highlighting
     styleId,
     templateId,
     stroke,
@@ -344,26 +321,11 @@ export const TEXT_PRESETS = {
  * Recalculate the bounding box of a text clip when text content or styling changes.
  * Keeps the center of the clip fixed on the canvas.
  */
-export function recalculateTextClipBounds(
-  clip: TextClip,
-  updates: Partial<TextClip>,
-  canvasWidth: number,
-  canvasHeight: number
-): TextClip {
+export function recalculateTextClipBounds(clip: TextClip, updates: Partial<TextClip>, canvasWidth: number, canvasHeight: number): TextClip {
   const merged = { ...clip, ...updates };
-  const {
-    text = "Text",
-    fontFamily = "Inter, system-ui, sans-serif",
-    fontSize = 48,
-    fontWeight,
-    fontStyle,
-    styleId,
-    stroke,
-    shadow,
-    background,
-  } = merged;
+  const { text = "Text", fontFamily = "Inter, system-ui, sans-serif", fontSize = 48, fontWeight, fontStyle, styleId, stroke, shadow, background } = merged;
 
-  const effectDefinition = styleId ? useEffectsStore.getState().definitions[styleId] as TextEffectDefinition | undefined : undefined;
+  const effectDefinition = styleId ? (useEffectsStore.getState().definitions[styleId] as TextEffectDefinition | undefined) : undefined;
 
   const sizing = calculateTextClipSize({
     text,

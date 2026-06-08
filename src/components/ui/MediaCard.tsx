@@ -44,7 +44,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ asset, isSelected, isUsedI
   return (
     <div ref={drag as unknown as React.Ref<HTMLDivElement>} onClick={handleClick} onContextMenu={onContextMenu} className={`group relative bg-surface-raised rounded overflow-hidden transition-all cursor-pointer ${isDragging ? "opacity-50" : ""} ${isSelected ? "ring-1 ring-accent" : ""}`}>
       <div className="aspect-video bg-surface-raised flex items-center justify-center relative">
-        {asset.type === "video" && asset.posterFrame && !/\.(mp4|mov|avi|mkv|webm|flv)(%|$)/i.test(asset.posterFrame) ? (
+        {asset.type === "video" && asset.posterFrame && !/\.(mp4|mov|mkv|webm|flv)(%|$)/i.test(asset.posterFrame) ? (
           <img src={asset.posterFrame} alt={asset.name} className="w-full h-full object-contain" />
         ) : asset.type === "audio" ? (
           <MediaCardWaveform audioPath={asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path)} duration={asset.duration} className="w-full h-full" />

@@ -19,7 +19,7 @@ export const useMediaImport = () => {
         filters: [
           {
             name: "Media",
-            extensions: ["mp4", "mov", "avi", "mkv", "mp3", "wav", "aac", "jpg", "png", "webp"],
+            extensions: ["mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "aac", "ogg", "flac", "m4a", "jpg", "png", "webp"],
           },
         ],
       });
@@ -121,8 +121,8 @@ export const useMediaImport = () => {
 
   const getMediaType = (path: string): "video" | "audio" | "image" => {
     const lower = path.toLowerCase();
-    if (/\.(mp4|mov|avi|mkv|webm|flv)$/i.test(lower)) return "video";
-    if (/\.(mp3|wav|aac|flac|m4a)$/i.test(lower)) return "audio";
+    if (/\.(mp4|mov|mkv|webm|m4v|flv)$/i.test(lower)) return "video";
+    if (/\.(mp3|wav|aac|ogg|flac|m4a)$/i.test(lower)) return "audio";
     return "image";
   };
 

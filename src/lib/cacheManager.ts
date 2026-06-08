@@ -29,7 +29,6 @@ export class CacheManager {
    */
   static async clearAppCache(): Promise<{ success: boolean; error?: string }> {
     if (!isTauri()) {
-      console.log("Non-Tauri environment: Skipping app cache clear");
       return { success: true };
     }
 
@@ -38,13 +37,11 @@ export class CacheManager {
       const cacheExists = await exists("", { baseDir: BaseDirectory.AppCache });
 
       if (!cacheExists) {
-        console.log("App cache directory does not exist, nothing to clear");
         return { success: true };
       }
 
       // Remove the entire app cache directory recursively
       await remove("", { baseDir: BaseDirectory.AppCache, recursive: true });
-      console.log("✅ App cache cleared successfully");
       return { success: true };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -62,7 +59,6 @@ export class CacheManager {
    */
   static async clearWebViewCache(): Promise<{ success: boolean; error?: string }> {
     if (!isTauri()) {
-      console.log("Non-Tauri environment: Skipping WebView cache clear");
       return { success: true };
     }
 
@@ -71,13 +67,11 @@ export class CacheManager {
       const webViewExists = await exists("EBWebView", { baseDir: BaseDirectory.AppLocalData });
 
       if (!webViewExists) {
-        console.log("WebView cache directory does not exist, nothing to clear");
         return { success: true };
       }
 
       // Remove WebView cache directory
       await remove("EBWebView", { baseDir: BaseDirectory.AppLocalData, recursive: true });
-      console.log("✅ WebView cache cleared successfully");
       return { success: true };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -100,14 +94,11 @@ export class CacheManager {
     try {
       if (globalGPUCache.isInitialized()) {
         const stats = globalGPUCache.getStats();
-        console.log("GPU cache stats before clearing:", stats);
 
         // Dispose of GPU cache
         globalGPUCache.dispose();
-        console.log("✅ GPU cache cleared successfully");
         return { success: true };
       } else {
-        console.log("GPU cache not initialized, nothing to clear");
         return { success: true };
       }
     } catch (error) {
@@ -125,7 +116,6 @@ export class CacheManager {
     try {
       const itemCount = localStorage.length;
       localStorage.clear();
-      console.log(`✅ Cleared ${itemCount} localStorage items`);
       return { success: true };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -141,7 +131,6 @@ export class CacheManager {
     try {
       const itemCount = sessionStorage.length;
       sessionStorage.clear();
-      console.log(`✅ Cleared ${itemCount} sessionStorage items`);
       return { success: true };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -162,7 +151,6 @@ export class CacheManager {
           return new Promise<void>((resolve, reject) => {
             const request = indexedDB.deleteDatabase(db.name!);
             request.onsuccess = () => {
-              console.log(`✅ Deleted IndexedDB: ${db.name}`);
               resolve();
             };
             request.onerror = () => reject(request.error);
@@ -172,7 +160,6 @@ export class CacheManager {
       });
 
       await Promise.all(deletePromises);
-      console.log(`✅ Cleared ${databases.length} IndexedDB databases`);
       return { success: true };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -189,19 +176,15 @@ export class CacheManager {
   static async clearHTTPCache(): Promise<{ success: boolean; error?: string }> {
     try {
       if (!("caches" in window)) {
-        console.log("Cache API not available in this environment");
         return { success: true };
       }
 
       const cacheNames = await caches.keys();
       const deletePromises = cacheNames.map((cacheName) => {
-        return caches.delete(cacheName).then(() => {
-          console.log(`✅ Deleted HTTP cache: ${cacheName}`);
-        });
+        return caches.delete(cacheName).then(() => {});
       });
 
       await Promise.all(deletePromises);
-      console.log(`✅ Cleared ${cacheNames.length} HTTP caches`);
       return { success: true };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -242,8 +225,6 @@ export class CacheManager {
       gpuCacheCleared: false,
       errors: [],
     };
-
-    console.log("🧹 Starting comprehensive cache cleanup...");
 
     // Clear app cache
     if (appCache) {
@@ -290,7 +271,6 @@ export class CacheManager {
       if (result.error) stats.errors.push(`IndexedDB: ${result.error}`);
     }
 
-    console.log("🧹 Cache cleanup complete:", stats);
     return stats;
   }
 

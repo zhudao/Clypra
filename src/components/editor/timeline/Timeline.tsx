@@ -21,7 +21,6 @@ import { EmptyTimelineDropZone } from "./EmptyTimelineDropZone";
 const SELECT_TRACE = import.meta.env.DEV;
 const traceSelect = (...args: unknown[]) => {
   if (!SELECT_TRACE) return;
-  console.log("[SelectTrace][Timeline]", ...args);
 };
 
 export const Timeline: React.FC = () => {

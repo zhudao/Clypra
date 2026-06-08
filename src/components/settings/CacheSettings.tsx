@@ -66,8 +66,6 @@ export const CacheSettings: React.FC = () => {
         type: "success",
         message: `All caches cleared: Local ✓, KV (${kvDeleted} keys), Cache API (${cacheApiPurged} entries)`,
       });
-
-      console.log("[CacheSettings] Full cache purge completed:", result);
     } catch (error: any) {
       console.error("[CacheSettings] Cache purge failed:", error);
 
@@ -97,7 +95,7 @@ export const CacheSettings: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <div>
         <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-muted mb-2">Cache Management</h3>
         <p className="text-[11px] text-text-muted">Clear cached data to free up disk space or resolve performance issues.</p>
@@ -141,8 +139,8 @@ export const CacheSettings: React.FC = () => {
 
       {/* Clear Result Message */}
       {lastResult && (
-        <div className={`flex items-start gap-3 p-4 rounded-lg border text-xs ${lastResult.success ? "bg-green-500/10 border-green-500/30 text-green-400" : "bg-red-500/10 border-red-500/30 text-red-400"}`}>
-          {lastResult.success ? <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />}
+        <div className={`flex items-center gap-3 p-2 rounded-lg border text-xs ${lastResult.success ? "bg-green-500/10 border-green-500/30 text-green-400" : "bg-red-500/10 border-red-500/30 text-red-400"}`}>
+          {lastResult.success ? <CheckCircle className="w-5 h-5 shrink-0 mt-0.5" /> : <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />}
           <div className="flex-1">
             <p className="font-medium">{lastResult.message}</p>
             {lastResult.stats?.errors && lastResult.stats.errors.length > 0 && (
@@ -197,8 +195,8 @@ export const CacheSettings: React.FC = () => {
         </div>
 
         {apiCacheStatus && (
-          <div className={`flex items-start gap-3 p-4 rounded-lg border text-xs ${apiCacheStatus.type === "success" ? "bg-green-500/10 border-green-500/30 text-green-400" : "bg-red-500/10 border-red-500/30 text-red-400"}`}>
-            {apiCacheStatus.type === "success" ? <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />}
+          <div className={`flex items-center gap-3 p-2 rounded-lg border text-xs ${apiCacheStatus.type === "success" ? "bg-green-500/10 border-green-500/30 text-green-400" : "bg-red-500/10 border-red-500/30 text-red-400"}`}>
+            {apiCacheStatus.type === "success" ? <CheckCircle className="w-5 h-5 shrink-0 mt-0.5" /> : <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />}
             <p className="font-medium flex-1">{apiCacheStatus.message}</p>
           </div>
         )}
@@ -224,7 +222,7 @@ export const CacheSettings: React.FC = () => {
         </div>
 
         <div className="flex items-start gap-3 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-          <AlertCircle className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+          <AlertCircle className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
           <p className="text-[11px] text-blue-200/90">Server cache clearing requires an API key with admin permissions. If you see errors, verify your API key is configured correctly.</p>
         </div>
       </div>
@@ -277,14 +275,14 @@ export const CacheSettings: React.FC = () => {
         </div>
 
         <div className="flex items-start gap-3 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
-          <AlertCircle className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
+          <AlertCircle className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
           <p className="text-[11px] text-orange-200/90">Clearing audio cache will remove all downloaded library files. You'll need to download them again when adding to timeline.</p>
         </div>
       </div>
 
       {/* Warning Note */}
       <div className="flex items-start gap-3 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-        <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+        <AlertCircle className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
         <div className="text-[11px] text-yellow-200/90">
           <p className="font-semibold mb-1">Important Notes:</p>
           <ul className="space-y-1 list-disc list-inside">

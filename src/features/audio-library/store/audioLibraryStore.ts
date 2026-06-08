@@ -83,7 +83,6 @@ export const useAudioLibraryStore = create<AudioLibraryStore>((set, get) => ({
       });
 
       set({ downloads });
-      console.log("[AudioLibraryStore] Initialized with", cached.length, "cached files");
     } catch (error) {
       console.error("[AudioLibraryStore] Failed to initialize cache:", error);
     }
@@ -94,7 +93,6 @@ export const useAudioLibraryStore = create<AudioLibraryStore>((set, get) => ({
 
     // Check if already downloaded
     if (downloads[item.id]?.status === "completed" && downloads[item.id].cachedFile) {
-      console.log("[AudioLibraryStore] Already downloaded:", item.id);
       return downloads[item.id].cachedFile!;
     }
 

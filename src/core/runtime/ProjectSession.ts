@@ -353,12 +353,11 @@ export class ProjectSession {
       selectedClipIds: [],
       selectedTrackId: null,
       previewMode: "program",
-      previewViewport: {
-        zoom: 1.0,
-        panX: 0,
-        panY: 0,
-      },
     });
+
+    // Reset viewport controller (imperative state)
+    const { getViewportController } = await import("@/core/interactions");
+    getViewportController().reset();
   }
 
   private async _resetStores(): Promise<void> {

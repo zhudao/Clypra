@@ -106,6 +106,8 @@ export interface MediaAsset {
     height: number;
   };
   size: number;
+  /** Source media rotation from container metadata (0, 90, 180, 270) */
+  rotation?: number;
 }
 
 export interface Clip {
@@ -129,6 +131,14 @@ export interface Clip {
   fitMode?: "contain" | "cover" | "fill" | "stretch" | "original";
 }
 
+/** Word-level timestamp for karaoke-style caption highlighting */
+export interface CaptionWord {
+  word: string; // "Welcome"
+  start: number; // 0.0 (relative to segment start)
+  end: number; // 0.5
+  probability?: number; // 0.98 (Whisper confidence score)
+}
+
 export interface TextClip extends Clip {
   text: string;
   fontFamily: string;
@@ -146,6 +156,10 @@ export interface TextClip extends Clip {
   paddingY: number;
   styleId?: string;
   templateId?: string;
+  /** Role of the text clip: caption for subtitles, title for decorative text/graphics */
+  textRole?: "caption" | "title";
+  /** Word-level timestamps for karaoke-style caption highlighting (optional) */
+  words?: CaptionWord[];
   stroke?: {
     color: string;
     width: number;
