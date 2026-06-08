@@ -77,10 +77,11 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
   const sortedClips = activeClips.sort((a, b) => {
     const roleOrder = getRoleOrder(a.role) - getRoleOrder(b.role);
     if (roleOrder !== 0) return roleOrder;
-    // Top track in UI (lower trackIndex) should draw LAST (higher array index) to appear on top
-    // Bottom track in UI (higher trackIndex) should draw FIRST (lower array index) to appear below
-    // So we want: higher trackIndex → earlier in array → draws first → appears below
-    const trackOrder = b.trackIndex - a.trackIndex;
+    // CRITICAL: Lower trackIndex (top in UI) must draw LAST to appear on top
+    // The rasterizer draws array elements in order: [0] first, [last] last
+    // Canvas compositing: last drawn = on top
+    // So: higher trackIndex → earlier in array, lower trackIndex → later in array
+    const trackOrder = a.trackIndex - b.trackIndex; // ASC: low index last
     if (trackOrder !== 0) return trackOrder;
     const zOrder = a.zIndex - b.zIndex;
     if (zOrder !== 0) return zOrder;
@@ -89,9 +90,9 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
 
   // Debug: Log the sorting order
   if (sortedClips.length > 0) {
-    console.log(`[evaluateTimelineScene] Sorted ${sortedClips.length} clips for rendering (array order = draw order, last = on top):`);
+    console.log(`[evaluateTimelineScene] Sorted ${sortedClips.length} clips (rasterizer draws [0] first, [last] last, last=on top):`);
     sortedClips.forEach((clip, idx) => {
-      console.log(`  [${idx}] Clip ${clip.id} - trackIndex: ${clip.trackIndex}, role: ${clip.role}, zIndex: ${clip.zIndex}`);
+      console.log(`  [${idx}] trackIdx=${clip.trackIndex} (${clip.trackIndex === 0 ? "TOP track in UI" : clip.trackIndex === Math.max(...sortedClips.map((c) => c.trackIndex)) ? "BOTTOM track in UI" : "middle"}), role=${clip.role}, draws ${idx === sortedClips.length - 1 ? "LAST (ON TOP)" : "at layer " + idx}`);
     });
   }
 
