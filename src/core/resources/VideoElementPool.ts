@@ -10,7 +10,31 @@
  * - Resource lifecycle management
  * - Concurrent video support
  * - Multiple instances per URL (for different seek positions)
+ * - Sequential seek optimization (reuses elements for small forward jumps)
  */
+
+/**
+ * Sequential seek threshold in seconds.
+ *
+ * When the next requested time is within this threshold ahead of the
+ * video element's current position, reuse that element for a small forward
+ * seek. The browser decoder handles small forward seeks efficiently from
+ * its internal buffer without needing to walk back to a keyframe.
+ *
+ * Typical keyframe interval is 2s, so 1.5s is conservative.
+ */
+const SEQUENTIAL_SEEK_THRESHOLD_S = 1.5;
+
+/**
+ * Overshoot tolerance in seconds.
+ *
+ * If the video element is already within this distance past the target time,
+ * accept it without seeking. This handles cases where the decoder overshoots
+ * slightly or the previous frame was very close.
+ *
+ * 0.02s (20ms) covers up to 60fps (16.67ms per frame) with margin.
+ */
+const OVERSHOOT_TOLERANCE_S = 0.02;
 
 export interface VideoElementPoolConfig {
   /** Maximum number of concurrent video elements */
@@ -40,16 +64,35 @@ export class VideoElementPool {
 
   /**
    * Acquire a video element for a source URL.
-   * Creates new element if not in pool or reuses an existing one at the same seek position.
+   * Creates new element if not in pool or reuses an existing one.
+   *
+   * Optimization: Prefers elements that are close to the target seek time
+   * (within SEQUENTIAL_SEEK_THRESHOLD_S ahead) to take advantage of the
+   * browser's efficient handling of small forward seeks from its decode buffer.
    *
    * @param sourceUrl - Video source URL
    * @param seekTime - Time to seek to (in seconds)
    * @returns Video element ready at seekTime
    */
   async acquire(sourceUrl: string, seekTime: number): Promise<HTMLVideoElement> {
-    // Try to find an existing video element at the exact same seek position
-    // This avoids unnecessary re-seeking when the same clip is used across frames
-    const existingVideo = this.videos.find((v) => v.url === sourceUrl && Math.abs(v.lastSeekTime - seekTime) < 0.001 && !v.inUse);
+    // Try to find an existing video element for sequential access:
+    // 1. Exact match (already at target position)
+    // 2. Small forward jump (within threshold - cheap seek from buffer)
+    const existingVideo = this.videos.find((v) => {
+      if (v.url !== sourceUrl || v.inUse) return false;
+
+      const timeDelta = seekTime - v.lastSeekTime;
+
+      // Exact match (within 1ms)
+      if (Math.abs(timeDelta) < 0.001) return true;
+
+      // Sequential forward seek (small jump ahead - decoder has frames in buffer)
+      if (timeDelta > 0 && timeDelta < SEQUENTIAL_SEEK_THRESHOLD_S) {
+        return true;
+      }
+
+      return false;
+    });
 
     let pooledVideo: PooledVideo;
 
@@ -146,7 +189,17 @@ export class VideoElementPool {
 
     // Seek to target time if needed
     const video = pooledVideo.element;
-    if (Math.abs(video.currentTime - seekTime) > 0.001) {
+    const timeDelta = seekTime - video.currentTime;
+
+    // Check if we're already close enough (within overshoot tolerance)
+    if (Math.abs(timeDelta) <= OVERSHOOT_TOLERANCE_S) {
+      // Already at or very close to target position
+      pooledVideo.lastSeekTime = seekTime;
+      return pooledVideo.element;
+    }
+
+    // Need to seek
+    if (Math.abs(timeDelta) > OVERSHOOT_TOLERANCE_S) {
       try {
         // waits for frame to be compositor-ready
         await new Promise<void>((resolve, reject) => {

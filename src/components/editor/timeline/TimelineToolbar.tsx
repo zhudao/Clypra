@@ -115,7 +115,7 @@ export const TimelineToolbar: React.FC = () => {
   };
 
   const handleSplitAllAtPlayhead = () => {
-    const results = EditingActions.splitAllAtPlayhead();
+    const results = EditingActions.splitAtPlayhead();
     if (results.length === 0) {
       setToastMessage("No clips under playhead to split");
     } else {
