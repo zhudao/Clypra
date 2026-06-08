@@ -88,11 +88,15 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
     return a.evaluationPriority - b.evaluationPriority;
   });
 
-  // Debug: Log the sorting order
+  // Debug: Log the sorting order with z-order visualization
   if (sortedClips.length > 0) {
+    const maxTrackIdx = Math.max(...sortedClips.map((c) => c.trackIndex));
     console.log(`[evaluateTimelineScene] Sorted ${sortedClips.length} clips (rasterizer draws [0] first, [last] last, last=on top):`);
     sortedClips.forEach((clip, idx) => {
-      console.log(`  [${idx}] trackIdx=${clip.trackIndex} (${clip.trackIndex === 0 ? "TOP track in UI" : clip.trackIndex === Math.max(...sortedClips.map((c) => c.trackIndex)) ? "BOTTOM track in UI" : "middle"}), role=${clip.role}, draws ${idx === sortedClips.length - 1 ? "LAST (ON TOP)" : "at layer " + idx}`);
+      const trackLabel = clip.trackIndex === 0 ? "TOP in UI" : clip.trackIndex === maxTrackIdx ? "BOTTOM in UI" : "middle";
+      const drawLabel = idx === sortedClips.length - 1 ? "LAST (ON TOP)" : idx === 0 ? "FIRST (BELOW)" : `layer ${idx}`;
+      const asset = clip.mediaId; // Just for reference
+      console.log(`  [${idx}] trackIdx=${clip.trackIndex} (${trackLabel}), role=${clip.role}, draws ${drawLabel}, clipId=${clip.id.substring(0, 8)}`);
     });
   }
 
