@@ -74,9 +74,35 @@ export class AddClipCommand implements Command {
   }
 
   apply(state: TimelineState): TimelineState {
+    // Check for overlap and adjust position if needed
+    const trackClips = state.clips.filter((c) => c.trackId === this.clip.trackId).sort((a, b) => a.startTime - b.startTime);
+
+    let finalStartTime = this.clip.startTime;
+    let hasOverlap = true;
+
+    // Keep checking until no overlaps (handle cascading shifts)
+    while (hasOverlap) {
+      hasOverlap = false;
+      for (const existingClip of trackClips) {
+        const existingEnd = existingClip.startTime + existingClip.duration;
+        const newEnd = finalStartTime + this.clip.duration;
+
+        // Check for overlap
+        if (finalStartTime < existingEnd && newEnd > existingClip.startTime) {
+          // Overlap detected - move to end of conflicting clip
+          finalStartTime = existingEnd;
+          hasOverlap = true; // Re-check with new position
+          break; // Restart the loop from beginning
+        }
+      }
+    }
+
+    // Create clip with safe position
+    const safeClip = { ...this.clip, startTime: finalStartTime };
+
     return {
       ...state,
-      clips: [...state.clips, this.clip],
+      clips: [...state.clips, safeClip],
       epoch: state.epoch + 1, // ✅ Epoch increment inside command
     };
   }

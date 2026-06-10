@@ -117,6 +117,47 @@ export function getInsertIndexForNewTrack(tracks: Track[], trackType: "video" | 
   return tracks.length;
 }
 
+/**
+ * Smart track insertion that respects drop position context.
+ * Uses newTrackPosition and betweenTrackIds to determine exact insertion point.
+ */
+export function getInsertIndexForNewTrackSmart(
+  tracks: Track[],
+  trackType: "video" | "audio" | "text",
+  context?: {
+    newTrackPosition?: "above" | "below" | "between" | null;
+    betweenTrackIds?: { aboveId: string; belowId: string };
+  },
+): number {
+  // If no context, use legacy behavior
+  if (!context || !context.newTrackPosition) {
+    return getInsertIndexForNewTrack(tracks, trackType);
+  }
+
+  const { newTrackPosition, betweenTrackIds } = context;
+
+  // Above all tracks
+  if (newTrackPosition === "above") {
+    return 0;
+  }
+
+  // Below all tracks
+  if (newTrackPosition === "below") {
+    return tracks.length;
+  }
+
+  // Between specific tracks
+  if (newTrackPosition === "between" && betweenTrackIds) {
+    const belowIndex = tracks.findIndex((t) => t.id === betweenTrackIds.belowId);
+    if (belowIndex >= 0) {
+      return belowIndex; // Insert at the position of the "below" track (pushing it down)
+    }
+  }
+
+  // Fallback to legacy behavior
+  return getInsertIndexForNewTrack(tracks, trackType);
+}
+
 export const useTimelineStore = create<TimelineStore>(
   autoSaveMiddleware((set, get) => ({
     tracks: [],
@@ -255,6 +296,32 @@ export const useTimelineStore = create<TimelineStore>(
       set((state) => {
         const wasEmpty = state.clips.length === 0;
 
+        // Check for overlap and adjust position if needed
+        const trackClips = state.clips.filter((c) => c.trackId === clip.trackId).sort((a, b) => a.startTime - b.startTime);
+
+        let finalStartTime = clip.startTime;
+        let hasOverlap = true;
+
+        // Keep checking until no overlaps (handle cascading shifts)
+        while (hasOverlap) {
+          hasOverlap = false;
+          for (const existingClip of trackClips) {
+            const existingEnd = existingClip.startTime + existingClip.duration;
+            const newEnd = finalStartTime + clip.duration;
+
+            // Check for overlap
+            if (finalStartTime < existingEnd && newEnd > existingClip.startTime) {
+              // Overlap detected - move to end of conflicting clip
+              finalStartTime = existingEnd;
+              hasOverlap = true; // Re-check with new position
+              break; // Restart the loop from beginning
+            }
+          }
+        }
+
+        // Create clip with safe position
+        const safeClip = { ...clip, startTime: finalStartTime };
+
         // If timeline was empty, switch to program preview and seek to first clip's start time
         if (wasEmpty) {
           // Import dynamically to avoid circular dependency
@@ -263,7 +330,7 @@ export const useTimelineStore = create<TimelineStore>(
             if (session?.transportAuthority) {
               session.transportAuthority.setActiveContext("program");
               // Seek to the new clip's start time for immediate visual feedback
-              const firstClipStartTime = clip.startTime;
+              const firstClipStartTime = safeClip.startTime;
               session.transportAuthority.seek(firstClipStartTime);
             }
           });
@@ -275,7 +342,7 @@ export const useTimelineStore = create<TimelineStore>(
         }
 
         return {
-          clips: [...state.clips, clip],
+          clips: [...state.clips, safeClip],
           epoch: state.epoch + 1,
         };
       });

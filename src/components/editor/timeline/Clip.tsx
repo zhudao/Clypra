@@ -114,7 +114,11 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
       dragStartRef.current.hasMoved = true;
       if (!dragStartRef.current.hasDragStarted) {
         dragStartRef.current.hasDragStarted = true;
+
+        // Pass original pointer-down values - NEVER recompute the anchor
         onDragStart?.(clip.id, dragStartRef.current.startX, dragStartRef.current.startY, dragStartRef.current.pointerOffsetFromLeft);
+
+        return;
       }
     }
 
@@ -525,7 +529,7 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
       onPointerCancel={handlePointerCancel}
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => setIsHovered(false)}
-      className={`absolute rounded-sm h-full overflow-hidden border ${selected ? "border-white" : ""} ${isResizing ? (resizeStart?.isRipple ? "ring-2 ring-yellow-500" : "ring-2 ring-cyan-500") : ""} ${locked ? "cursor-not-allowed" : isDragging ? (isInvalidPosition ? "cursor-not-allowed" : "cursor-grabbing") : "cursor-default"} ${getClipStyle()} transition-none`}
+      className={`absolute rounded-sm h-full overflow-hidden border ${selected ? "border-white" : ""} ${isResizing ? (resizeStart?.isRipple ? "ring-2 ring-yellow-500" : "ring-2 ring-cyan-500") : ""} ${locked ? "cursor-not-allowed" : isDragging ? (isInvalidPosition ? "cursor-not-allowed" : "cursor-grabbing") : "cursor-default"} ${getClipStyle()} ${isDragging ? "transition-none" : "transition-[left] duration-150 ease-out"}`}
       style={{
         left: `${displayLeft}px`,
         width: `${width}px`,

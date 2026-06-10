@@ -5,7 +5,6 @@ import { useUIStore } from "@/store/uiStore";
 import { useTimeline } from "@/hooks/useTimeline";
 import { Clip } from "./Clip";
 import { handleDropOnTrack } from "@/lib/timelineUtils";
-import { calculateDisplayPositions } from "@/lib/clipPositions";
 import type { Clip as ClipType, Track as TrackType, DragItem } from "@/types";
 
 interface TrackProps {
@@ -22,9 +21,8 @@ interface TrackProps {
     offsetY: number;
     isInvalidPosition?: boolean;
     targetTrackId?: string | null;
-    insertionIndex?: number | null;
-    gapStartTime?: number | null;
-    gapDuration?: number | null;
+    placementPreview?: any; // PlacementPreview type
+    draggedBlockDuration?: number;
   };
 }
 
@@ -50,28 +48,92 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
     [track.id, track.locked, track.type],
   );
 
-  // Get all clips for this track (stable array ref when clips + track.id unchanged — helps memoized children)
+  // Get all clips for this track (stable array ref when clips + track.id unchanged)
   const trackClips = useMemo(() => clips.filter((c) => c.trackId === track.id), [clips, track.id]);
 
-  // Chronological order for gap shifts
+  // Chronological order
   const sortedTrackClips = useMemo(() => [...trackClips].sort((a, b) => a.startTime - b.startTime), [trackClips]);
 
-  // Calculate display positions using shared utility (single source of truth)
-  const displayPositions = useMemo(() => {
-    if (!dragState || dragState.targetTrackId !== track.id || dragState.insertionIndex === null || dragState.gapDuration === null) {
-      // No drag affecting this track: clips render at actual positions
-      return null;
+  // Calculate display info from placement preview (single source of truth)
+  const displayInfo = useMemo(() => {
+    if (!dragState || !dragState.draggedClipIds) {
+      return { displayPositions: null, gapIndicator: null };
     }
 
-    const draggedClipIds = dragState.draggedClipIds ?? (dragState.draggingClipId ? [dragState.draggingClipId] : []);
-
-    return calculateDisplayPositions({
-      trackClips: sortedTrackClips,
-      draggedClipIds,
-      draggedBlockDuration: dragState.gapDuration as number, // Type-safe: null check above
-      insertionIndex: dragState.insertionIndex as number, // Type-safe: null check above
+    const isDraggedFromThisTrack = dragState.draggedClipIds.some((clipId) => {
+      const clip = clips.find((c) => c.id === clipId);
+      return clip?.trackId === track.id;
     });
-  }, [dragState, track.id, sortedTrackClips]);
+
+    const isTargetTrack = dragState.targetTrackId === track.id;
+
+    // Source track: Show ripple closure (clips pack together)
+    if (isDraggedFromThisTrack && !isTargetTrack) {
+      // Calculate positions without the dragged clips (they've "left" the track)
+      const displayMap = new Map<string, number>();
+      const draggedSet = new Set(dragState.draggedClipIds);
+      const restClips = sortedTrackClips.filter((c) => !draggedSet.has(c.id));
+
+      // Pack remaining clips tightly (no gaps)
+      let currentTime = 0;
+      for (const clip of restClips) {
+        displayMap.set(clip.id, currentTime);
+        currentTime += clip.duration;
+      }
+
+      return {
+        displayPositions: displayMap,
+        gapIndicator: null,
+      };
+    }
+
+    // Target track: Show insertion preview
+    if (isTargetTrack && dragState.placementPreview) {
+      const preview = dragState.placementPreview;
+
+      switch (preview.type) {
+        case "insert":
+          return {
+            displayPositions: preview.affectedClipPositions,
+            gapIndicator: {
+              startTime: preview.gapStartTime,
+              duration: preview.gapDuration,
+            },
+          };
+
+        case "position":
+          // Gap indicator follows cursor (uses offsetX for live position)
+          const draggedClip = clips.find((c) => dragState.draggedClipIds.includes(c.id));
+          if (draggedClip) {
+            const clipLeftOriginal = draggedClip.startTime * pixelsPerSecond;
+            const clipLeftLive = clipLeftOriginal + (dragState.offsetX || 0);
+            const liveStartTime = clipLeftLive / pixelsPerSecond;
+
+            return {
+              displayPositions: null,
+              gapIndicator: {
+                startTime: Math.max(0, liveStartTime),
+                duration: dragState.draggedBlockDuration ?? 0,
+              },
+            };
+          }
+          return {
+            displayPositions: null,
+            gapIndicator: {
+              startTime: preview.startTime,
+              duration: dragState.draggedBlockDuration ?? 0,
+            },
+          };
+
+        default:
+          return { displayPositions: null, gapIndicator: null };
+      }
+    }
+
+    return { displayPositions: null, gapIndicator: null };
+  }, [dragState, track.id, clips, sortedTrackClips]);
+
+  const { displayPositions, gapIndicator } = displayInfo;
 
   return (
     <div
@@ -123,17 +185,17 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
           );
         })}
 
-      {/* Gap indicator (gray background) */}
-      {dragState?.targetTrackId === track.id && dragState?.gapStartTime !== null && dragState?.gapDuration !== null && (
+      {/* Gap indicator (blue dashed background) */}
+      {gapIndicator && (
         <div
           className="absolute top-0 pointer-events-none z-5"
           style={{
-            left: `${Math.round(dragState.gapStartTime! * pixelsPerSecond)}px`,
-            width: `${Math.round(dragState.gapDuration! * pixelsPerSecond)}px`,
+            left: `${Math.round(gapIndicator.startTime * pixelsPerSecond)}px`,
+            width: `${Math.round(gapIndicator.duration * pixelsPerSecond)}px`,
             height: "100%",
-            background: "rgba(150, 150, 150, 0.3)",
+            background: "rgba(96, 165, 250, 0.25)",
+            border: "2px dashed rgba(96, 165, 250, 0.6)",
             borderRadius: "4px",
-            transition: "left 100ms ease-out, width 100ms ease-out",
           }}
         />
       )}

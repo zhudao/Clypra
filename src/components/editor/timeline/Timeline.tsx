@@ -255,7 +255,7 @@ export const Timeline: React.FC = () => {
                     />
                   )}
 
-                  {tracks.map((track) => (
+                  {tracks.map((track, index) => (
                     <React.Fragment key={track.id}>
                       <Track
                         track={track}
@@ -268,17 +268,47 @@ export const Timeline: React.FC = () => {
                           dragState
                             ? {
                                 draggingClipId: dragState.draggingClipId,
+                                draggedClipIds: dragState.draggedClipIds,
                                 offsetX: dragState.offsetX,
                                 offsetY: dragState.offsetY,
                                 isInvalidPosition: dragState.isInvalidPosition,
                                 targetTrackId: dragState.targetTrackId,
-                                insertionIndex: dragState.insertionIndex,
-                                gapStartTime: dragState.gapStartTime,
-                                gapDuration: dragState.gapDuration,
+                                placementPreview: dragState.placementPreview,
+                                draggedBlockDuration: dragState.draggedBlockDuration,
                               }
                             : undefined
                         }
                       />
+
+                      {/* Between-track indicator */}
+                      {dragState?.willCreateNewTrack && dragState?.newTrackPosition === "between" && dragState?.betweenTrackIds?.aboveId === track.id && (
+                        <div
+                          className="relative left-0 right-0 pointer-events-none z-50 flex items-center justify-center"
+                          style={{
+                            height: "4px",
+                            marginTop: "-2px",
+                            marginBottom: "-2px",
+                          }}
+                        >
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              background: "linear-gradient(90deg, transparent, #3b82f6 10%, #3b82f6 90%, transparent)",
+                              boxShadow: "0 0 12px rgba(59, 130, 246, 0.8)",
+                            }}
+                          />
+                          <div
+                            className="relative text-xs font-medium px-3 py-1 rounded-full"
+                            style={{
+                              background: "rgba(59, 130, 246, 0.9)",
+                              color: "white",
+                              boxShadow: "0 2px 8px rgba(0, 0, 0, 0.3)",
+                            }}
+                          >
+                            Create New Track
+                          </div>
+                        </div>
+                      )}
                     </React.Fragment>
                   ))}
 
