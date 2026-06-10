@@ -43,6 +43,7 @@ const traceSelect = (...args: unknown[]) => {
 
 interface UIStore {
   selectedClipIds: string[]; // Multi-select support
+  selectedGapId: string | null; // Gap selection (exclusive with clip selection)
   selectedTrackId: string | null;
   // Note: previewMediaId is used for MediaPanel selection state only.
   previewMediaId: string | null;
@@ -59,6 +60,7 @@ interface UIStore {
 
   selectClip: (clipId: string | null) => void;
   toggleClipSelection: (clipId: string) => void;
+  selectGap: (gapId: string | null) => void;
   clearSelection: () => void;
   selectTrack: (trackId: string | null) => void;
   setPreviewMedia: (mediaId: string | null) => void;
@@ -81,6 +83,7 @@ interface UIStore {
 
 export const useUIStore = create<UIStore>((set, get) => ({
   selectedClipIds: [],
+  selectedGapId: null,
   selectedTrackId: null,
   previewMediaId: null,
   activePanel: "media",
@@ -96,7 +99,18 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   selectClip: (clipId) => {
     traceSelect("selectClip", { clipId, prev: get().selectedClipIds });
-    set({ selectedClipIds: clipId ? [clipId] : [] });
+    set({
+      selectedClipIds: clipId ? [clipId] : [],
+      selectedGapId: null, // Clear gap selection when selecting clip
+    });
+  },
+
+  selectGap: (gapId) => {
+    traceSelect("selectGap", { gapId, prev: get().selectedGapId });
+    set({
+      selectedGapId: gapId,
+      selectedClipIds: [], // Clear clip selection when selecting gap
+    });
   },
 
   toggleClipSelection: (clipId) => {
@@ -110,8 +124,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
   },
 
   clearSelection: () => {
-    traceSelect("clearSelection", { prev: get().selectedClipIds });
-    set({ selectedClipIds: [] });
+    traceSelect("clearSelection", { prev: get().selectedClipIds, prevGap: get().selectedGapId });
+    set({
+      selectedClipIds: [],
+      selectedGapId: null,
+    });
   },
 
   selectTrack: (trackId) => {

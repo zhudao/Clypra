@@ -124,52 +124,118 @@ export const Timeline: React.FC = () => {
     }
   }, [currentTime, pixelsPerSecond, isPlaying, duration, setScrollLeft]);
 
-  // Handle Delete/Backspace key to remove selected clips
+  // Handle keyboard shortcuts for timeline operations
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Delete" && e.key !== "Backspace") return;
-
       const target = e.target as HTMLElement;
+      // Ignore if typing in input/textarea
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
         return;
       }
 
-      const { selectedClipIds } = useUIStore.getState();
-      if (selectedClipIds.length === 0) return;
-
+      const uiState = useUIStore.getState();
       const store = useTimelineStore.getState();
-      const { normalizeTrack, removeEmptyNonMainTracks, withBatch } = store;
       const { execute, beginTransaction, commitTransaction } = useHistoryStore.getState();
       const { autoRipple } = useSettingsStore.getState();
-      const affectedTracks = new Set<string>();
 
-      beginTransaction("Delete Clips");
+      // Delete/Backspace: Remove selected clips or gaps
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const { selectedClipIds, selectedGapId } = uiState;
 
-      selectedClipIds.forEach((clipId) => {
-        const clip = store.clips.find((c) => c.id === clipId);
-        if (clip) {
-          affectedTracks.add(clip.trackId);
-          // Use ripple delete if auto-ripple is enabled, otherwise regular delete
-          if (autoRipple) {
-            execute(new RippleDeleteCommand(clipId));
-          } else {
-            execute(new DeleteClipCommand(clipId));
+        // Delete selected gap
+        if (selectedGapId) {
+          e.preventDefault();
+          const gap = store.gaps.find((g) => g.id === selectedGapId);
+          if (gap && !gap.protected) {
+            store.removeGap(selectedGapId);
+            uiState.clearSelection();
           }
+          return;
         }
-      });
 
-      commitTransaction();
+        // Delete selected clips
+        if (selectedClipIds.length === 0) return;
+        e.preventDefault();
 
-      withBatch(() => {
-        removeEmptyNonMainTracks(Array.from(affectedTracks));
-      });
+        const { normalizeTrack, removeEmptyNonMainTracks, withBatch } = store;
+        const affectedTracks = new Set<string>();
 
-      useUIStore.getState().clearSelection();
+        beginTransaction("Delete Clips");
+
+        selectedClipIds.forEach((clipId) => {
+          const clip = store.clips.find((c) => c.id === clipId);
+          if (clip) {
+            affectedTracks.add(clip.trackId);
+            // Use ripple delete if auto-ripple is enabled, otherwise regular delete
+            if (autoRipple) {
+              execute(new RippleDeleteCommand(clipId));
+            } else {
+              execute(new DeleteClipCommand(clipId));
+            }
+          }
+        });
+
+        commitTransaction();
+
+        withBatch(() => {
+          removeEmptyNonMainTracks(Array.from(affectedTracks));
+        });
+
+        uiState.clearSelection();
+        return;
+      }
+
+      // I key: Insert gap at playhead
+      if (e.key === "i" || e.key === "I") {
+        e.preventDefault();
+
+        const { selectedTrackId } = uiState;
+        const trackId = selectedTrackId || tracks[0]?.id;
+
+        if (!trackId) return;
+
+        // Insert 2-second gap at playhead position
+        const gapDuration = 2.0;
+        store.insertGap(trackId, currentTime, gapDuration);
+        return;
+      }
+
+      // Comma (,): Remove gap at playhead (ripple delete)
+      if (e.key === ",") {
+        e.preventDefault();
+
+        const { selectedTrackId, selectedGapId } = uiState;
+
+        // If gap is selected, remove it
+        if (selectedGapId) {
+          const gap = store.gaps.find((g) => g.id === selectedGapId);
+          if (gap && !gap.protected) {
+            store.removeGap(selectedGapId);
+            uiState.clearSelection();
+          }
+          return;
+        }
+
+        // Otherwise, find gap at playhead on selected track
+        const trackId = selectedTrackId || tracks[0]?.id;
+        if (!trackId) return;
+
+        const trackGaps = store.gaps.filter((g) => g.trackId === trackId);
+        const gapAtPlayhead = trackGaps.find((g) => {
+          const gapEnd = g.startTime + g.duration;
+          return currentTime >= g.startTime && currentTime <= gapEnd;
+        });
+
+        if (gapAtPlayhead && !gapAtPlayhead.protected) {
+          store.removeGap(gapAtPlayhead.id);
+        }
+        return;
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [tracks, currentTime]);
 
   const handleTimelinePointerDownCapture = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {

@@ -1,5 +1,5 @@
 import React from "react";
-import { Volume2, VolumeX, Lock, Unlock, Eye, EyeOff } from "lucide-react";
+import { Volume2, VolumeX, Lock, Unlock, Eye, EyeOff, Minimize2 } from "lucide-react";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useUIStore } from "@/store/uiStore";
 import type { Track } from "@/types";
@@ -9,11 +9,14 @@ interface TrackListProps {
 }
 
 export const TrackList: React.FC<TrackListProps> = ({ onEditTrack }) => {
-  const { tracks, clips, toggleTrackLock, toggleTrackMute, toggleTrackVisibility } = useTimelineStore();
+  const { tracks, clips, gaps, toggleTrackLock, toggleTrackMute, toggleTrackVisibility, packTrackGaps } = useTimelineStore();
   const { selectedTrackId, selectTrack } = useUIStore();
 
   // Helper: Check if track has clips
   const trackHasClips = (trackId: string) => clips.some((c) => c.trackId === trackId);
+
+  // Helper: Check if track has unprotected gaps
+  const trackHasUnprotectedGaps = (trackId: string) => gaps.some((g) => g.trackId === trackId && !g.protected);
 
   const getTrackStyle = (track: Track) => {
     const isTextTrack = track.type === "text";
@@ -41,6 +44,7 @@ export const TrackList: React.FC<TrackListProps> = ({ onEditTrack }) => {
         ) : (
           tracks.map((track) => {
             const isEmpty = !trackHasClips(track.id);
+            const hasGaps = trackHasUnprotectedGaps(track.id);
             const isSelected = selectedTrackId === track.id;
 
             return (
@@ -53,6 +57,7 @@ export const TrackList: React.FC<TrackListProps> = ({ onEditTrack }) => {
                   }}
                   className={`p-1 rounded transition-colors cursor-pointer hover:bg-timeline-button-hover ${track.locked ? "bg-timeline-button-hover text-timeline-track-name" : "text-timeline-button-icon"}`}
                   aria-label={track.locked ? "Unlock track" : "Lock track"}
+                  title={track.locked ? "Unlock track" : "Lock track"}
                 >
                   {track.locked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
                 </button>
@@ -64,6 +69,7 @@ export const TrackList: React.FC<TrackListProps> = ({ onEditTrack }) => {
                   }}
                   className={`p-1 rounded transition-colors cursor-pointer hover:bg-timeline-button-hover ${track.visible ? "text-timeline-button-icon" : "bg-timeline-button-hover text-timeline-track-name"}`}
                   aria-label={track.visible ? "Hide track" : "Show track"}
+                  title={track.visible ? "Hide track" : "Show track"}
                 >
                   {track.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
                 </button>
@@ -75,9 +81,25 @@ export const TrackList: React.FC<TrackListProps> = ({ onEditTrack }) => {
                   }}
                   className={`p-1 rounded transition-colors cursor-pointer hover:bg-timeline-button-hover ${track.muted ? "bg-timeline-button-hover text-timeline-track-name" : "text-timeline-button-icon"}`}
                   aria-label={track.muted ? "Unmute track" : "Mute track"}
+                  title={track.muted ? "Unmute track" : "Mute track"}
                 >
                   {track.muted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
                 </button>
+
+                {/* Pack Track button - only show if track has unprotected gaps */}
+                {hasGaps && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      packTrackGaps(track.id);
+                    }}
+                    className="p-1 rounded transition-colors cursor-pointer hover:bg-timeline-button-hover text-timeline-button-icon opacity-0 group-hover:opacity-100"
+                    aria-label="Pack track (remove gaps)"
+                    title="Pack track - remove all unprotected gaps"
+                  >
+                    <Minimize2 className="w-3 h-3" />
+                  </button>
+                )}
               </div>
             );
           })

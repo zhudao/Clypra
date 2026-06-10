@@ -2,8 +2,10 @@ import React, { useMemo } from "react";
 import { Lock } from "lucide-react";
 import { useDrop } from "react-dnd";
 import { useUIStore } from "@/store/uiStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { useTimeline } from "@/hooks/useTimeline";
 import { Clip } from "./Clip";
+import { GapIndicator } from "./GapIndicator";
 import { handleDropOnTrack } from "@/lib/timelineUtils";
 import type { Clip as ClipType, Track as TrackType, DragItem } from "@/types";
 
@@ -27,7 +29,8 @@ interface TrackProps {
 }
 
 const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onClipDragStart, onClipDragMove, onClipDragEnd, dragState }) => {
-  const { selectedClipIds, selectedTrackId } = useUIStore();
+  const { selectedClipIds, selectedGapId, selectedTrackId } = useUIStore();
+  const { gaps } = useTimelineStore();
   const { getMediaAsset } = useTimeline();
 
   // Drop handler for media assets from MediaTab
@@ -53,6 +56,9 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
 
   // Chronological order
   const sortedTrackClips = useMemo(() => [...trackClips].sort((a, b) => a.startTime - b.startTime), [trackClips]);
+
+  // Get gaps for this track
+  const trackGaps = useMemo(() => gaps.filter((g) => g.trackId === track.id), [gaps, track.id]);
 
   // Calculate display info from placement preview (single source of truth)
   const displayInfo = useMemo(() => {
@@ -103,7 +109,7 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
 
         case "position":
           // Gap indicator follows cursor (uses offsetX for live position)
-          const draggedClip = clips.find((c) => dragState.draggedClipIds.includes(c.id));
+          const draggedClip = clips.find((c) => dragState.draggedClipIds?.includes(c.id));
           if (draggedClip) {
             const clipLeftOriginal = draggedClip.startTime * pixelsPerSecond;
             const clipLeftLive = clipLeftOriginal + (dragState.offsetX || 0);
@@ -185,7 +191,10 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
           );
         })}
 
-      {/* Gap indicator (blue dashed background) */}
+      {/* Gaps layer - render permanent gaps */}
+      {track.visible && trackGaps.map((gap) => <GapIndicator key={gap.id} gap={gap} pixelsPerSecond={pixelsPerSecond} selected={selectedGapId === gap.id} locked={track.locked} />)}
+
+      {/* Gap indicator (blue dashed background) - temporary drag preview */}
       {gapIndicator && (
         <div
           className="absolute top-0 pointer-events-none z-5"
