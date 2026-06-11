@@ -25,6 +25,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { getEvaluationCache, computeClipVersion } from "./cache";
 import { evaluateProperty } from "./animation";
 import { resolveClipSourceTime } from "../timeline/sourceTime";
+import { calculateTextAnimationState } from "@/lib/textAnimation";
 
 /**
  * Evaluate the NLE timeline at a specific time.
@@ -126,6 +127,20 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       const evalLetterSpacing = kf.letterSpacing !== undefined ? evaluateProperty(kf.letterSpacing, offset, clip.duration) : textClip.letterSpacing || 0;
       const evalLineHeight = kf.lineHeight !== undefined ? evaluateProperty(kf.lineHeight, offset, clip.duration) : textClip.lineHeight || 1.2;
 
+      // ── Calculate Text Animations ──────────────────────────────────────────
+      const animationState = calculateTextAnimationState(evalTime, clip.startTime, clip.duration, textClip.entranceAnimation, textClip.exitAnimation);
+
+      // Apply animation opacity (multiply with transition opacity)
+      const finalOpacity = evalOpacity * (transitionState.opacity ?? 1.0) * animationState.opacity;
+
+      // Apply animation transforms to position
+      const finalX = evalX + animationState.translateX;
+      const finalY = evalY + animationState.translateY;
+
+      // Apply animation scale to dimensions
+      const finalWidth = evalW * animationState.scale;
+      const finalHeight = evalH * animationState.scale;
+
       const textLayer: EvaluatedTextLayer = {
         layerId: `${clip.id}-${evalTime}`,
         clipId: clip.id,
@@ -135,12 +150,12 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         time: evalTime,
         clipStartTime: clip.startTime,
         clipDuration: clip.duration,
-        x: evalX,
-        y: evalY,
-        width: evalW,
-        height: evalH,
+        x: finalX,
+        y: finalY,
+        width: finalWidth,
+        height: finalHeight,
         rotation: evalRot,
-        opacity: evalOpacity * (transitionState.opacity ?? 1.0),
+        opacity: finalOpacity,
         inTransition: transitionState.inTransition,
         transitionType: transitionState.type,
         transitionProgress: transitionState.progress,

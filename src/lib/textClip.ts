@@ -151,7 +151,7 @@ export function calculateTextClipSize(options: { text: string; fontFamily: strin
  * Create a text clip with sensible defaults.
  */
 export function createTextClip(options: CreateTextClipOptions): TextClip {
-  const defaultFontSize = options.styleId ? 96 : 48;
+  const defaultFontSize = options.styleId ? 96 : 100;
   const { trackId, startTime, duration = 5.0, text = "Text", canvasWidth, canvasHeight, fontSize = defaultFontSize, fontFamily = "Inter, system-ui, sans-serif", color = "#ffffff", bold = false, italic = false, position = "center", textRole, words, styleId, templateId, fontWeight, fontStyle, stroke, shadow, background, effectDefinition } = options;
 
   const sizing = calculateTextClipSize({

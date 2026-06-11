@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Settings, Type, Layout } from "lucide-react";
+import { Settings, Type, Layout, Sparkles } from "lucide-react";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useProjectStore } from "@/store/projectStore";
@@ -14,6 +14,7 @@ import { EmptyPropertiesState } from "./properties/EmptyPropertiesState";
 import { TextStyleSection } from "./properties/TextStyleSection";
 import { TransformSection } from "./properties/TransformSection";
 import { AudioSection } from "./properties/AudioSection";
+import { TextAnimationControls } from "./properties/TextAnimationControls";
 
 const TEXT_BOUNDS_STYLE_KEYS: (keyof TextClip)[] = ["text", "fontSize", "fontFamily", "fontWeight", "fontStyle", "styleId", "stroke", "shadow", "background", "letterSpacing", "lineHeight"];
 const MANUAL_BOUNDS_KEYS: (keyof Clip)[] = ["x", "y", "width", "height"];
@@ -52,7 +53,7 @@ export const PropertiesPanel: React.FC = () => {
   const { mediaAssets, project } = useProjectStore();
   const { execute } = useHistoryStore();
 
-  const [activePropertyTab, setActivePropertyTab] = useState<"text" | "transform">("text");
+  const [activePropertyTab, setActivePropertyTab] = useState<"text" | "animation" | "transform">("text");
   const [newPresetName, setNewPresetName] = useState("");
   const { presets, savePreset, deletePreset } = usePresetStore();
 
@@ -160,10 +161,16 @@ export const PropertiesPanel: React.FC = () => {
                 Text Style
               </span>
             </button>
+            <button onClick={() => setActivePropertyTab("animation")} className={`flex-1 py-3 text-xs font-semibold tracking-wide border-b-2 text-center transition-all cursor-pointer ${activePropertyTab === "animation" ? "text-accent border-accent bg-accent/5" : "text-text-muted border-transparent hover:text-text-primary"}`}>
+              <span className="flex items-center justify-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5" />
+                Animation
+              </span>
+            </button>
             <button onClick={() => setActivePropertyTab("transform")} className={`flex-1 py-3 text-xs font-semibold tracking-wide border-b-2 text-center transition-all cursor-pointer ${activePropertyTab === "transform" ? "text-accent border-accent bg-accent/5" : "text-text-muted border-transparent hover:text-text-primary"}`}>
               <span className="flex items-center justify-center gap-1.5">
                 <Layout className="w-3.5 h-3.5" />
-                Video (Transform)
+                Transform
               </span>
             </button>
           </div>
@@ -182,6 +189,9 @@ export const PropertiesPanel: React.FC = () => {
 
         {/* Render Text Styling studio if text clip is selected and active tab is text */}
         {isTextClip && activePropertyTab === "text" && <TextStyleSection textClip={textClip} presets={presets} newPresetName={newPresetName} setNewPresetName={setNewPresetName} handleUpdate={handleUpdate} handleUpdateMultiple={handleUpdateMultiple} handleApplyPreset={handleApplyPreset} savePreset={savePreset} deletePreset={deletePreset} />}
+
+        {/* Render Text Animation controls if text clip is selected and active tab is animation */}
+        {isTextClip && activePropertyTab === "animation" && <TextAnimationControls clip={textClip} />}
 
         {/* Video Transform properties (rendered for visual clips or if transform tab is selected for text) */}
         {(isVisualClip || (isTextClip && activePropertyTab === "transform")) && <TransformSection selectedClip={selectedClip} isVisualClip={isVisualClip} handleUpdate={handleUpdate} handleApplyFit={handleApplyFit} />}

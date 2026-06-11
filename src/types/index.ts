@@ -149,6 +149,14 @@ export interface CaptionWord {
   probability?: number; // 0.98 (Whisper confidence score)
 }
 
+export type TextAnimationType = "none" | "fade" | "slide-up" | "slide-down" | "slide-left" | "slide-right" | "scale" | "zoom-in" | "zoom-out";
+
+export interface TextAnimation {
+  type: TextAnimationType;
+  duration: number; // in seconds
+  easing: "linear" | "ease-in" | "ease-out" | "ease-in-out";
+}
+
 export interface TextClip extends Clip {
   text: string;
   fontFamily: string;
@@ -186,6 +194,10 @@ export interface TextClip extends Clip {
     borderRadius: number;
   };
   styleDefinition?: import("@clypra/engine").TextEffectDefinition;
+  /** Entrance animation */
+  entranceAnimation?: TextAnimation;
+  /** Exit animation */
+  exitAnimation?: TextAnimation;
 }
 
 export type TimelineItemKind = "video" | "audio" | "image" | "text" | "transition";
