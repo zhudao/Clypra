@@ -173,6 +173,7 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
 
   return {
     id: generateId("text-clip"),
+    kind: "text",
     trackId,
     mediaId: "", // Text clips don't have media assets
     startTime,

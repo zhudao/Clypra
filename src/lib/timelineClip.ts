@@ -183,8 +183,12 @@ export const createClipFromAsset = ({ asset, trackId, startTime, width, height, 
   // Calculate source aspect ratio for transform constraints
   const sourceAspectRatio = asset.width && asset.height ? asset.width / asset.height : clipWidth / clipHeight;
 
+  const isSticker = asset.id.startsWith("sticker-");
+  const kind = (isSticker ? "sticker" : asset.type) as Clip["kind"];
+
   return {
     id: generateId("clip"),
+    kind,
     trackId,
     mediaId: asset.id,
     startTime,

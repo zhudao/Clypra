@@ -218,7 +218,7 @@ function handleEdgeDrag(clip: Clip, handle: "n" | "s" | "e" | "w", delta: { x: n
     case "e":
       newWidth = clip.width + delta.x;
       newWidth = Math.max(constraints.minWidth, newWidth);
-      if ("text" in clip) {
+      if (clip.kind === "text") {
         const textClip = clip as any;
         const isBold = textClip.fontWeight === "bold" || textClip.bold === true;
         newHeight = calculateTextHeight(
@@ -237,7 +237,7 @@ function handleEdgeDrag(clip: Clip, handle: "n" | "s" | "e" | "w", delta: { x: n
       newWidth = clip.width - delta.x;
       newWidth = Math.max(constraints.minWidth, newWidth);
       newX = clip.x + (clip.width - newWidth);
-      if ("text" in clip) {
+      if (clip.kind === "text") {
         const textClip = clip as any;
         const isBold = textClip.fontWeight === "bold" || textClip.bold === true;
         newHeight = calculateTextHeight(

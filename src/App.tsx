@@ -83,6 +83,23 @@ const App = () => {
       const clipsPayload = rustProject.clips?.map(fromRustClip) ?? [];
       const transitionsPayload = rustProject.transitions ?? [];
 
+      // Resolve kind for legacy projects
+      const assetMap = new Map(mediaAssetsPayload.map((a) => [a.id, a]));
+      for (const clip of clipsPayload) {
+        if (!clip.kind) {
+          if ("text" in clip || clip.id.startsWith("text-clip-")) {
+            clip.kind = "text";
+          } else if (clip.mediaId.startsWith("sticker-")) {
+            clip.kind = "sticker";
+          } else {
+            const asset = assetMap.get(clip.mediaId);
+            if (asset) {
+              clip.kind = asset.type; // "video" | "audio" | "image"
+            }
+          }
+        }
+      }
+
       await loadProject(project, { mediaAssets: mediaAssetsPayload, tracks: tracksPayload, clips: clipsPayload, transitions: transitionsPayload });
 
       setTimeout(async () => {

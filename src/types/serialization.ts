@@ -103,6 +103,7 @@ export interface RustClip {
   style_definition?: any;
   fitMode?: "contain" | "cover" | "fill" | "stretch" | "original";
   volume?: number;
+  kind?: string;
 }
 
 // ============================================================================
@@ -183,9 +184,19 @@ export function fromRustTrack(rust: RustTrack): Track {
  * @returns Frontend Clip (camelCase)
  */
 export function fromRustClip(rust: RustClip): Clip {
+  let kind: Clip["kind"] = rust.kind as any;
+  if (!kind) {
+    if ("text" in rust || rust.id.startsWith("text-clip-")) {
+      kind = "text";
+    } else if (rust.mediaId.startsWith("sticker-")) {
+      kind = "sticker";
+    }
+  }
+
   // Base clip properties
   const baseClip: Clip = {
     id: rust.id,
+    kind,
     trackId: rust.trackId,
     mediaId: rust.mediaId,
     startTime: rust.startTime,
@@ -303,6 +314,7 @@ export function toRustClip(frontend: Clip): RustClip {
   // Base clip properties
   const baseClip: RustClip = {
     id: frontend.id,
+    kind: frontend.kind,
     trackId: frontend.trackId,
     mediaId: frontend.mediaId,
     startTime: frontend.startTime,

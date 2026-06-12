@@ -112,6 +112,7 @@ const trackHeights: Record<string, number> = {
   video: 68,
   audio: 52,
   text: 30,
+  sticker: 30,
 };
 const MIN_TRIM_DURATION_SEC = 1;
 

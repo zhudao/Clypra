@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
-import { usePlaybackClock } from "@/hooks/usePlaybackClock";
+import { usePlaybackClock, useTransportControls } from "@/hooks/usePlaybackClock";
 import type { Clip as ClipType, MediaAsset } from "@/types";
 import { ClipFilmstrip } from "./ClipFilmstrip";
 import { TimelineWaveform } from "./TimelineWaveform";
@@ -46,6 +46,7 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
   const { clips, updateClip, rippleEditEnabled, rippleTrimClip, scrollLeft, viewportWidth, snapEnabled, setSnapGuides, clearSnapGuides } = useTimelineStore();
   const clockState = usePlaybackClock();
   const currentTime = clockState.time;
+  const { pause } = useTransportControls();
   const [isResizing, setIsResizing] = useState<"left" | "right" | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const [resizeStart, setResizeStart] = useState<{ x: number; startTime: number; duration: number; trimIn: number; trimOut: number; isRipple: boolean } | null>(null);
@@ -164,6 +165,8 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
     if (e.button !== 0) return;
     if (locked) return;
 
+    pause();
+
     // Let's check if ripple mode is active (Shift key OR global ripple mode enabled)
     const isRipple = e.shiftKey || rippleEditEnabled;
     traceResize("pointerdown", {
@@ -207,6 +210,8 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
     e.preventDefault();
     if (e.button !== 0) return;
     if (locked) return;
+
+    pause();
 
     const isRipple = e.shiftKey || rippleEditEnabled;
     traceResize("mousedown-fallback", {
@@ -497,11 +502,11 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
     return `00:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}:00`;
   };
 
-  const isSticker = clip.mediaId.startsWith("sticker-") || mediaAsset?.id.startsWith("sticker-");
-  const isClipText = "text" in clip;
-  const isClipAudio = mediaAsset?.type === "audio" && !isSticker;
-  const isClipVideo = mediaAsset?.type === "video" && !isSticker;
-  const isClipImage = mediaAsset?.type === "image" && !isSticker;
+  const isSticker = clip.kind === "sticker";
+  const isClipText = clip.kind === "text";
+  const isClipAudio = clip.kind === "audio";
+  const isClipVideo = clip.kind === "video";
+  const isClipImage = clip.kind === "image";
 
   // Check if text clip is a caption or title
   const textClip = isClipText ? (clip as any) : null;
@@ -609,7 +614,7 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
       </div>
 
       {/* Clip content */}
-      {"text" in clip ? (
+      {clip.kind === "text" ? (
         <div className="relative flex h-full w-full items-center px-3">
           {/* Icon badge for text role differentiation */}
           {(isCaption || isTitle) && <div className="absolute left-1 top-1 flex items-center justify-center rounded bg-black/30 px-1.5 py-0.5 text-[9px] font-semibold text-white backdrop-blur-sm">{isCaption ? "CC" : "T"}</div>}

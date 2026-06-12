@@ -118,7 +118,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
     const evalRot = kf.rotation !== undefined ? evaluateProperty(kf.rotation, offset, clip.duration) : clip.rotation;
     const evalOpacity = kf.opacity !== undefined ? evaluateProperty(kf.opacity, offset, clip.duration) : clip.opacity;
 
-    const isTextClip = "text" in clip;
+    const isTextClip = clip.kind === "text";
 
     if (isTextClip) {
       const textClip = clip as unknown as TextClip;
@@ -147,6 +147,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         layerId: `${clip.id}-${evalTime}`,
         clipId: clip.id,
         role: clip.role,
+        clipKind: clip.kind,
         zIndex: i,
         layerType: "text",
         time: evalTime,
@@ -201,6 +202,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       layerId: `${clip.id}-${evalTime}`,
       clipId: clip.id,
       role: clip.role,
+      clipKind: clip.kind,
       zIndex: i,
       layerType: "media",
       mediaId: clip.mediaId,

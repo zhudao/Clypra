@@ -47,6 +47,7 @@ describe("projectStore", () => {
     const clips: TextClip[] = [
       {
         id: "clip-text",
+        kind: "text",
         trackId: "track-text",
         mediaId: "",
         startTime: 0,

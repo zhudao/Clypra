@@ -28,7 +28,7 @@ export function refitClipsForCanvasChange(newCanvasWidth: number, newCanvasHeigh
 
   for (const clip of clips) {
     // Skip text clips — they have user-positioned text boxes
-    if ("text" in clip) continue;
+    if (clip.kind === "text") continue;
 
     const asset = assetMap.get(clip.mediaId);
     if (!asset) continue;

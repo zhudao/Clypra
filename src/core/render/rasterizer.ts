@@ -242,7 +242,7 @@ const VIDEO_WARN_INTERVAL_MS = 5000;
 
 async function rasterizeMediaLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, layer: EvaluatedMediaLayer, width: number, height: number, target: RasterTarget): Promise<void> {
   try {
-    if (layer.mediaId.startsWith("sticker-")) {
+    if (layer.clipKind === "sticker") {
       const stickerId = layer.mediaId.replace("sticker-", "");
       let cachedSticker = useStickersStore.getState().getCachedSticker(stickerId);
       if (!cachedSticker) {

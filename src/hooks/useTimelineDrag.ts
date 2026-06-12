@@ -5,7 +5,7 @@ import { useUIStore } from "@/store/uiStore";
 import type { Clip } from "@/types";
 import { suspendAutoSave, resumeAutoSave } from "@/store/middleware/autoSaveMiddleware";
 import { calculateDraggedBlockDuration } from "@/lib/clipPositions";
-import { usePlaybackClock } from "@/hooks/usePlaybackClock";
+import { usePlaybackClock, useTransportControls } from "@/hooks/usePlaybackClock";
 
 // Three-layer architecture imports
 import { locateTrackRegion, type TrackRegion } from "@/lib/trackRegion";
@@ -147,6 +147,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
   const snapEnabled = useTimelineStore((state) => state.snapEnabled);
   const clockState = usePlaybackClock();
   const currentTime = clockState.time;
+  const { pause } = useTransportControls();
 
   const [dragState, setDragState] = useState<DragState | null>(null);
 
@@ -181,6 +182,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
     (clipId: string, startX: number, startY: number, pointerOffsetFromLeft?: number) => {
       const clip = clipMapRef.current.get(clipId);
       if (!clip) return;
+      pause();
       suspendAutoSave();
       const selectedClipIds = useUIStore.getState().selectedClipIds;
       const draggedClipIds = selectedClipIds.includes(clipId) ? selectedClipIds : [clipId];
@@ -252,7 +254,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
       dragStateRef.current = nextDragState;
       setDragState(nextDragState);
     },
-    [clips, containerRef],
+    [clips, containerRef, pause],
   );
 
   const flushQueuedClipDragMove = useCallback(() => {
@@ -539,7 +541,7 @@ export function useTimelineDrag(containerRef: RefObject<HTMLDivElement | null>) 
 
       // Handle new track creation
       if (dragSnapshot.willCreateNewTrack && dragSnapshot.newTrackPosition) {
-        const isTextClip = "text" in clip;
+        const isTextClip = clip.kind === "text";
         const mediaAsset = useProjectStore.getState().mediaAssets.find((a) => a.id === clip.mediaId);
         const trackType = isTextClip ? "text" : mediaAsset?.type === "audio" ? "audio" : "video";
 

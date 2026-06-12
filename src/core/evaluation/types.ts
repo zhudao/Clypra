@@ -14,6 +14,7 @@
 
 import type { ClipRole } from "../compositor/types";
 import type { RenderResourceHandle } from "../resources/types";
+import type { ClipKind } from "@/types";
 
 /**
  * Base properties shared by all visual layers.
@@ -27,6 +28,9 @@ interface BaseVisualLayer {
 
   /** Semantic role (for compositing logic) */
   readonly role: ClipRole;
+
+  /** Semantic kind of the clip */
+  readonly clipKind?: ClipKind;
 
   /** Z-order (0 = background, higher = foreground) */
   readonly zIndex: number;

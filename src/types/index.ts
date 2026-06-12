@@ -118,6 +118,8 @@ export interface MediaAsset {
   rotation?: number;
 }
 
+export type ClipKind = "video" | "audio" | "image" | "sticker" | "text";
+
 export interface Clip {
   id: string;
   trackId: string;
@@ -139,6 +141,23 @@ export interface Clip {
   fitMode?: "contain" | "cover" | "fill" | "stretch" | "original";
   /** Audio volume (0.0 to 1.0, default 1.0) */
   volume?: number;
+  kind?: ClipKind; // Optional for backward compatibility
+}
+
+export interface VideoClip extends Clip {
+  kind: "video";
+}
+
+export interface AudioClip extends Clip {
+  kind: "audio";
+}
+
+export interface ImageClip extends Clip {
+  kind: "image";
+}
+
+export interface StickerClip extends Clip {
+  kind: "sticker";
 }
 
 /** Word-level timestamp for karaoke-style caption highlighting */
@@ -158,6 +177,7 @@ export interface TextAnimation {
 }
 
 export interface TextClip extends Clip {
+  kind: "text";
   text: string;
   fontFamily: string;
   fontSize: number;
