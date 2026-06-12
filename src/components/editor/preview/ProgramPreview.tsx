@@ -18,6 +18,7 @@ import { PreviewQualityManager, PreviewQualityTier } from "@/lib/preview/Preview
 import { cn } from "@/lib/utils";
 import { AspectRatio } from "@/types";
 import { formatTime } from "@/lib/timeFormatting";
+import { refitClipsForCanvasChange } from "@/lib/refitClips";
 
 import { TelemetryOverlay, type TelemetryStats } from "./TelemetryOverlay";
 import { AspectSelector } from "./AspectSelector";
@@ -222,6 +223,7 @@ export const ProgramPreview: React.FC = () => {
             canvasHeight: originalCanvasDimsRef.current.height,
             aspectRatio: "original",
           });
+          refitClipsForCanvasChange(originalCanvasDimsRef.current.width, originalCanvasDimsRef.current.height);
         }
       } else {
         const dims = CANVAS_DIMENSIONS[p];
@@ -230,6 +232,7 @@ export const ProgramPreview: React.FC = () => {
           canvasHeight: dims.height,
           aspectRatio: p,
         });
+        refitClipsForCanvasChange(dims.width, dims.height);
       }
     },
     [project, updateProject],
@@ -247,6 +250,20 @@ export const ProgramPreview: React.FC = () => {
       };
     }
   }, [project?.id]);
+
+  // Keep "original" dims in sync when changed via SettingsModal
+  // (but NOT when changed via AspectSelector presets like 16:9, 9:16, etc.)
+  useEffect(() => {
+    if (!project || !originalCanvasDimsRef.current) return;
+    // Only update if the current preset IS "original" — meaning the user
+    // changed dimensions from SettingsModal while on the original preset
+    if (project.aspectRatio === "original") {
+      originalCanvasDimsRef.current = {
+        width: project.canvasWidth,
+        height: project.canvasHeight,
+      };
+    }
+  }, [project?.canvasWidth, project?.canvasHeight, project?.aspectRatio]);
 
   useEffect(() => {
     if (project?.aspectRatio) {
@@ -508,7 +525,45 @@ export const ProgramPreview: React.FC = () => {
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (lastJobId) scheduler.cancel(lastJobId);
     };
-  }, [useCanvasPreview, project, displayWidth, displayHeight]);
+  }, [useCanvasPreview, project, canvasWidth, canvasHeight, displayWidth, displayHeight]);
+
+  // ── Clear selection when playback starts ──────────────────────────────
+  // Transform overlays should not be visible during playback
+  useEffect(() => {
+    if (clockState.state === "playing") {
+      clearSelection();
+    }
+  }, [clockState.state, clearSelection]);
+
+  // ── Handle page visibility changes ────────────────────────────────────
+  // When tab goes to background, pause playback to prevent audio drift
+  // Browser throttles RAF to ~1fps in background, but audio continues normally
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Page is hidden - pause to prevent drift
+        if (clockState.state === "playing") {
+          transportPause();
+          // Store that we auto-paused due to visibility
+          sessionStorage.setItem("clypra-auto-paused", "true");
+        }
+      } else {
+        // Page is visible again - resume if we auto-paused
+        const wasAutoPaused = sessionStorage.getItem("clypra-auto-paused");
+        if (wasAutoPaused === "true") {
+          sessionStorage.removeItem("clypra-auto-paused");
+          transportPlay();
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      sessionStorage.removeItem("clypra-auto-paused");
+    };
+  }, [clockState.state, transportPause, transportPlay]);
 
   useLayoutEffect(() => {
     const session = activeSession;
@@ -577,8 +632,8 @@ export const ProgramPreview: React.FC = () => {
                 className="bg-black"
               />
 
-              {/* Transform overlay for selected clips */}
-              <TransformOverlay canvasWidth={canvasWidth} canvasHeight={canvasHeight} scale={scale} viewport={viewport} displayOffset={{ x: offsetX, y: offsetY }} displayWidth={displayWidth} displayHeight={displayHeight} currentTime={currentTime} />
+              {/* Transform overlay for selected clips - only show when paused */}
+              {!isPlaying && <TransformOverlay canvasWidth={canvasWidth} canvasHeight={canvasHeight} scale={scale} viewport={viewport} displayOffset={{ x: offsetX, y: offsetY }} displayWidth={displayWidth} displayHeight={displayHeight} currentTime={currentTime} />}
 
               {/* Title & Action Safe Areas Overlay */}
               <SafeOverlay visible={showSafeOverlay} displayWidth={displayWidth} displayHeight={displayHeight} displayOffset={{ x: offsetX, y: offsetY }} />

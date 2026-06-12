@@ -276,6 +276,154 @@ npm run tauri dev
   - Apply exit animation
   - Adjust animation duration
   - Preview animations during playback
+  - Test different animation types (fade, slide, scale, zoom)
+  - Test different easing functions (linear, ease-in, ease-out, ease-in-out)
+  - Verify animations work in exported video
+
+### Detailed Text Animation Testing:
+
+- [ ] **Entrance Animations - Basic**
+  - Add text clip to timeline
+  - Select text clip → Properties Panel → Animation tab
+  - Apply "Fade In" entrance animation (default 0.5s)
+  - Play from clip start
+  - **Expected**: Text fades in from transparent to opaque over 0.5 seconds
+  - Apply "Slide Up" entrance animation
+  - **Expected**: Text slides up from below and fades in simultaneously
+  - Apply "Slide Down" entrance animation
+  - **Expected**: Text slides down from above and fades in
+  - Apply "Slide Left" entrance animation
+  - **Expected**: Text slides in from right side
+  - Apply "Slide Right" entrance animation
+  - **Expected**: Text slides in from left side
+
+- [ ] **Entrance Animations - Advanced**
+  - Apply "Scale" entrance animation
+  - **Expected**: Text grows from 50% to 100% size while fading in
+  - Apply "Zoom In" entrance animation
+  - **Expected**: Text appears and zooms inward (1.0 to 1.5 scale)
+  - Apply "Zoom Out" entrance animation
+  - **Expected**: Text shrinks outward while fading in
+
+- [ ] **Exit Animations - Basic**
+  - Set clip duration to 5 seconds
+  - Apply "Fade Out" exit animation (default 0.5s)
+  - Seek to 4.5 seconds and play
+  - **Expected**: Text fades out during last 0.5 seconds
+  - Apply "Slide Up" exit animation
+  - **Expected**: Text slides up and fades out
+  - Apply "Slide Down" exit animation
+  - **Expected**: Text slides down and fades out
+
+- [ ] **Combined Entrance + Exit**
+  - Set entrance: "Slide Up"
+  - Set exit: "Slide Down"
+  - Play entire clip duration
+  - **Expected**: Text slides up at start, stays visible, slides down at end
+  - Try different combinations:
+    - Entrance: "Fade In" + Exit: "Zoom Out"
+    - Entrance: "Scale" + Exit: "Fade Out"
+    - Entrance: "Zoom In" + Exit: "Scale"
+
+- [ ] **Duration Adjustment**
+  - Apply "Fade In" entrance animation
+  - Change duration from 0.5s to 1.0s
+  - Play clip
+  - **Expected**: Fade in takes 1 full second
+  - Change duration to 0.2s
+  - **Expected**: Very quick fade in
+  - Try to set duration > clip.duration/2
+  - **Expected**: Duration is clamped to maximum allowed (clip.duration/2)
+
+- [ ] **Easing Functions**
+  - Apply "Scale" entrance animation
+  - Set easing to "Linear"
+  - Play clip
+  - **Expected**: Constant speed scaling
+  - Set easing to "Ease In"
+  - **Expected**: Starts slow, accelerates
+  - Set easing to "Ease Out"
+  - **Expected**: Starts fast, decelerates smoothly
+  - Set easing to "Ease In-Out"
+  - **Expected**: Slow start and end, fast middle
+
+- [ ] **Animation with Transforms**
+  - Add text clip with entrance animation
+  - Move text position in preview (Transform Overlay)
+  - Play clip
+  - **Expected**: Animation applies relative to new position
+  - Rotate text 45 degrees
+  - Play clip
+  - **Expected**: Rotated text still animates correctly
+  - Scale text to 150%
+  - Play clip
+  - **Expected**: Larger text animates proportionally
+
+- [ ] **Animation with Text Effects**
+  - Apply text effect (e.g., "Neon Crimson")
+  - Add entrance animation "Fade In"
+  - Play clip
+  - **Expected**: Text effect fades in with animation
+  - Try with stroke effects
+  - Try with shadow effects
+  - Try with background panel effects
+  - **Expected**: All effects animate together
+
+- [ ] **Multiple Text Clips with Different Animations**
+  - Add 3 text clips to timeline
+  - Clip 1: Entrance "Fade In", Exit "Fade Out"
+  - Clip 2: Entrance "Slide Up", Exit "Slide Down"
+  - Clip 3: Entrance "Zoom In", Exit "Zoom Out"
+  - Play entire sequence
+  - **Expected**: Each clip animates independently and correctly
+
+- [ ] **Animation State Persistence**
+  - Add text clip with animations
+  - Save project
+  - Close and reopen project
+  - Select text clip → Animation tab
+  - **Expected**: Animation settings are preserved
+  - Play clip
+  - **Expected**: Animations play correctly after reload
+
+- [ ] **Export with Animations**
+  - Create timeline with multiple text clips with different animations
+  - Export to MP4 (1080p, H.264)
+  - Export completes successfully
+  - Open exported video in media player
+  - **Expected**: All text animations render correctly in exported video
+  - Text fades in/out at correct times
+  - Slide animations are smooth
+  - Scale/zoom animations are smooth
+
+- [ ] **Animation Edge Cases**
+  - Create very short text clip (0.5 seconds)
+  - Try to apply 0.5s entrance and 0.5s exit
+  - **Expected**: Durations are clamped to prevent overlap
+  - Create very long text clip (60 seconds)
+  - Apply animations with various durations
+  - **Expected**: Animations work correctly on long clips
+  - Apply "None" entrance and exit
+  - **Expected**: Text appears/disappears instantly (no animation)
+
+- [ ] **Animation Performance**
+  - Add 10 text clips with different animations to timeline
+  - Play entire sequence
+  - **Expected**: Smooth playback, no frame drops
+  - Monitor CPU usage
+  - **Expected**: No significant performance degradation
+  - Export project with 10 animated text clips
+  - **Expected**: Export completes without errors
+
+- [ ] **Animation UI Responsiveness**
+  - Select text clip
+  - Open Animation tab
+  - Change animation type
+  - **Expected**: Preview updates immediately
+  - Adjust duration slider
+  - **Expected**: Real-time update
+  - Change easing
+  - **Expected**: No lag or UI freezing
 
 ---
 

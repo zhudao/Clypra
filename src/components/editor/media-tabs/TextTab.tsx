@@ -473,7 +473,7 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-surface/5 select-none">
       {/* ── Top Header Control Navigation Row (Overflows X) ────────────── */}
       <div className="flex items-center gap-2.5 p-1 border-b border-border/50 shrink-0 bg-surface/10">
-        <Button variant="ghost" size="sm" className="shrink-0 flex items-center justify-center gap-1 h-min px-2 py-0.5 cursor-pointer bg-accent/10 rounded-sm transition-all text-[12px] text-accent-soft hover:bg-accent/20 border border-accent/20" onClick={() => onAddToTimeline?.({ name: "Custom Text", styleId: "premium-sticker" }, "text")}>
+        <Button variant="ghost" size="sm" className="shrink-0 flex items-center justify-center gap-1 h-min px-2 py-0.5 cursor-pointer bg-accent/10 rounded-sm transition-all text-[12px] text-accent-soft hover:bg-accent/20 border border-accent/20" onClick={() => onAddToTimeline?.({ name: "Text" }, "text")}>
           Add Text
         </Button>
 

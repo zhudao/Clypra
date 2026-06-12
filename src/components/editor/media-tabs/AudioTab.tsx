@@ -1,12 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, CheckCircle, Download, Eye, Loader2, Music2, Pause, Play, Plus, Search } from "lucide-react";
+import { AlertCircle, CheckCircle, Download, Loader2, Music2, Pause, Play, Plus, Search } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/Tooltip";
 import { NetworkError } from "@/components/ui/NetworkError";
 import { AUDIO_LIBRARY_CATEGORIES, ClypraAudioApi, type AudioLibraryCategory, type AudioLibraryItem } from "@/features/audio-library/api/clypraAudioApi";
 import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibraryStore";
-import { DownloadProgress } from "@/components/ui/DownloadProgress";
 import { useUIStore } from "@/store/uiStore";
-import { useProjectStore } from "@/store/projectStore";
 import type { TabProps } from "./types";
 import type { MediaAsset } from "@/types";
 
@@ -123,7 +121,7 @@ const AudioItem: React.FC<AudioItemProps> = ({ item, onAddToTimeline }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { getDownloadState, startDownload, isDownloaded } = useAudioLibraryStore();
   const { previewAsset } = useUIStore();
-  const { addMediaAsset } = useProjectStore();
+  // Note: addMediaAsset removed from here - only used when adding to timeline
   const downloadState = getDownloadState(item.id);
   const isDownloadedFlag = isDownloaded(item.id);
 
@@ -166,9 +164,7 @@ const AudioItem: React.FC<AudioItemProps> = ({ item, onAddToTimeline }) => {
         coverArt: item.coverArtUrl,
       };
 
-      // Add to project store
-      addMediaAsset(mediaAsset);
-
+      // NOTE: Preview does NOT add to project store - only adding to timeline does that
       // Open in SourcePreview
       previewAsset(mediaAsset);
     } catch (error) {

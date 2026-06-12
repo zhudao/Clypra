@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { PlatformInterface, VideoMetadata, SelectedFile } from "../platform";
 
 const isExternalOrDataUrl = (value: string) =>
@@ -5,30 +6,15 @@ const isExternalOrDataUrl = (value: string) =>
 
 export class TauriPlatformAdapter implements PlatformInterface {
   type = "tauri" as const;
-  private tauriCore: any = null;
 
   isTauri() { return true; }
   isCapacitor() { return false; }
   isWeb() { return false; }
 
-  constructor() {
-    import("@tauri-apps/api/core")
-      .then((core) => {
-        this.tauriCore = core;
-      })
-      .catch((err) => {
-        console.warn("Failed to load Tauri core APIs:", err);
-      });
-  }
+  constructor() {}
 
   convertFileSrc(path: string): string {
-    if (this.tauriCore) {
-      return this.tauriCore.convertFileSrc(path);
-    }
-    const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
-    return isWindows
-      ? `https://asset.localhost/${encodeURIComponent(path)}`
-      : `asset://localhost/${encodeURIComponent(path)}`;
+    return convertFileSrc(path);
   }
 
   async appDataDir(): Promise<string> {

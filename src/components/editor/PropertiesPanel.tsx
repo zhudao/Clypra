@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Settings, Type, Layout } from "lucide-react";
+import { Type, Layout, Sparkles, Film, Music, Image, FileText, Clock } from "lucide-react";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useProjectStore } from "@/store/projectStore";
@@ -13,6 +13,9 @@ import { usePresetStore } from "@/store/presetStore";
 import { EmptyPropertiesState } from "./properties/EmptyPropertiesState";
 import { TextStyleSection } from "./properties/TextStyleSection";
 import { TransformSection } from "./properties/TransformSection";
+import { AudioSection } from "./properties/AudioSection";
+import { TextAnimationControls } from "./properties/TextAnimationControls";
+import { EffectsFiltersSection } from "./properties/EffectsFiltersSection";
 
 const TEXT_BOUNDS_STYLE_KEYS: (keyof TextClip)[] = ["text", "fontSize", "fontFamily", "fontWeight", "fontStyle", "styleId", "stroke", "shadow", "background", "letterSpacing", "lineHeight"];
 const MANUAL_BOUNDS_KEYS: (keyof Clip)[] = ["x", "y", "width", "height"];
@@ -23,12 +26,7 @@ export function shouldRecalculateTextBoundsForPropertyUpdate(updates: Record<str
   return hasStyleChange && !hasManualBounds;
 }
 
-export function buildClipPropertyTransform(
-  clip: Clip,
-  updates: Record<string, unknown>,
-  canvasWidth: number,
-  canvasHeight: number,
-): { oldTransform: Record<string, unknown>; newTransform: Record<string, unknown> } {
+export function buildClipPropertyTransform(clip: Clip, updates: Record<string, unknown>, canvasWidth: number, canvasHeight: number): { oldTransform: Record<string, unknown>; newTransform: Record<string, unknown> } {
   let newTransform = { ...updates };
 
   if ("text" in clip && shouldRecalculateTextBoundsForPropertyUpdate(updates)) {
@@ -50,13 +48,36 @@ export function buildClipPropertyTransform(
   return { oldTransform, newTransform };
 }
 
+/** Clip type display info */
+function getClipTypeInfo(assetType: string | undefined, isText: boolean) {
+  if (isText) return { icon: FileText, label: "Text", color: "text-purple-400" };
+  switch (assetType) {
+    case "video":
+      return { icon: Film, label: "Video", color: "text-blue-400" };
+    case "audio":
+      return { icon: Music, label: "Audio", color: "text-green-400" };
+    case "image":
+      return { icon: Image, label: "Image", color: "text-amber-400" };
+    default:
+      return { icon: Film, label: "Clip", color: "text-text-muted" };
+  }
+}
+
+type TextPropertyTab = "text" | "animation" | "transform";
+
+const TEXT_TABS: { id: TextPropertyTab; label: string; icon: React.FC<{ className?: string }> }[] = [
+  { id: "text", label: "Text Style", icon: Type },
+  { id: "animation", label: "Animation", icon: Sparkles },
+  { id: "transform", label: "Transform", icon: Layout },
+];
+
 export const PropertiesPanel: React.FC = () => {
   const { selectedClipIds } = useUIStore();
   const { clips } = useTimelineStore();
   const { mediaAssets, project } = useProjectStore();
   const { execute } = useHistoryStore();
 
-  const [activePropertyTab, setActivePropertyTab] = useState<"text" | "transform">("text");
+  const [activePropertyTab, setActivePropertyTab] = useState<TextPropertyTab>("text");
   const [newPresetName, setNewPresetName] = useState("");
   const { presets, savePreset, deletePreset } = usePresetStore();
 
@@ -64,7 +85,10 @@ export const PropertiesPanel: React.FC = () => {
   const selectedClip = clips.find((c) => c.id === selectedClipId);
   const selectedAsset = mediaAssets.find((a) => a.id === selectedClip?.mediaId);
   const isVisualClip = selectedAsset?.type === "video" || selectedAsset?.type === "image";
+  const isAudioClip = selectedAsset?.type === "audio";
+  const isVideoClip = selectedAsset?.type === "video"; // Video clips have audio tracks
   const isTextClip = selectedClip && "text" in selectedClip;
+  const hasAudioTrack = isAudioClip || isVideoClip; // Both audio clips and video clips have audio
 
   if (!selectedClipId || !selectedClip) {
     return <EmptyPropertiesState />;
@@ -73,36 +97,16 @@ export const PropertiesPanel: React.FC = () => {
   // Cast selected clip to TextClip when it is a text layer
   const textClip = selectedClip as unknown as TextClip;
 
+  const canvasWidth = project?.canvasWidth ?? 1920;
+  const canvasHeight = project?.canvasHeight ?? 1080;
+
   const handleUpdate = (key: string, value: any) => {
-    const { oldTransform, newTransform } = buildClipPropertyTransform(selectedClip, { [key]: value }, project?.canvasWidth ?? 1920, project?.canvasHeight ?? 1080);
-
-    // Clear styleId when user manually customizes styling properties
-    // Commented out to support programmatic API style overrides without losing preset association
-    /*
-    const stylingKeys = ["color", "fontFamily", "fontWeight", "fontStyle", "stroke", "shadow", "background", "align", "valign", "letterSpacing"];
-    if (stylingKeys.includes(key) && (selectedClip as any).styleId) {
-      oldTransform.styleId = (selectedClip as any).styleId;
-      newTransform.styleId = undefined;
-    }
-    */
-
+    const { oldTransform, newTransform } = buildClipPropertyTransform(selectedClip, { [key]: value }, canvasWidth, canvasHeight);
     execute(new TransformClipCommand(selectedClipId, oldTransform, newTransform));
   };
 
   const handleUpdateMultiple = (fields: Record<string, any>) => {
-    const { oldTransform: oldFields, newTransform: newFields } = buildClipPropertyTransform(selectedClip, fields, project?.canvasWidth ?? 1920, project?.canvasHeight ?? 1080);
-
-    // Clear styleId when styling properties are modified in batch, unless styleId is explicitly being set
-    // Commented out to support programmatic API style overrides without losing preset association
-    /*
-    const stylingKeys = ["color", "fontFamily", "fontWeight", "fontStyle", "stroke", "shadow", "background", "align", "valign", "letterSpacing"];
-    const hasStylingKey = Object.keys(fields).some((k) => stylingKeys.includes(k));
-    if (hasStylingKey && (selectedClip as any).styleId && !("styleId" in fields)) {
-      oldFields.styleId = (selectedClip as any).styleId;
-      newFields.styleId = undefined;
-    }
-    */
-
+    const { oldTransform: oldFields, newTransform: newFields } = buildClipPropertyTransform(selectedClip, fields, canvasWidth, canvasHeight);
     execute(new TransformClipCommand(selectedClipId, oldFields, newFields));
   };
 
@@ -149,50 +153,68 @@ export const PropertiesPanel: React.FC = () => {
     );
   };
 
+  // Clip type info for the header
+  const typeInfo = getClipTypeInfo(selectedAsset?.type, !!isTextClip);
+  const TypeIcon = typeInfo.icon;
+  const clipName = isTextClip
+    ? (textClip.text || "Text").slice(0, 24)
+    : selectedAsset?.name || "Clip";
+  const clipDuration = selectedClip.duration.toFixed(1);
+
   return (
     <div className="w-full md:w-92 min-h-0 panel-shell flex flex-col overflow-hidden shrink-0">
-      {/* Header Panel Tabs */}
-      <div className="panel-head flex items-center justify-between border-b border-border select-none">
-        {isTextClip ? (
-          <div className="flex w-full">
-            <button
-              onClick={() => setActivePropertyTab("text")}
-              className={`flex-1 py-3 text-xs font-semibold tracking-wide border-b-2 text-center transition-all cursor-pointer ${
-                activePropertyTab === "text"
-                  ? "text-accent border-accent bg-accent/5"
-                  : "text-text-muted border-transparent hover:text-text-primary"
-              }`}
-            >
-              <span className="flex items-center justify-center gap-1.5">
-                <Type className="w-3.5 h-3.5" />
-                Text Style
-              </span>
-            </button>
-            <button
-              onClick={() => setActivePropertyTab("transform")}
-              className={`flex-1 py-3 text-xs font-semibold tracking-wide border-b-2 text-center transition-all cursor-pointer ${
-                activePropertyTab === "transform"
-                  ? "text-accent border-accent bg-accent/5"
-                  : "text-text-muted border-transparent hover:text-text-primary"
-              }`}
-            >
-              <span className="flex items-center justify-center gap-1.5">
-                <Layout className="w-3.5 h-3.5" />
-                Video (Transform)
-              </span>
-            </button>
+      {/* Clip Info Header */}
+      <div className="panel-head border-b border-border">
+        <div className="px-4 py-2.5 flex items-center gap-3">
+          <div className={`w-7 h-7 rounded-lg bg-surface-raised border border-border/40 flex items-center justify-center shrink-0 ${typeInfo.color}`}>
+            <TypeIcon className="w-3.5 h-3.5" />
           </div>
-        ) : (
-          <div className="p-4 flex items-center gap-2">
-            <Settings className="w-4 h-4 text-accent" />
-            <h3 className="font-semibold text-text-primary text-sm">Clip Properties</h3>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-text-primary truncate">{clipName}</p>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className={`text-[9px] font-medium ${typeInfo.color}`}>{typeInfo.label}</span>
+              <span className="text-[9px] text-text-muted/40">•</span>
+              <span className="text-[9px] text-text-muted tabular-nums flex items-center gap-0.5">
+                <Clock className="w-2.5 h-2.5" />
+                {clipDuration}s
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Tabs for text clips */}
+        {isTextClip && (
+          <div className="flex border-t border-border/40">
+            {TEXT_TABS.map((tab) => {
+              const TabIcon = tab.icon;
+              const isActive = activePropertyTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActivePropertyTab(tab.id)}
+                  className={`flex-1 py-2 text-[10px] font-semibold tracking-wide text-center transition-all cursor-pointer border-b-2 ${
+                    isActive
+                      ? "text-accent border-accent bg-accent/[0.04]"
+                      : "text-text-muted border-transparent hover:text-text-primary hover:bg-white/[0.02]"
+                  }`}
+                >
+                  <span className="flex items-center justify-center gap-1.5">
+                    <TabIcon className="w-3 h-3" />
+                    {tab.label}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
 
       {/* Property Contents */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-6">
-        {/* Render Text Styling studio if text clip is selected and active tab is text */}
+      <div className="flex-1 overflow-y-auto scrollbar-thin p-3 space-y-3">
+        {/* Audio properties (audio clips or video clips) */}
+        {hasAudioTrack && <AudioSection selectedClip={selectedClip} handleUpdate={handleUpdate} />}
+
+        {/* Text Styling (text clip + text tab) */}
         {isTextClip && activePropertyTab === "text" && (
           <TextStyleSection
             textClip={textClip}
@@ -207,14 +229,30 @@ export const PropertiesPanel: React.FC = () => {
           />
         )}
 
-        {/* Video Transform properties (rendered for non-text or if transform tab is selected) */}
-        {(!isTextClip || activePropertyTab === "transform") && (
+        {/* Text Animations (text clip + animation tab) */}
+        {isTextClip && activePropertyTab === "animation" && (
+          <TextAnimationControls
+            clip={textClip}
+            handleUpdate={handleUpdate}
+            handleUpdateMultiple={handleUpdateMultiple}
+          />
+        )}
+
+        {/* Transform (visual clips, or text clips on transform tab) */}
+        {(isVisualClip || (isTextClip && activePropertyTab === "transform")) && (
           <TransformSection
             selectedClip={selectedClip}
             isVisualClip={isVisualClip}
             handleUpdate={handleUpdate}
             handleApplyFit={handleApplyFit}
+            canvasWidth={canvasWidth}
+            canvasHeight={canvasHeight}
           />
+        )}
+
+        {/* Effects and Filters */}
+        {isVisualClip && (
+          <EffectsFiltersSection selectedClip={selectedClip} handleUpdate={handleUpdate} />
         )}
       </div>
     </div>

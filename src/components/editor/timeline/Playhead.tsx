@@ -1,6 +1,8 @@
 import React, { useRef, useEffect, useState, RefObject } from "react";
 import { usePlaybackClock, usePlaybackControls } from "@/hooks/usePlaybackClock";
 import { useTimelineStore } from "@/store/timelineStore";
+import { useProjectStore } from "@/store/projectStore";
+import { snapToFrameBoundary } from "@/lib/frameTime";
 
 interface PlayheadProps {
   pixelsPerSecond: number;
@@ -9,7 +11,7 @@ interface PlayheadProps {
   rulerHeight?: number;
 }
 
-export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, containerRef, rulerHeight = 24 }) => {
+export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, containerRef, rulerHeight = 5 }) => {
   const clockState = usePlaybackClock();
   const { seek } = usePlaybackControls();
   const { setScrollLeft } = useTimelineStore();
@@ -66,8 +68,16 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
       const scrollX = container.scrollLeft;
       const playheadX = scrollX + pointerXRef.current + dragOffsetRef.current;
 
-      // Convert to time and seek
-      const newTime = Math.max(0, Math.min(playheadX / pixelsPerSecond, duration));
+      // Convert to time and snap to frame boundary
+      const rawTime = playheadX / pixelsPerSecond;
+      // Get frameRate from project store directly, not clock state
+      const frameRate = useProjectStore.getState().project?.frameRate ?? 30;
+
+      // Only snap if frames are visually distinguishable (> 3px apart)
+      // Prevents "sticky" playhead at extreme zoom-out levels
+      const pixelsPerFrame = pixelsPerSecond / frameRate;
+      const snappedTime = pixelsPerFrame > 3 ? snapToFrameBoundary(rawTime, frameRate) : rawTime;
+      const newTime = Math.max(0, Math.min(snappedTime, duration));
       seek(newTime);
 
       rafRef.current = requestAnimationFrame(tick);
@@ -216,7 +226,13 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
 
     // Seek to clicked position (with offset)
     const playheadX = scrollX + pointerX + dragOffsetRef.current;
-    const newTime = Math.max(0, Math.min(playheadX / pixelsPerSecond, duration));
+    const rawTime = playheadX / pixelsPerSecond;
+    const frameRate = useProjectStore.getState().project?.frameRate ?? 30;
+
+    // Only snap if frames are visually distinguishable (> 3px apart)
+    const pixelsPerFrame = pixelsPerSecond / frameRate;
+    const snappedTime = pixelsPerFrame > 3 ? snapToFrameBoundary(rawTime, frameRate) : rawTime;
+    const newTime = Math.max(0, Math.min(snappedTime, duration));
     seek(newTime);
 
     setIsDragging(true);
@@ -227,9 +243,11 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
       ref={playheadRef}
       data-playhead="true"
       data-timeline-interactive="true"
-      className="absolute inset-y-0 select-none pointer-events-none"
+      className="absolute select-none pointer-events-none"
       style={{
         left: `${left}px`,
+        top: 0,
+        bottom: 0,
         width: "8px",
         marginLeft: "-3px",
         zIndex: 100,
@@ -245,8 +263,12 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
     >
       {/* Visual line */}
       <div
-        className="absolute inset-y-0 left-1/2 -translate-x-1/2 pointer-events-none bg-accent"
+        className="absolute pointer-events-none bg-accent"
         style={{
+          left: "50%",
+          top: rulerHeight, // Start below ruler
+          bottom: 0,
+          transform: "translateX(-50%)",
           width: "2px",
           boxShadow: "0 0 0 1px rgba(0,0,0,0.25)",
           cursor: "default",
@@ -261,7 +283,7 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
         style={{
           left: "50%",
           transform: "translateX(-50%)",
-          top: "2px",
+          top: "10px",
           width: "12px",
           height: "12px",
           boxShadow: "0 0 0 1px rgba(0,0,0,0.35)",

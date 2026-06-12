@@ -15,7 +15,7 @@ export type ClipRole = "primary" | "overlay" | "text" | "effect" | "background" 
  * Extended clip with compositor metadata.
  * Separates concerns: role (semantic), trackIndex (editorial), zIndex (compositing).
  */
-export interface CompositorClip extends Clip {
+export type CompositorClip = Clip & {
   /** Semantic type - what this clip represents */
   role: ClipRole;
   /** Editorial ordering - track position in timeline UI */
@@ -24,7 +24,7 @@ export interface CompositorClip extends Clip {
   zIndex: number;
   /** Runtime evaluation priority (for tie-breaking) */
   evaluationPriority: number;
-}
+};
 
 /**
  * A single layer in the render stack at a specific time.

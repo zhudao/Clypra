@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from "react";
-import { drawRoundedRect, getThemeAccentRgb } from "@/lib/canvasUtils";
+import { drawProfessionalWaveform, convertLegacyWaveform, getThemeAccentRgb } from "@/lib/canvasUtils";
+import type { WaveformBucket } from "@/types";
 
 interface MediaCardWaveformProps {
   audioPath: string;
@@ -11,7 +12,7 @@ interface MediaCardWaveformProps {
 // Generates a static waveform preview using Web Audio API
 export const MediaCardWaveform: React.FC<MediaCardWaveformProps> = ({ audioPath, duration, className = "" }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [waveformData, setWaveformData] = useState<number[]>([]);
+  const [waveformData, setWaveformData] = useState<WaveformBucket[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [themeRevision, setThemeRevision] = useState(0);
@@ -81,8 +82,11 @@ export const MediaCardWaveform: React.FC<MediaCardWaveformProps> = ({ audioPath,
         const max = Math.max(...waveform);
         const normalized = waveform.map((v) => (max > 0 ? v / max : 0));
 
+        // Convert to peak + RMS format
+        const buckets = convertLegacyWaveform(normalized);
+
         if (!isCancelled) {
-          setWaveformData(normalized);
+          setWaveformData(buckets);
           setIsLoading(false);
         }
 
@@ -93,7 +97,8 @@ export const MediaCardWaveform: React.FC<MediaCardWaveformProps> = ({ audioPath,
         if (!isCancelled) {
           // Flat line with very minimal variation to clearly indicate "no real data"
           const flatLine = Array.from({ length: 100 }, () => 0.15);
-          setWaveformData(flatLine);
+          const buckets = convertLegacyWaveform(flatLine);
+          setWaveformData(buckets);
           setHasError(true);
           setIsLoading(false);
         }
@@ -107,7 +112,7 @@ export const MediaCardWaveform: React.FC<MediaCardWaveformProps> = ({ audioPath,
     };
   }, [audioPath]);
 
-  // Draw waveform on canvas
+  // Draw professional waveform on canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || waveformData.length === 0) return;
@@ -124,28 +129,10 @@ export const MediaCardWaveform: React.FC<MediaCardWaveformProps> = ({ audioPath,
 
     // Read theme accent color
     const accentRgb = getThemeAccentRgb();
+    const color = `rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.85)`;
 
-    // Clear canvas
-    ctx.clearRect(0, 0, rect.width, rect.height);
-
-    // Draw waveform bars
-    const barCount = waveformData.length;
-    const barWidth = rect.width / barCount;
-    const barGap = 1;
-    const actualBarWidth = Math.max(1.5, barWidth - barGap);
-
-    for (let i = 0; i < barCount; i++) {
-      const value = waveformData[i];
-      const minHeight = 3;
-      const maxHeight = rect.height * 0.92;
-      const barHeight = Math.max(minHeight, value * maxHeight);
-
-      const x = i * barWidth + barGap / 2;
-      const y = rect.height - barHeight;
-
-      ctx.fillStyle = `rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.85)`;
-      drawRoundedRect(ctx, x, y, actualBarWidth, barHeight, 1);
-    }
+    // Use professional dense bar renderer with logical dimensions
+    drawProfessionalWaveform(canvas, waveformData, color, rect.width, rect.height);
   }, [waveformData, themeRevision]);
 
   return (

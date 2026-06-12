@@ -60,6 +60,7 @@ describe("timeline item compatibility adapters", () => {
       lineHeight: 1.2,
       paddingX: 12,
       paddingY: 12,
+      kind: "text",
     };
 
     const item = legacyClipToTimelineItem(textClip, tracks, []);

@@ -339,21 +339,18 @@ export class PreviewMediaPool {
     this.videos.delete(key);
   }
 
-  private updateVideoElement(
-    managed: ManagedVideo,
-    clip: Clip,
-    syncState: PreviewSyncState,
-    tracks: Array<{ id: string; type: string }>,
-    isPrimaryAudibleVideo: boolean,
-    isTrackMuted: boolean,
-  ): void {
+  private updateVideoElement(managed: ManagedVideo, clip: Clip, syncState: PreviewSyncState, tracks: Array<{ id: string; type: string }>, isPrimaryAudibleVideo: boolean, isTrackMuted: boolean): void {
     const video = managed.element;
     const sourceTime = getClipSourceTime(clip, syncState.time);
 
+    // Combine global preview volume with per-clip volume
+    const clipVolume = clip.volume ?? 1.0; // Default to 1.0 if not set
+    const combinedVolume = (syncState.volume / 100) * clipVolume;
+
     // Only one primary video clip is audible; others stay muted.
-    const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || !isPrimaryAudibleVideo;
+    const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || !isPrimaryAudibleVideo || clipVolume === 0;
     video.muted = shouldMute;
-    video.volume = shouldMute ? 0 : Math.max(0, Math.min(1, syncState.volume / 100));
+    video.volume = shouldMute ? 0 : Math.max(0, Math.min(1, combinedVolume));
     video.playbackRate = syncState.speed;
 
     if ("preservesPitch" in video) {
@@ -454,9 +451,8 @@ export class PreviewMediaPool {
         if (Math.abs(video.playbackRate - latestSyncState.speed) > 0.01) {
           video.playbackRate = latestSyncState.speed;
         }
-      } else
-      // Only apply gentle corrections at frame presentation time
-      if (drift > 0.1 && drift <= 0.3) {
+      } else if (drift > 0.1 && drift <= 0.3) {
+        // Only apply gentle corrections at frame presentation time
         // 100–300ms: soft playbackRate correction
         const correctionSpeed = actualMediaTime < clampedExpected ? latestSyncState.speed * 1.02 : latestSyncState.speed * 0.98;
         if (Math.abs(video.playbackRate - correctionSpeed) > 0.01) {
@@ -550,9 +546,13 @@ export class PreviewMediaPool {
     const audio = managed.element;
     const sourceTime = getClipSourceTime(clip, syncState.time);
 
-    const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted;
+    // Combine global preview volume with per-clip volume
+    const clipVolume = clip.volume ?? 1.0; // Default to 1.0 if not set
+    const combinedVolume = (syncState.volume / 100) * clipVolume;
+
+    const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || clipVolume === 0;
     audio.muted = shouldMute;
-    audio.volume = shouldMute ? 0 : Math.max(0, Math.min(1, syncState.volume / 100));
+    audio.volume = shouldMute ? 0 : Math.max(0, Math.min(1, combinedVolume));
     audio.playbackRate = syncState.speed;
 
     if ("preservesPitch" in audio) {

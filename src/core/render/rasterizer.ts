@@ -22,6 +22,17 @@ import { useEffectsStore } from "../../features/text-effects/store/effectsStore"
 import { invalidateEvaluationCache } from "../evaluation/evaluator";
 import { useTimelineStore } from "../../store/timelineStore";
 import { effectBleed } from "../../lib/textClip";
+import lottie from "lottie-web";
+import { useStickersStore } from "../../features/stickers/store/stickersStore";
+
+interface LottieAnimationCacheEntry {
+  anim: any;
+  canvas: HTMLCanvasElement;
+  container: HTMLDivElement;
+  stickerId: string;
+}
+
+const lottieRenderCache = new Map<string, LottieAnimationCacheEntry>();
 
 /**
  * Raster target configuration.
@@ -145,6 +156,16 @@ export async function rasterizeScene(scene: EvaluatedScene, target: RasterTarget
   ctx.save();
   ctx.translate(offsetX, offsetY);
 
+  // Clip all layer rendering to the canvas bounds.
+  // Without this, "cover" and "original" mode clips bleed past the canvas
+  // into the letterbox/pillarbox area. Professional NLEs always clip to canvas.
+  // Guard for test environments where mock canvas contexts may not implement these.
+  if (typeof ctx.beginPath === "function") {
+    ctx.beginPath();
+    ctx.rect(0, 0, scaledCanvasWidth, scaledCanvasHeight);
+    ctx.clip();
+  }
+
   // Rasterize all visual layers with uniform scaling
   for (const layer of scene.visualLayers) {
     // TRACE: Z-order verification (can be removed after validation)
@@ -221,6 +242,74 @@ const VIDEO_WARN_INTERVAL_MS = 5000;
 
 async function rasterizeMediaLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, layer: EvaluatedMediaLayer, width: number, height: number, target: RasterTarget): Promise<void> {
   try {
+    if (layer.clipKind === "sticker") {
+      const stickerId = layer.mediaId.replace("sticker-", "");
+      let cachedSticker = useStickersStore.getState().getCachedSticker(stickerId);
+      if (!cachedSticker) {
+        await useStickersStore.getState().initializeCache();
+        cachedSticker = useStickersStore.getState().getCachedSticker(stickerId);
+      }
+      
+      if (cachedSticker && cachedSticker.format === "lottie") {
+        let cacheEntry = lottieRenderCache.get(layer.clipId);
+        
+        if (!cacheEntry || cacheEntry.stickerId !== stickerId) {
+          if (cacheEntry) {
+            cacheEntry.anim.destroy();
+            cacheEntry.container.remove();
+          }
+          
+          try {
+            const { stickerCacheManager } = await import("@/lib/stickerCache");
+            const { appCacheDir, join } = await import("@tauri-apps/api/path");
+            const appCache = await appCacheDir();
+            const absoluteLottiePath = await join(appCache, cachedSticker.localAnimationPath!);
+            
+            const lottieData = await stickerCacheManager.readLottieJson(absoluteLottiePath);
+            
+            const container = document.createElement("div");
+            container.style.width = `${width}px`;
+            container.style.height = `${height}px`;
+            container.style.position = "absolute";
+            container.style.left = "-9999px";
+            container.style.top = "-9999px";
+            document.body.appendChild(container);
+            
+            const anim = lottie.loadAnimation({
+              container,
+              renderer: "canvas",
+              autoplay: false,
+              loop: true,
+              animationData: JSON.parse(JSON.stringify(lottieData)),
+            });
+            
+            anim.goToAndStop(0, true);
+            await Promise.resolve();
+            
+            const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+            if (canvas) {
+              cacheEntry = { anim, canvas, container, stickerId };
+              lottieRenderCache.set(layer.clipId, cacheEntry);
+            }
+          } catch (err) {
+            console.error("[Rasterizer] Failed to load Lottie animation:", err);
+          }
+        }
+        
+        if (cacheEntry) {
+          const totalFrames = cacheEntry.anim.totalFrames;
+          const frameRate = cacheEntry.anim.frameRate || 30;
+          const frame = Math.floor(layer.sourceTime * frameRate) % totalFrames;
+          
+          cacheEntry.anim.goToAndStop(frame, true);
+          await Promise.resolve();
+          
+          drawMediaWithSourceRotation(ctx, cacheEntry.canvas, width, height, layer.sourceRotation, layer.effects, layer.filter);
+          return;
+        }
+      }
+    }
+
     // 1. Try to use active video element (bypasses decoding)
     if (layer.mediaType === "video" && target.videoElements) {
       const key = `${layer.clipId}-${layer.mediaId}`;
@@ -230,7 +319,7 @@ async function rasterizeMediaLayer(ctx: CanvasRenderingContext2D | OffscreenCanv
         if (video.readyState >= 2) {
           // HAVE_CURRENT_DATA — element is loaded, draw it
           // Apply source rotation BEFORE drawing (critical for export)
-          drawMediaWithSourceRotation(ctx, video, width, height, layer.sourceRotation);
+          drawMediaWithSourceRotation(ctx, video, width, height, layer.sourceRotation, layer.effects, layer.filter);
           return;
         }
         // Element exists but still loading — draw silent placeholder (no error)
@@ -283,7 +372,7 @@ async function rasterizeMediaLayer(ctx: CanvasRenderingContext2D | OffscreenCanv
     }
 
     // Draw centered (after rotation transform) with source rotation applied
-    drawMediaWithSourceRotation(ctx, imageBitmap, width, height, layer.sourceRotation);
+    drawMediaWithSourceRotation(ctx, imageBitmap, width, height, layer.sourceRotation, layer.effects, layer.filter);
 
     // Only close if we created it (not from resource manager)
     if (!layer.resourceHandle && imageBitmap) {
@@ -340,29 +429,151 @@ function drawLoadingPlaceholder(ctx: CanvasRenderingContext2D | OffscreenCanvasR
  * @param height - Target height (layer height in canvas)
  * @param sourceRotation - Rotation from container metadata (0, 90, 180, 270)
  */
-function drawMediaWithSourceRotation(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, source: HTMLVideoElement | ImageBitmap, width: number, height: number, sourceRotation?: number): void {
-  if (!sourceRotation || sourceRotation === 0) {
-    // No rotation - draw normally
-    ctx.drawImage(source, -width / 2, -height / 2, width, height);
-    return;
-  }
-
-  // Apply source rotation correction
-  // The context is already at the layer center (from rasterizeLayer)
-  // and has the user's clip rotation applied. Now we add source rotation.
+function drawMediaWithSourceRotation(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  source: HTMLVideoElement | ImageBitmap | HTMLCanvasElement,
+  width: number,
+  height: number,
+  sourceRotation?: number,
+  effects?: import("../evaluation/types").EvaluatedEffect[],
+  filter?: { id: string; name: string; intensity: number }
+): void {
   ctx.save();
 
-  // Rotate around the drawing origin (layer center)
-  ctx.rotate((sourceRotation * Math.PI) / 180);
+  // 1. Build and apply CSS filter string
+  let filterString = "";
+  if (filter) {
+    const { id, intensity } = filter;
+    if (id === "filter-sepia") {
+      filterString += `sepia(${intensity * 100}%)`;
+    } else if (id === "filter-retro") {
+      filterString += `sepia(${intensity * 50}%) saturate(${1 + intensity * 0.4}) contrast(${1 - intensity * 0.15})`;
+    } else if (id === "filter-vivid") {
+      filterString += `saturate(${1 + intensity * 1.2}) contrast(${1 + intensity * 0.25})`;
+    } else if (id === "filter-cool") {
+      filterString += `hue-rotate(${-intensity * 25}deg) saturate(${1 - intensity * 0.1})`;
+    } else if (id === "filter-cinematic-teal") {
+      filterString += `contrast(${1 + intensity * 0.15}) saturate(${1 - intensity * 0.1}) hue-rotate(5deg)`;
+    } else if (id === "filter-bw-classic") {
+      filterString += `grayscale(${intensity * 100}%)`;
+    }
+  }
 
-  // For 90° and 270° rotations, the source aspect ratio is transposed
-  // Example: source is 1280×720 encoded, but displays as 720×1280 portrait
-  // We need to draw at transposed dimensions so the rotated result fits correctly
+  // Check for CSS-based effects
+  let blurIntensity = 0;
+  if (effects && effects.length > 0) {
+    const blurFx = effects.find((fx) => fx.effectId === "fx-blur");
+    if (blurFx && blurFx.parameters) {
+      blurIntensity = blurFx.parameters.intensity ?? 0.5;
+      filterString += (filterString ? " " : "") + `blur(${blurIntensity * 20}px)`;
+    }
+  }
+
+  if (filterString) {
+    ctx.filter = filterString;
+  }
+
+  // 2. Resolve source dimensions & rotation transposition
   const isTransposed = sourceRotation === 90 || sourceRotation === 270;
   const drawWidth = isTransposed ? height : width;
   const drawHeight = isTransposed ? width : height;
 
-  ctx.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+  if (sourceRotation && sourceRotation !== 0) {
+    ctx.rotate((sourceRotation * Math.PI) / 180);
+  }
+
+  // 3. Render pixelate or chromatic aberration or normal
+  const pixelateFx = effects?.find((fx) => fx.effectId === "fx-pixelate");
+  if (pixelateFx && pixelateFx.parameters && pixelateFx.parameters.intensity > 0.05) {
+    const intensity = pixelateFx.parameters.intensity;
+    // Calculate pixel scale factor
+    const scale = Math.max(0.02, 1 - intensity * 0.95);
+    const w = Math.max(4, Math.floor(drawWidth * scale));
+    const h = Math.max(4, Math.floor(drawHeight * scale));
+
+    // Create a temporary offscreen canvas
+    const tempCanvas = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(w, h) : document.createElement("canvas");
+
+    if (tempCanvas instanceof HTMLCanvasElement) {
+      tempCanvas.width = w;
+      tempCanvas.height = h;
+    }
+
+    const tempCtx = tempCanvas.getContext("2d") as any;
+    if (tempCtx) {
+      tempCtx.drawImage(source, 0, 0, w, h);
+
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      (ctx as any).mozImageSmoothingEnabled = false;
+      (ctx as any).webkitImageSmoothingEnabled = false;
+      (ctx as any).msImageSmoothingEnabled = false;
+
+      ctx.drawImage(tempCanvas as any, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      ctx.restore();
+    } else {
+      ctx.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+    }
+  } else {
+    // Check Chromatic Aberration
+    const chromaticFx = effects?.find((fx) => fx.effectId === "fx-chromatic");
+    if (chromaticFx && chromaticFx.parameters && chromaticFx.parameters.intensity > 0.05) {
+      const shift = chromaticFx.parameters.intensity * 8; // Max 8px shift
+
+      // Draw Red Channel shift
+      ctx.save();
+      ctx.globalAlpha = ctx.globalAlpha * 0.6;
+      ctx.translate(-shift, 0);
+      ctx.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      ctx.restore();
+
+      // Draw Cyan (Green/Blue) Channel shift
+      ctx.save();
+      ctx.globalAlpha = ctx.globalAlpha * 0.6;
+      ctx.translate(shift, 0);
+      ctx.globalCompositeOperation = "screen";
+      ctx.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      ctx.restore();
+    } else {
+      ctx.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+    }
+  }
+
+  // 4. Draw overlays (Vignette, Film Grain)
+  if (effects && effects.length > 0) {
+    // Vignette Overlay
+    const vignetteFx = effects.find((fx) => fx.effectId === "fx-vignette");
+    if (vignetteFx && vignetteFx.parameters) {
+      ctx.save();
+      ctx.filter = "none"; // Clear filters for overlay drawing
+      const intensity = vignetteFx.parameters.intensity ?? 0.5;
+      const radius = Math.sqrt((drawWidth / 2) ** 2 + (drawHeight / 2) ** 2);
+      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+      grad.addColorStop(0, "transparent");
+      grad.addColorStop(0.5, `rgba(0, 0, 0, ${intensity * 0.25})`);
+      grad.addColorStop(1, `rgba(0, 0, 0, ${intensity * 0.95})`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(-drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      ctx.restore();
+    }
+
+    // Film Grain Overlay
+    const grainFx = effects.find((fx) => fx.effectId === "fx-film-grain");
+    if (grainFx && grainFx.parameters) {
+      ctx.save();
+      ctx.filter = "none"; // Clear filters for overlay drawing
+      const intensity = grainFx.parameters.intensity ?? 0.5;
+      const dotsCount = Math.floor((drawWidth * drawHeight) / 100) * intensity;
+      for (let d = 0; d < dotsCount; d++) {
+        const rx = (Math.random() - 0.5) * drawWidth;
+        const ry = (Math.random() - 0.5) * drawHeight;
+        const rsize = 1 + Math.random() * 1.5;
+        ctx.fillStyle = Math.random() > 0.5 ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.12)";
+        ctx.fillRect(rx, ry, rsize, rsize);
+      }
+      ctx.restore();
+    }
+  }
 
   ctx.restore();
 }

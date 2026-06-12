@@ -1,4 +1,4 @@
-// NLE placement policy for media and clips
+// Deprecated methods used across the system
 import { useState, useEffect } from "react";
 import { LaunchScreen } from "@/components/screens/LaunchScreen";
 import { EditorScreen } from "@/components/screens/EditorScreen";
@@ -82,6 +82,23 @@ const App = () => {
       const tracksPayload = rustProject.tracks?.map(fromRustTrack) ?? [];
       const clipsPayload = rustProject.clips?.map(fromRustClip) ?? [];
       const transitionsPayload = rustProject.transitions ?? [];
+
+      // Resolve kind for legacy projects
+      const assetMap = new Map(mediaAssetsPayload.map((a) => [a.id, a]));
+      for (const clip of clipsPayload) {
+        if (!clip.kind) {
+          if ("text" in clip || clip.id.startsWith("text-clip-")) {
+            clip.kind = "text";
+          } else if (clip.mediaId.startsWith("sticker-")) {
+            clip.kind = "sticker";
+          } else {
+            const asset = assetMap.get(clip.mediaId);
+            if (asset) {
+              clip.kind = asset.type; // "video" | "audio" | "image"
+            }
+          }
+        }
+      }
 
       await loadProject(project, { mediaAssets: mediaAssetsPayload, tracks: tracksPayload, clips: clipsPayload, transitions: transitionsPayload });
 

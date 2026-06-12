@@ -16,6 +16,7 @@ import { MobileEditorLayout } from "./MobileEditorLayout";
 import type { MediaAsset } from "@/types";
 import { useUIStore } from "@/store/uiStore";
 import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibraryStore";
+import { useStickersStore } from "@/features/stickers/store/stickersStore";
 
 export const EditorLayout: React.FC = () => {
   const { width } = useWindowSize();
@@ -24,7 +25,7 @@ export const EditorLayout: React.FC = () => {
     return <MobileEditorLayout />;
   }
 
-  const { tracks, clips, addClip, insertTrackAt, getTimelineEndTime, createTransitionBetweenClips } = useTimelineStore();
+  const { tracks, clips, addClip, updateClip, insertTrackAt, getTimelineEndTime, createTransitionBetweenClips } = useTimelineStore();
   const { mediaAssets, project, updateProject, addMediaAsset } = useProjectStore();
   const { selectedClipIds } = useUIStore();
 
@@ -205,6 +206,75 @@ export const EditorLayout: React.FC = () => {
       })().catch((error) => {
         console.error("[EditorLayout] Failed to add audio to timeline:", error);
       });
+    } else if (type === "stickers") {
+      const cachedSticker = useStickersStore.getState().getCachedSticker(item.id);
+      if (!cachedSticker) {
+        console.error("[EditorLayout] Sticker not downloaded yet:", item.id);
+        return;
+      }
+
+      (async () => {
+        const { appCacheDir, join } = await import("@tauri-apps/api/path");
+        const appCache = await appCacheDir();
+        
+        let relativePath = "";
+        if (cachedSticker.format === "lottie") {
+          relativePath = cachedSticker.localImagePath || "";
+        } else if (cachedSticker.format === "gif") {
+          relativePath = cachedSticker.localAnimationPath || "";
+        } else {
+          relativePath = cachedSticker.localImagePath || "";
+        }
+
+        if (!relativePath) {
+          console.error("[EditorLayout] Missing path for sticker:", item.id);
+          return;
+        }
+
+        const absolutePath = await join(appCache, relativePath);
+
+        const mediaAsset: MediaAsset = {
+          id: `sticker-${item.id}`,
+          name: item.name || "Sticker",
+          path: absolutePath,
+          type: "image",
+          duration: 3.0,
+          size: 0,
+        };
+
+        addMediaAsset(mediaAsset);
+
+        const latestTracks = useTimelineStore.getState().tracks;
+        const latestClips = useTimelineStore.getState().clips;
+        const placement = resolveAddToTimelinePlacement({
+          asset: mediaAsset,
+          tracks: latestTracks,
+          clips: latestClips,
+          playheadTime: getPlaybackClock().time,
+          sequenceEndTime: getTimelineEndTime(),
+        });
+        
+        let targetTrackId = placement.targetTrackId;
+        if (placement.shouldCreateTrack || !targetTrackId) {
+          const insertIndex = getInsertIndexForNewTrack(useTimelineStore.getState().tracks, placement.trackType);
+          targetTrackId = insertTrackAt(placement.trackType, insertIndex);
+        }
+
+        if (!targetTrackId) return;
+
+        addClip(
+          createClipFromAsset({
+            asset: mediaAsset,
+            trackId: targetTrackId,
+            startTime: placement.startTime,
+            width: project?.canvasWidth || 1920,
+            height: project?.canvasHeight || 1080,
+            fitMode: resolveDefaultFitModeForAsset(mediaAsset),
+          }),
+        );
+      })().catch((error) => {
+        console.error("[EditorLayout] Failed to add sticker to timeline:", error);
+      });
     } else if (type === "transitions") {
       const selectedPair = selectedClipIds.length === 2 ? ([selectedClipIds[0], selectedClipIds[1]] as const) : null;
       const pair = selectedPair ?? findAdjacentClipsAtPlayhead();
@@ -219,8 +289,61 @@ export const EditorLayout: React.FC = () => {
       } else {
         useProjectStore.getState().showToast(`${item?.name || "Transition"} added`);
       }
-    } else {
-      // Handle other types (stickers, effects, captions)
+    } else if (type === "effects" || type === "filters") {
+      const selectedClipId = selectedClipIds[0] ?? null;
+      let targetClip = clips.find((c) => c.id === selectedClipId);
+
+      // If no clip is explicitly selected, find the active visual clip (video/image) at the playhead
+      if (!targetClip) {
+        const currentTime = getPlaybackClock().time;
+        const visualClips = clips.filter((c) => {
+          const asset = mediaAssets.find((a) => a.id === c.mediaId);
+          return asset && (asset.type === "video" || asset.type === "image");
+        });
+        targetClip = visualClips.find(
+          (c) => currentTime >= c.startTime && currentTime <= c.startTime + c.duration
+        );
+      }
+
+      if (!targetClip) {
+        useProjectStore.getState().showToast(
+          `Select a video or image clip to apply this ${type === "effects" ? "effect" : "filter"}`,
+          "warning"
+        );
+        return;
+      }
+
+      const asset = mediaAssets.find((a) => a.id === targetClip.mediaId);
+      if (asset?.type !== "video" && asset?.type !== "image") {
+        useProjectStore.getState().showToast(
+          "Effects and filters can only be applied to video or image clips",
+          "warning"
+        );
+        return;
+      }
+
+      if (type === "effects") {
+        const currentEffects = targetClip.effects || [];
+        const effectExists = currentEffects.some((fx) => fx.id === item.id);
+
+        if (effectExists) {
+          useProjectStore.getState().showToast(`Effect "${item.name}" is already applied`, "warning");
+          return;
+        }
+
+        const updatedEffects = [
+          ...currentEffects,
+          { id: item.id, name: item.name, intensity: 0.5 },
+        ];
+
+        updateClip(targetClip.id, { effects: updatedEffects });
+        useProjectStore.getState().showToast(`Applied ${item.name} effect`);
+      } else {
+        updateClip(targetClip.id, {
+          filter: { id: item.id, name: item.name, intensity: 0.8 },
+        });
+        useProjectStore.getState().showToast(`Applied ${item.name} filter`);
+      }
     }
   };
 

@@ -20,7 +20,7 @@ A modern, open-source video editor built with Tauri, React, and TypeScript featu
 
 - 🎬 **Multi-Format Support** - Import MP4, MOV, WebM, MKV, M4V, AVI videos, MP3, WAV, AAC audio, and JPG, PNG, WebP images
 - ✂️ **Precision Editing** - Frame-accurate trimming with visual timeline
-- 📊 **Audio Visualization** - Real-time audio waveform display
+- 📊 **Professional Audio Waveforms** - Peak + RMS + mirrored display matching DaVinci Resolve quality ([see details](WAVEFORM_RENDERING.md))
 - 🎞️ **Filmstrip Preview** - Thumbnail strip for easy navigation
 - 🎯 **Professional Timeline** - Multi-track timeline with ruler and playhead
 - 📝 **Text Overlays** - Add titles and captions with custom fonts

@@ -76,7 +76,7 @@ export interface Project {
   timelineSchemaVersion?: number;
 }
 
-export type TrackType = "video" | "audio" | "text";
+export type TrackType = "video" | "audio" | "text" | "sticker";
 
 export interface Track {
   id: string;
@@ -86,6 +86,14 @@ export interface Track {
   locked: boolean;
   visible: boolean;
   height: number;
+}
+
+/** Waveform bucket containing peak and RMS amplitude data */
+export interface WaveformBucket {
+  /** Peak amplitude (absolute max) - range [0.0, 1.0] */
+  peak: number;
+  /** RMS amplitude (perceived loudness) - range [0.0, 1.0] */
+  rms: number;
 }
 
 export interface MediaAsset {
@@ -110,6 +118,8 @@ export interface MediaAsset {
   rotation?: number;
 }
 
+export type ClipKind = "video" | "audio" | "image" | "sticker" | "text";
+
 export interface Clip {
   id: string;
   trackId: string;
@@ -129,6 +139,35 @@ export interface Clip {
   sourceAspectRatio?: number; // Original aspect ratio (width/height)
   /** Placement fit mode used for deterministic reset/re-fit behavior. */
   fitMode?: "contain" | "cover" | "fill" | "stretch" | "original";
+  /** Audio volume (0.0 to 1.0, default 1.0) */
+  volume?: number;
+  kind?: ClipKind; // Optional for backward compatibility
+  effects?: Array<{
+    id: string;
+    name: string;
+    intensity: number; // 0.0 to 1.0
+  }>;
+  filter?: {
+    id: string;
+    name: string;
+    intensity: number; // 0.0 to 1.0
+  };
+}
+
+export interface VideoClip extends Clip {
+  kind: "video";
+}
+
+export interface AudioClip extends Clip {
+  kind: "audio";
+}
+
+export interface ImageClip extends Clip {
+  kind: "image";
+}
+
+export interface StickerClip extends Clip {
+  kind: "sticker";
 }
 
 /** Word-level timestamp for karaoke-style caption highlighting */
@@ -139,7 +178,16 @@ export interface CaptionWord {
   probability?: number; // 0.98 (Whisper confidence score)
 }
 
+export type TextAnimationType = "none" | "fade" | "slide-up" | "slide-down" | "slide-left" | "slide-right" | "scale" | "zoom-in" | "zoom-out";
+
+export interface TextAnimation {
+  type: TextAnimationType;
+  duration: number; // in seconds
+  easing: "linear" | "ease-in" | "ease-out" | "ease-in-out";
+}
+
 export interface TextClip extends Clip {
+  kind: "text";
   text: string;
   fontFamily: string;
   fontSize: number;
@@ -176,6 +224,10 @@ export interface TextClip extends Clip {
     borderRadius: number;
   };
   styleDefinition?: import("@clypra/engine").TextEffectDefinition;
+  /** Entrance animation */
+  entranceAnimation?: TextAnimation;
+  /** Exit animation */
+  exitAnimation?: TextAnimation;
 }
 
 export type TimelineItemKind = "video" | "audio" | "image" | "text" | "transition";

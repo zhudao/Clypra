@@ -22,9 +22,12 @@ import type { EvaluatedScene, EvaluatedVisualLayer, EvaluatedMediaLayer, Evaluat
 import { toCompositorClips } from "../timeline/adapter";
 import { getClipEndTime } from "@/lib/timelineClip";
 import { convertFileSrc } from "@tauri-apps/api/core";
+
+const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
 import { getEvaluationCache, computeClipVersion } from "./cache";
 import { evaluateProperty } from "./animation";
 import { resolveClipSourceTime } from "../timeline/sourceTime";
+import { calculateTextAnimationState } from "@/lib/textAnimation";
 
 /**
  * Evaluate the NLE timeline at a specific time.
@@ -115,7 +118,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
     const evalRot = kf.rotation !== undefined ? evaluateProperty(kf.rotation, offset, clip.duration) : clip.rotation;
     const evalOpacity = kf.opacity !== undefined ? evaluateProperty(kf.opacity, offset, clip.duration) : clip.opacity;
 
-    const isTextClip = "text" in clip;
+    const isTextClip = clip.kind === "text";
 
     if (isTextClip) {
       const textClip = clip as unknown as TextClip;
@@ -126,21 +129,36 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       const evalLetterSpacing = kf.letterSpacing !== undefined ? evaluateProperty(kf.letterSpacing, offset, clip.duration) : textClip.letterSpacing || 0;
       const evalLineHeight = kf.lineHeight !== undefined ? evaluateProperty(kf.lineHeight, offset, clip.duration) : textClip.lineHeight || 1.2;
 
+      // ── Calculate Text Animations ──────────────────────────────────────────
+      const animationState = calculateTextAnimationState(evalTime, clip.startTime, clip.duration, textClip.entranceAnimation, textClip.exitAnimation);
+
+      // Apply animation opacity (multiply with transition opacity)
+      const finalOpacity = evalOpacity * (transitionState.opacity ?? 1.0) * animationState.opacity;
+
+      // Apply animation transforms to position
+      const finalX = evalX + animationState.translateX;
+      const finalY = evalY + animationState.translateY;
+
+      // Apply animation scale to dimensions
+      const finalWidth = evalW * animationState.scale;
+      const finalHeight = evalH * animationState.scale;
+
       const textLayer: EvaluatedTextLayer = {
         layerId: `${clip.id}-${evalTime}`,
         clipId: clip.id,
         role: clip.role,
+        clipKind: clip.kind,
         zIndex: i,
         layerType: "text",
         time: evalTime,
         clipStartTime: clip.startTime,
         clipDuration: clip.duration,
-        x: evalX,
-        y: evalY,
-        width: evalW,
-        height: evalH,
+        x: finalX,
+        y: finalY,
+        width: finalWidth,
+        height: finalHeight,
         rotation: evalRot,
-        opacity: evalOpacity * (transitionState.opacity ?? 1.0),
+        opacity: finalOpacity,
         inTransition: transitionState.inTransition,
         transitionType: transitionState.type,
         transitionProgress: transitionState.progress,
@@ -169,8 +187,13 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
     const asset = assetMap.get(clip.mediaId);
     if (!asset || (asset.type !== "video" && asset.type !== "image")) continue;
 
-    const sourceTime = resolveClipSourceTime(clip, evalTime, { clampToRange: true }).sourceTime;
-    const sourcePath = asset.path ? convertFileSrc(asset.path) : asset.posterFrame || "";
+    const sourceTime = resolveClipSourceTime(clip, evalTime, {
+      clampToRange: true,
+      frameRate: project?.frameRate ?? 30,
+    }).sourceTime;
+    const sourcePath = asset.path
+      ? (isExternalOrDataUrl(asset.path) ? asset.path : convertFileSrc(asset.path))
+      : asset.posterFrame || "";
     if (!sourcePath) continue;
 
     const transitionState = evaluateTransitionState(clip, transitionWindows);
@@ -179,6 +202,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       layerId: `${clip.id}-${evalTime}`,
       clipId: clip.id,
       role: clip.role,
+      clipKind: clip.kind,
       zIndex: i,
       layerType: "media",
       mediaId: clip.mediaId,
@@ -197,6 +221,12 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       transitionType: transitionState.type,
       transitionProgress: transitionState.progress,
       blendMode: (clip as any).blendMode || "normal",
+      effects: clip.effects?.map((fx) => ({
+        effectId: fx.id,
+        type: "video_effect",
+        parameters: { name: fx.name, intensity: fx.intensity },
+      })),
+      filter: clip.filter,
     };
 
     visualLayers.push(mediaLayer);
@@ -216,8 +246,13 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
     if (!hasAudio || !asset) continue;
     if (track?.muted ?? false) continue;
 
-    const sourceTime = resolveClipSourceTime(clip, evalTime, { clampToRange: true }).sourceTime;
-    const sourcePath = asset.path ? convertFileSrc(asset.path) : "";
+    const sourceTime = resolveClipSourceTime(clip, evalTime, {
+      clampToRange: true,
+      frameRate: project?.frameRate ?? 30,
+    }).sourceTime;
+    const sourcePath = asset.path
+      ? (isExternalOrDataUrl(asset.path) ? asset.path : convertFileSrc(asset.path))
+      : "";
     if (!sourcePath) continue;
 
     audioLayers.push({

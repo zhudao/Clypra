@@ -3,6 +3,7 @@ use crate::models::{VideoMetadata, MediaMetadata};
 use base64::Engine;
 use image::ImageEncoder;
 use std::fs;
+use serde::{Serialize, Deserialize};
 
 /// Unified media metadata extraction for images, videos, and audio.
 /// Professional NLE approach: single probe pipeline for all media types.
@@ -332,4 +333,97 @@ pub async fn transcribe_audio_local(
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     Ok(stdout_str.trim().to_string())
+}
+
+/// Waveform bucket containing both peak and RMS amplitude data.
+/// Professional NLE approach: peak shows transients, RMS shows perceived loudness.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WaveformBucket {
+    /// Peak amplitude (absolute max sample in bucket) - range [0.0, 1.0]
+    pub peak: f32,
+    /// RMS amplitude (root mean square energy) - range [0.0, 1.0]
+    pub rms: f32,
+}
+
+/// Extract professional waveform data from audio file.
+/// Computes both peak and RMS values for each pixel bucket.
+/// Used for timeline waveform rendering with proper dynamic range visualization.
+#[tauri::command]
+pub async fn extract_waveform_data(
+    path: String,
+    num_buckets: usize,
+) -> Result<Vec<WaveformBucket>, String> {
+    use std::process::Command;
+    
+    eprintln!("🦀 [extract_waveform_data] Extracting {} buckets from: {}", num_buckets, path);
+    
+    // Use ffmpeg to decode audio to raw PCM samples (mono, 16kHz for efficiency)
+    let output = Command::new("ffmpeg")
+        .args([
+            "-i", &path,
+            "-f", "f32le",      // 32-bit float PCM
+            "-ac", "1",         // Mono (mix to single channel)
+            "-ar", "16000",     // 16kHz sample rate (sufficient for visualization)
+            "-",                // Output to stdout
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg audio decoding failed: {}", stderr));
+    }
+    
+    // Convert bytes to f32 samples
+    let samples: Vec<f32> = output.stdout
+        .chunks_exact(4)
+        .map(|chunk| {
+            let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            f32::from_le_bytes(bytes)
+        })
+        .collect();
+    
+    if samples.is_empty() {
+        return Err("No audio samples extracted".to_string());
+    }
+    
+    eprintln!("🦀 [extract_waveform_data] Decoded {} samples", samples.len());
+    
+    // Compute peak and RMS for each bucket
+    let buckets = compute_waveform_buckets(&samples, num_buckets);
+    
+    eprintln!("🦀 [extract_waveform_data] Computed {} buckets", buckets.len());
+    Ok(buckets)
+}
+
+/// Compute peak and RMS amplitudes for each pixel bucket.
+/// Professional audio analysis: peak captures transients, RMS captures energy.
+fn compute_waveform_buckets(samples: &[f32], num_buckets: usize) -> Vec<WaveformBucket> {
+    let samples_per_bucket = samples.len() / num_buckets;
+    
+    if samples_per_bucket == 0 {
+        // Edge case: fewer samples than buckets - create minimal buckets
+        return vec![WaveformBucket { peak: 0.0, rms: 0.0 }; num_buckets];
+    }
+    
+    (0..num_buckets)
+        .map(|i| {
+            let start = i * samples_per_bucket;
+            let end = ((i + 1) * samples_per_bucket).min(samples.len());
+            let bucket = &samples[start..end];
+            
+            // Peak: absolute maximum sample in bucket
+            let peak = bucket.iter()
+                .map(|s| s.abs())
+                .fold(0.0f32, f32::max);
+            
+            // RMS: root mean square (perceived loudness/energy)
+            let sum_squares: f32 = bucket.iter()
+                .map(|s| s * s)
+                .sum();
+            let rms = (sum_squares / bucket.len() as f32).sqrt();
+            
+            WaveformBucket { peak, rms }
+        })
+        .collect()
 }

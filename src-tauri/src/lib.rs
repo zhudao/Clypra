@@ -20,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -40,6 +41,7 @@ pub fn run() {
             extract_poster_frame,
             extract_audio_artwork,
             extract_audio_track,
+            extract_waveform_data,
             transcribe_audio_local,
             save_project,
             load_project,

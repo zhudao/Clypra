@@ -12,6 +12,8 @@ import { useProjectStore } from "@/store/projectStore";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useHistoryStore } from "@/store/historyStore";
+import { useSettingsStore } from "@/store/settingsStore";
+import { RippleDeleteCommand } from "@/core/history/commands/RippleDeleteCommand";
 import { DeleteClipCommand } from "@/core/history/commands/DeleteClipCommand";
 import type { VideoMetadata } from "@/types";
 import type { MediaTabProps } from "./types";
@@ -150,9 +152,15 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
                     beginTransaction("Remove from Timeline");
 
                     // Remove all clips using this asset
+                    const { rippleEditEnabled } = useTimelineStore.getState();
                     clipsToRemove.forEach((clip) => {
                       affectedTracks.add(clip.trackId);
-                      execute(new DeleteClipCommand(clip.id));
+                      // Use ripple delete if ripple mode is enabled, otherwise regular delete
+                      if (rippleEditEnabled) {
+                        execute(new RippleDeleteCommand(clip.id));
+                      } else {
+                        execute(new DeleteClipCommand(clip.id));
+                      }
                     });
 
                     commitTransaction();

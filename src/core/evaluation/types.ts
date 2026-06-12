@@ -14,6 +14,7 @@
 
 import type { ClipRole } from "../compositor/types";
 import type { RenderResourceHandle } from "../resources/types";
+import type { ClipKind } from "@/types";
 
 /**
  * Base properties shared by all visual layers.
@@ -27,6 +28,9 @@ interface BaseVisualLayer {
 
   /** Semantic role (for compositing logic) */
   readonly role: ClipRole;
+
+  /** Semantic kind of the clip */
+  readonly clipKind?: ClipKind;
 
   /** Z-order (0 = background, higher = foreground) */
   readonly zIndex: number;
@@ -108,6 +112,9 @@ export interface EvaluatedMediaLayer extends BaseVisualLayer {
 
   /** Source media rotation from container metadata (0, 90, 180, 270) */
   readonly sourceRotation?: number;
+
+  /** Active color filter on this layer */
+  readonly filter?: { id: string; name: string; intensity: number };
 }
 
 /**

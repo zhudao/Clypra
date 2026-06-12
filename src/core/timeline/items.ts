@@ -7,7 +7,7 @@ export function legacyClipToTimelineItem(clip: Clip, tracks: Track[], assets: Me
   const track = tracks.find((t) => t.id === clip.trackId);
   const trackIndex = tracks.findIndex((t) => t.id === clip.trackId);
   const asset = assets.find((a) => a.id === clip.mediaId);
-  const isText = "text" in clip;
+  const isText = clip.kind === "text";
   const role = (((clip as any).role as TimelineItemRole | undefined) ?? inferRoleFromTrackPosition(track, trackIndex, tracks)) as TimelineItemRole;
 
   const placement = {
