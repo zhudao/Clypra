@@ -485,7 +485,297 @@ npm run tauri dev
 
 ---
 
-## 10. Transform & Effects
+## 10. Video Effects (NEW - API Integration)
+
+### Prerequisites:
+
+- Ensure `.env` file contains `VITE_CLYPRA_API_KEY`
+- API endpoint should be accessible: https://clypra-worker-api.abdulkabirmusa.com
+- Internet connection required for fetching effects
+
+### Test Cases:
+
+#### 10.1 Video Effects Panel Access
+
+- [ ] **Open Video Effects Panel**
+  - Select a video clip on timeline
+  - Video effects panel should be accessible (check UI for effects button/tab)
+  - Panel opens without errors
+  - Shows three tabs: Effects, Overlays, Transitions
+
+- [ ] **Effects Panel UI**
+  - Panel displays with consistent design (matches Text/Stickers tabs)
+  - Three tabs visible at top: Effects, Overlays, Transitions
+  - Selection hint shows: "Select a clip to apply effects"
+  - When clip selected, hint shows selected clip count
+
+#### 10.2 Effects Tab Testing
+
+- [ ] **Effects Categories**
+  - Category pills display at top: All, Essentials, Color, Light, Stylize, Distort, Blur, Time
+  - Categories scroll horizontally with fade gradients
+  - Click different categories to filter effects
+  - "All" category shows all effects
+
+- [ ] **Effects Grid Display**
+  - Effects display in 3-column grid layout
+  - Each effect card shows:
+    - Thumbnail (or placeholder emoji if no thumbnail)
+    - Effect name on hover
+    - Premium badge (sparkle icon) for premium effects
+    - Strength/intensity indicator (if applicable)
+  - Hover effects work (border highlight, name overlay)
+
+- [ ] **Effects Search**
+  - Search bar at top of effects list
+  - Type effect name (e.g., "blur")
+  - Results filter in real-time
+  - Clear search shows all effects again
+
+- [ ] **Effects Loading States**
+  - When first opening effects panel, loading indicator shows
+  - "Loading effects..." message displays
+  - After load, effects appear in grid
+  - No loading on subsequent category switches (cached)
+
+- [ ] **Apply Effect to Clip**
+  - Select video clip on timeline
+  - Click on effect card in grid
+  - Effect applies to selected clip
+  - Preview updates showing effect applied
+  - Properties panel shows effect settings (if available)
+
+- [ ] **Effect Categories - Detailed Testing**
+  - **Essentials**: Test blur, sharpen, vignette effects
+  - **Color**: Test color filters (warm, cool, vibrant)
+  - **Light**: Test glow, light leak effects
+  - **Stylize**: Test film grain, chromatic aberration
+  - **Distort**: Test lens warp, pixelate effects
+  - **Vintage**: Test sepia, retro, aged filters
+  - **Modern**: Test crisp, vivid, cool filters
+  - **Cinematic**: Test bleach, moody, teal filters
+  - **B&W**: Test classic black & white filters
+
+- [ ] **Premium Effects**
+  - Premium effects show sparkle badge
+  - Click premium effect
+  - Shows upgrade prompt or applies (depending on subscription)
+  - Free effects work without restrictions
+
+#### 10.3 Overlays Tab Testing
+
+- [ ] **Overlay Categories**
+  - Category pills: All, Particles, Light Leaks, Bokeh, Film, Weather, Abstract
+  - Categories scroll horizontally
+  - Click categories to filter overlays
+
+- [ ] **Overlay Grid Display**
+  - Overlays in 3-column grid
+  - Each overlay card shows:
+    - Thumbnail preview
+    - Duration badge (e.g., "2.5s")
+    - File size badge (e.g., "3.2MB")
+    - Premium badge for paid overlays
+    - Play icon on hover
+  - Hover shows preview animation (if available)
+
+- [ ] **Overlay Search**
+  - Search bar filters overlays
+  - Search by name or tags
+  - Results update instantly
+
+- [ ] **Apply Overlay to Clip**
+  - Select video clip
+  - Click overlay card
+  - Overlay downloads (if not cached)
+  - Loading indicator during download
+  - Overlay applies as layer on video
+  - Preview shows overlay blended with video
+
+- [ ] **Overlay Properties**
+  - After applying overlay, properties show:
+    - Opacity/blend mode controls
+    - Position controls
+    - Scale controls
+    - Timing adjustment (start/end time)
+  - Adjust properties and verify preview updates
+
+- [ ] **Multiple Overlays**
+  - Apply multiple overlays to same clip
+  - Overlays stack correctly
+  - Each overlay independently controllable
+  - Remove individual overlays
+
+#### 10.4 Transitions Tab Testing
+
+- [ ] **Transition Categories**
+  - Category pills: All, Fade, Slide, Wipe, Zoom, Dissolve, Creative
+  - Categories filter transitions correctly
+
+- [ ] **Transition Grid Display**
+  - Transitions in 3-column grid
+  - Each card shows:
+    - Thumbnail or icon (fade 🌅, slide ↔️, zoom 🔍, etc.)
+    - Transition name
+    - Duration badge (e.g., "0.5s")
+    - Premium badge
+    - Easing type (if applicable)
+  - Gradient background for transition cards
+
+- [ ] **Transition Search**
+  - Search filters transitions by name
+  - Search by category tags
+
+- [ ] **Apply Transition Between Clips**
+  - Place two video clips adjacent on timeline
+  - Select gap/junction between clips (or select both clips)
+  - Click transition card
+  - Transition applies between clips
+  - Preview shows smooth transition effect
+
+- [ ] **Transition Duration**
+  - Adjust transition duration
+  - Drag transition edges on timeline to adjust
+  - Or use duration input in properties
+  - Preview updates with new duration
+
+- [ ] **Transition Types Testing**
+  - **Fade**: Cross-fade between clips
+  - **Slide**: Slide transitions (up, down, left, right)
+  - **Wipe**: Wipe transitions
+  - **Zoom**: Zoom in/out transitions
+  - **Dissolve**: Dissolve effects
+  - **Creative**: Special creative transitions
+  - All transitions render smoothly
+
+- [ ] **Transition Easing**
+  - Properties show easing options (if available)
+  - Linear, ease-in, ease-out, ease-in-out
+  - Change easing and verify smooth motion
+
+#### 10.5 Effect API Integration Testing
+
+- [ ] **API Connection**
+  - Open browser DevTools console
+  - Open effects panel
+  - Check Network tab for API requests
+  - Verify requests to: `https://clypra-worker-api.abdulkabirmusa.com`
+  - API key included in request headers: `X-API-Key`
+  - Requests return 200 status code
+
+- [ ] **API Authentication**
+  - Effects load successfully with valid API key
+  - Check console for authentication errors
+  - If API key missing/invalid, appropriate error shows
+
+- [ ] **API Caching**
+  - First load fetches from API
+  - Subsequent loads use cache (check Network tab)
+  - Cache improves performance
+  - No redundant API calls
+
+- [ ] **API Error Handling**
+  - Disconnect internet
+  - Try to load effects
+  - Error message displays: "Failed to load effects"
+  - Reconnect internet
+  - Retry loading effects
+  - Effects load successfully
+
+- [ ] **Rate Limiting**
+  - API has rate limit: 100 requests/minute
+  - Normal usage doesn't hit limit
+  - If limit hit, error message shows with retry time
+
+#### 10.6 Effect Persistence & Export
+
+- [ ] **Effect Persistence in Project**
+  - Apply effects to clips
+  - Save project
+  - Close and reopen project
+  - Effects are preserved
+  - Effects settings retained
+
+- [ ] **Effect Export**
+  - Create timeline with various effects applied
+  - Export to MP4
+  - Export completes successfully
+  - Open exported video
+  - Effects render correctly in exported file
+  - Quality matches preview
+
+- [ ] **Multiple Effects Export**
+  - Clip with effect + overlay + transition
+  - Export video
+  - All effects render correctly
+  - No visual glitches
+  - Proper blending and compositing
+
+#### 10.7 Performance Testing
+
+- [ ] **Effect Application Performance**
+  - Apply effect to clip
+  - Effect applies instantly (< 100ms)
+  - No UI freezing
+  - Preview updates smoothly
+
+- [ ] **Multiple Effects Performance**
+  - Apply 5+ effects to single clip
+  - Playback remains smooth
+  - No frame drops
+  - Scrubbing responsive
+
+- [ ] **Effect Rendering Performance**
+  - Add 10 clips with various effects
+  - Play timeline
+  - Monitor CPU/GPU usage
+  - Playback smooth at target frame rate
+  - Export doesn't crash or freeze
+
+#### 10.8 Effect Edge Cases
+
+- [ ] **No Clip Selected**
+  - Open effects panel with no clip selected
+  - Shows message: "Select a clip to apply effects"
+  - Clicking effects does nothing (graceful handling)
+
+- [ ] **Invalid Clip Type**
+  - Select audio clip
+  - Try to apply video effect
+  - Appropriate error or disabled state
+
+- [ ] **Missing Thumbnail**
+  - Effects without thumbnails show placeholder emoji
+  - Still clickable and functional
+
+- [ ] **Long Effect Names**
+  - Effect names truncate properly
+  - Full name visible on hover
+  - No layout breaking
+
+- [ ] **Empty Categories**
+  - If category has no effects
+  - Shows "No effects found" message
+  - No crashes or blank screens
+
+#### 10.9 Effect Removal & Reset
+
+- [ ] **Remove Effect from Clip**
+  - Apply effect to clip
+  - Find "Remove Effect" or "Reset" button
+  - Click to remove
+  - Clip returns to original state
+  - Preview updates
+
+- [ ] **Undo Effect Application**
+  - Apply effect
+  - Press Cmd/Ctrl+Z
+  - Effect unapplied
+  - Can redo with Cmd/Ctrl+Shift+Z
+
+---
+
+## 11. Transform & Effects
 
 ### Test Cases:
 
@@ -512,7 +802,7 @@ npm run tauri dev
 
 ---
 
-## 11. Export & Rendering
+## 12. Export & Rendering
 
 ### Test Cases:
 
@@ -566,7 +856,7 @@ npm run tauri dev
 
 ---
 
-## 12. Project Management
+## 13. Project Management
 
 ### Test Cases:
 
@@ -605,7 +895,7 @@ npm run tauri dev
 
 ---
 
-## 13. Undo/Redo System
+## 14. Undo/Redo System
 
 ### Test Cases:
 
@@ -638,7 +928,7 @@ npm run tauri dev
 
 ---
 
-## 14. Settings & Preferences
+## 15. Settings & Preferences
 
 ### Test Cases:
 
@@ -670,7 +960,7 @@ npm run tauri dev
 
 ---
 
-## 15. Performance & Stability
+## 16. Performance & Stability
 
 ### Test Cases:
 
@@ -706,7 +996,7 @@ npm run tauri dev
 
 ---
 
-## 16. Keyboard Shortcuts
+## 17. Keyboard Shortcuts
 
 ### Test Cases:
 
@@ -725,7 +1015,7 @@ npm run tauri dev
 
 ---
 
-## 17. UI/UX Features
+## 18. UI/UX Features
 
 ### Test Cases:
 
@@ -762,7 +1052,7 @@ npm run tauri dev
 
 ---
 
-## 18. Cross-Platform Features
+## 19. Cross-Platform Features
 
 ### Test Cases (if testing on multiple platforms):
 
@@ -785,7 +1075,7 @@ npm run tauri dev
 
 ---
 
-## 19. Filmstrip & Navigation
+## 20. Filmstrip & Navigation
 
 ### Test Cases:
 
@@ -803,7 +1093,7 @@ npm run tauri dev
 
 ---
 
-## 20. Advanced Features Testing
+## 21. Advanced Features Testing
 
 ### Test Cases:
 
@@ -874,10 +1164,20 @@ Create a testing session document and check off each section:
 - [ ] Timeline Navigation & Zoom (4 tests)
 - [ ] Video Playback & Preview (5 tests)
 - [ ] Audio Features (5 tests)
-- [ ] Text & Titles (8 tests)
+- [ ] Text & Titles (8 tests + detailed animation testing)
 - [ ] Stickers & Graphics (4 tests)
 - [ ] Subtitles & Captions (4 tests)
-- [ ] Transform & Effects (4 tests)
+- [ ] Video Effects (NEW - 9 subsections, 70+ tests)
+  - Effects Panel Access
+  - Effects Tab Testing
+  - Overlays Tab Testing
+  - Transitions Tab Testing
+  - API Integration Testing
+  - Effect Persistence & Export
+  - Performance Testing
+  - Edge Cases
+  - Effect Removal & Reset
+- [ ] Transform & Effects (3 tests)
 - [ ] Export & Rendering (8 tests)
 - [ ] Project Management (6 tests)
 - [ ] Undo/Redo System (4 tests)
@@ -889,7 +1189,7 @@ Create a testing session document and check off each section:
 - [ ] Filmstrip & Navigation (2 tests)
 - [ ] Advanced Features (4 tests)
 
-**Total Test Cases: ~105+**
+**Total Test Cases: ~175+** (including comprehensive video effects testing)
 
 ---
 
