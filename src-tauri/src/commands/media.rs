@@ -379,11 +379,17 @@ pub async fn transcribe_audio_local(
         args.push(format!("--prompt={}", p));
     }
 
+    eprintln!("🦀 [transcribe_audio_local] Executing command: uv {}", args.join(" "));
+
     // Call uv command to run our python script
     let output = Command::new("uv")
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to execute uv transcription: {}", e))?;
+
+    eprintln!("🦀 [transcribe_audio_local] Command completed with status: {}", output.status);
+
+    eprintln!("🦀 [transcribe_audio_local] Command completed with status: {}", output.status);
 
     // Delete the temporary audio file since transcription is completed (to prevent disk bloat)
     if let Err(e) = fs::remove_file(&audio_path) {
@@ -392,10 +398,15 @@ pub async fn transcribe_audio_local(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("🦀 [transcribe_audio_local] Transcription failed!");
+        eprintln!("  stdout: {}", stdout);
+        eprintln!("  stderr: {}", stderr);
         return Err(format!("Whisper transcription failed: {}", stderr));
     }
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
+    eprintln!("🦀 [transcribe_audio_local] Transcription successful, output length: {} bytes", stdout_str.len());
     Ok(stdout_str.trim().to_string())
 }
 
