@@ -40,9 +40,6 @@ pub async fn download_whisper_model(
     app: tauri::AppHandle,
     size: String,
 ) -> Result<(), String> {
-    use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
-    
     eprintln!("🦀 [download_whisper_model] Starting download for model: {}", size);
     
     // Get model URL

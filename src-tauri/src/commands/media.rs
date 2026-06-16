@@ -215,7 +215,6 @@ pub async fn extract_audio_artwork(path: String) -> Result<Option<String>, Strin
 #[tauri::command]
 pub async fn extract_audio_track(path: String) -> Result<String, String> {
     use std::process::Command;
-    use std::path::Path;
     use std::fs;
 
     eprintln!("🦀 [extract_audio_track] Extracting audio from: {}", path);
