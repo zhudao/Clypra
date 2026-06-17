@@ -72,40 +72,62 @@ export function EffectGrid({ searchQuery = "", onAddToTimeline }: EffectGridProp
   };
 
   const handlePreview = async (item: any) => {
+    console.log(`[EffectGrid:Preview] 👁️ Preview requested for: ${item.name} (${item.id})`);
+
     const itemId = item.id;
     const isDownloaded = downloadedEffects.includes(itemId);
 
-    if (downloadingIds.includes(itemId)) return;
+    if (downloadingIds.includes(itemId)) {
+      console.log(`[EffectGrid:Preview] ⏸️ Already downloading: ${item.id}`);
+      return;
+    }
 
     // Set the latest targeted preview ID immediately to track user intent and resolve race conditions
     useUIStore.getState().setPreviewMedia(itemId);
+    console.log(`[EffectGrid:Preview] 🎯 Set preview target: ${itemId}`);
 
     if (!isDownloaded) {
+      console.log(`[EffectGrid:Preview] 📥 Effect not downloaded, starting download: ${itemId}`);
       startDownload(itemId);
+    } else {
+      console.log(`[EffectGrid:Preview] ✅ Effect already downloaded: ${itemId}`);
     }
 
     try {
+      const startTime = performance.now();
+
       // Resolve the full effect configuration
       const fullEffect = useEffectsStore.getState().definitions[itemId] || (await TextEffectsApi.getFullEffect(item.category, itemId));
 
+      const loadTime = (performance.now() - startTime).toFixed(2);
+      console.log(`[EffectGrid:Preview] ✅ Effect loaded in ${loadTime}ms: ${itemId}`);
+
       // Mark as downloaded
       completeDownload(itemId, "effect");
+      console.log(`[EffectGrid:Preview] ✅ Marked as downloaded: ${itemId}`);
 
       // Only project to the preview player if this item is still the active preview target
       if (useUIStore.getState().previewMediaId === itemId) {
+        console.log(`[EffectGrid:Preview] 🎬 Sending to preview player: ${itemId}`);
+
         // Send directly to the main preview player — same as template preview flow
         useUIStore.getState().previewTextPreset(fullEffect, "effect");
 
         // Activate transport source context
         const session = getActiveSessionOrNull();
         session?.transportAuthority?.setActiveContext("source");
+
+        console.log(`[EffectGrid:Preview] ✅ Preview active for: ${itemId}`);
+      } else {
+        console.log(`[EffectGrid:Preview] ⚠️ Preview cancelled - target changed to: ${useUIStore.getState().previewMediaId}`);
       }
     } catch (e) {
-      console.error("[EffectGrid] Failed to push to main player:", e);
+      console.error(`[EffectGrid:Preview] ❌ Failed to load effect ${itemId}:`, e);
       cancelDownload(itemId);
 
       // Fallback: still preview with partial data if this item is still the active target
       if (useUIStore.getState().previewMediaId === itemId) {
+        console.log(`[EffectGrid:Preview] 🔄 Fallback preview with partial data: ${itemId}`);
         useUIStore.getState().previewTextPreset(item, "effect");
         const session = getActiveSessionOrNull();
         session?.transportAuthority?.setActiveContext("source");

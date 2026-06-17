@@ -296,13 +296,21 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
   },
 
   getDefinitionById: async (id, category) => {
+    console.log(`[EffectsStore:Cache] 🔍 Looking for effect: ${id}`);
+
     // 1. Check memory cache (Zustand state)
     const cached = get().definitions[id];
-    if (cached) return cached;
+    if (cached) {
+      console.log(`[EffectsStore:Cache] ✅ CACHE HIT (Memory) - Effect "${id}" loaded from in-memory cache`);
+      return cached;
+    }
+
+    console.log(`[EffectsStore:Cache] ⚠️ Cache miss (Memory) - Effect "${id}" not in memory`);
 
     // 2. Check built-in presets (bundled)
     const localPreset = builtInPresets.find((p) => p.id === id);
     if (localPreset) {
+      console.log(`[EffectsStore:Cache] ✅ CACHE HIT (Built-in) - Effect "${id}" found in built-in presets`);
       const def = convertConfigToDefinition(localPreset);
       set((state) => ({
         definitions: { ...state.definitions, [id]: def },
@@ -310,10 +318,13 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
       return def;
     }
 
+    console.log(`[EffectsStore:Cache] ⚠️ Cache miss (Built-in) - Effect "${id}" not in presets`);
+
     // 3. Check persistent cache (IndexedDB)
     const persistentCache = getTextEffectCache();
     const persistedDef = await persistentCache.get(id);
     if (persistedDef) {
+      console.log(`[EffectsStore:Cache] ✅ CACHE HIT (IndexedDB) - Effect "${id}" loaded from persistent storage`);
       // Populate memory cache
       set((state) => ({
         definitions: { ...state.definitions, [id]: persistedDef },
@@ -321,20 +332,30 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
       return persistedDef;
     }
 
+    console.log(`[EffectsStore:Cache] ⚠️ Cache miss (IndexedDB) - Effect "${id}" not in persistent storage`);
+    console.log(`[EffectsStore:Cache] 🌐 Fetching from API: ${id} (category: ${category})`);
+
     // 4. Fetch from API (last resort)
     const catKey = category.toLowerCase();
+    const startTime = performance.now();
     const res = await fetch(`${API_BASE}/text-effects/${catKey}/${id}`, {
       cache: "reload",
       headers: getApiHeaders(),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = (await res.json()) as EffectFullDefinition;
+    const fetchTime = (performance.now() - startTime).toFixed(2);
+
+    console.log(`[EffectsStore:Cache] ✅ API FETCH SUCCESS - Effect "${id}" downloaded in ${fetchTime}ms`);
+    console.log(`[EffectsStore:Cache] 💾 Caching effect "${id}" to memory + IndexedDB`);
 
     // Store in all cache layers
     set((state) => ({
       definitions: { ...state.definitions, [id]: data },
     }));
     await persistentCache.set(id, data); // Persist to disk
+
+    console.log(`[EffectsStore:Cache] ✅ CACHE SAVED - Effect "${id}" now available in all cache layers`);
 
     return data;
   },
@@ -343,13 +364,18 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
   // Called on card click
   // Shows spinner on card if definition not yet cached
   selectEffect: async (id, category) => {
+    console.log(`[EffectsStore:Select] 🎯 Selecting effect: ${id}`);
     const catKey = category.toLowerCase();
 
     // Show loading state on the clicked card
     set({ loadingId: id });
 
     try {
+      const startTime = performance.now();
       const data = await get().getDefinitionById(id, catKey);
+      const loadTime = (performance.now() - startTime).toFixed(2);
+
+      console.log(`[EffectsStore:Select] ✅ Effect loaded in ${loadTime}ms`);
 
       set({
         selectedEffect: data,
@@ -357,6 +383,7 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
         loadingId: null,
       });
     } catch (err) {
+      console.error(`[EffectsStore:Select] ❌ Failed to load effect ${id}:`, err);
       set({ loadingId: null });
     }
   },
@@ -365,16 +392,26 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
   // Called on 300ms hover hold — fire and forget, no loading state
   // Primes the cache so that selectEffect() is instant on click
   prefetchEffect: (id, category) => {
+    console.log(`[EffectsStore:Prefetch] 🔮 Prefetching effect: ${id}`);
     const catKey = category.toLowerCase();
     const state = get();
-    if (state.definitions[id]) return; // already cached
-    if (state.prefetchingIds.has(id)) return; // already in flight
+    if (state.definitions[id]) {
+      console.log(`[EffectsStore:Prefetch] ⏭️ Skipped - already cached: ${id}`);
+      return; // already cached
+    }
+    if (state.prefetchingIds.has(id)) {
+      console.log(`[EffectsStore:Prefetch] ⏭️ Skipped - already prefetching: ${id}`);
+      return; // already in flight
+    }
 
     set((s) => {
       const nextPrefetching = new Set(s.prefetchingIds);
       nextPrefetching.add(id);
       return { prefetchingIds: nextPrefetching };
     });
+
+    console.log(`[EffectsStore:Prefetch] 🌐 Starting background fetch: ${id}`);
+    const startTime = performance.now();
 
     fetch(`${API_BASE}/text-effects/${catKey}/${id}`, {
       cache: "reload",
@@ -385,6 +422,9 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
         return r.json();
       })
       .then((data: EffectFullDefinition) => {
+        const prefetchTime = (performance.now() - startTime).toFixed(2);
+        console.log(`[EffectsStore:Prefetch] ✅ Prefetch complete for ${id} in ${prefetchTime}ms`);
+
         set((s) => {
           const nextPrefetching = new Set(s.prefetchingIds);
           nextPrefetching.delete(id);
@@ -394,7 +434,8 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
           };
         });
       })
-      .catch(() => {
+      .catch((error) => {
+        console.error(`[EffectsStore:Prefetch] ❌ Prefetch failed for ${id}:`, error);
         set((s) => {
           const nextPrefetching = new Set(s.prefetchingIds);
           nextPrefetching.delete(id);
