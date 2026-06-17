@@ -194,5 +194,8 @@ export const createClipFromAsset = ({ asset, trackId, startTime, width, height, 
     aspectRatioLocked: true, // Lock aspect ratio by default for video/images
     sourceAspectRatio,
     fitMode: fitMode as Clip["fitMode"],
+    stickerFormat: asset.stickerFormat,
+    stickerAnimationPath: asset.stickerAnimationPath,
+    stickerSourceId: asset.stickerSourceId,
   };
 };

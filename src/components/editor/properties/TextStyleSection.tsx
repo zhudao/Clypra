@@ -9,6 +9,7 @@ import { PropertySlider } from "./primitives/PropertySlider";
 import { PropertySection } from "./primitives/PropertySection";
 import { useTemplateStore } from "@/features/text-templates/templateStore";
 import { useTimelineStore } from "@/store/timelineStore";
+import { useEffectsStore } from "@/features/text-effects/store/effectsStore";
 
 // Extracted font list for maintainability
 const SYSTEM_FONTS = [
@@ -92,6 +93,7 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
   const [applyToAll, setApplyToAll] = React.useState(false);
   const { templates } = useTemplateStore();
   const templateDef = templates.find((t) => t.id === textClip.templateId);
+  const effectFont = textClip.styleId ? useEffectsStore.getState().definitions[textClip.styleId]?.font : undefined;
 
   // Styling properties to batch-update across all caption clips on the same track
   const CAPTION_STYLE_KEYS = [
@@ -204,8 +206,12 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
   };
 
   // Resolve current font weight to a numeric value for the slider
-  const currentWeight = typeof textClip.fontWeight === "number" ? textClip.fontWeight : textClip.fontWeight === "bold" ? 700 : 400;
+  const effectiveFontWeight = textClip.fontWeight ?? effectFont?.weight;
+  const currentWeight = typeof effectiveFontWeight === "number" ? effectiveFontWeight : effectiveFontWeight === "bold" ? 700 : 400;
   const weightLabel = FONT_WEIGHTS.find((w) => w.value === currentWeight)?.label || "Regular";
+  const effectiveFontStyle = textClip.fontStyle || effectFont?.style || "normal";
+  const effectiveLetterSpacing = textClip.letterSpacing ?? effectFont?.letterSpacing ?? 0;
+  const effectiveLineHeight = textClip.lineHeight ?? effectFont?.lineHeight ?? 1.2;
 
   return (
     <div className="space-y-3">
@@ -349,7 +355,7 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
           {/* Font Family */}
           <div>
             <label className="text-[10px] font-medium text-text-muted block mb-1 select-none">Font Family</label>
-            <select value={normalizeFontFamily(textClip.fontFamily || "Inter Variable")} onChange={(e) => handleUpdate("fontFamily", e.target.value)} className="w-full bg-surface-raised border border-border/60 rounded-md px-2.5 py-1.5 text-xs text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent/20 cursor-pointer appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_8px_center] pr-7">
+            <select value={normalizeFontFamily(textClip.fontFamily || effectFont?.family || "Inter Variable")} onChange={(e) => handleUpdate("fontFamily", e.target.value)} className="w-full bg-surface-raised border border-border/60 rounded-md px-2.5 py-1.5 text-xs text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent/20 cursor-pointer appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_8px_center] pr-7">
               <optgroup label="System Fonts">
                 {SYSTEM_FONTS.map((f) => (
                   <option key={f.value} value={f.value}>
@@ -397,7 +403,7 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
             {/* Italic toggle */}
             <div className="space-y-1">
               <label className="text-[9px] text-text-muted block select-none">Style</label>
-              <button onClick={() => handleUpdate("fontStyle", textClip.fontStyle === "italic" ? "normal" : "italic")} className={`w-full py-1.5 rounded-md text-xs italic font-medium transition-all cursor-pointer border ${textClip.fontStyle === "italic" ? "bg-accent/15 text-accent border-accent/30" : "bg-surface-raised text-text-muted border-border/60 hover:text-text-primary hover:bg-white/[0.06]"}`}>
+              <button onClick={() => handleUpdate("fontStyle", effectiveFontStyle === "italic" ? "normal" : "italic")} className={`w-full py-1.5 rounded-md text-xs italic font-medium transition-all cursor-pointer border ${effectiveFontStyle === "italic" ? "bg-accent/15 text-accent border-accent/30" : "bg-surface-raised text-text-muted border-border/60 hover:text-text-primary hover:bg-white/[0.06]"}`}>
                 Italic
               </button>
             </div>
@@ -442,12 +448,12 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
 
             <div className="space-y-1">
               <label className="text-[9px] text-text-muted block select-none">Letter Spacing</label>
-              <input type="number" value={textClip.letterSpacing || 0} onChange={(e) => handleUpdate("letterSpacing", Number(e.target.value))} className="w-full bg-surface-raised border border-border/60 rounded-md py-1.5 px-2 text-center text-xs text-text-primary outline-none focus:border-accent tabular-nums selectable" />
+              <input type="number" value={effectiveLetterSpacing} onChange={(e) => handleUpdate("letterSpacing", Number(e.target.value))} className="w-full bg-surface-raised border border-border/60 rounded-md py-1.5 px-2 text-center text-xs text-text-primary outline-none focus:border-accent tabular-nums selectable" />
             </div>
           </div>
 
           {/* Line Height — was missing from UI! */}
-          <PropertySlider label="Line Height" value={textClip.lineHeight ?? 1.2} min={0.5} max={3.0} step={0.1} onChange={(v) => handleUpdate("lineHeight", v)} />
+          <PropertySlider label="Line Height" value={effectiveLineHeight} min={0.5} max={3.0} step={0.1} onChange={(v) => handleUpdate("lineHeight", v)} />
         </div>
       </PropertySection>
 

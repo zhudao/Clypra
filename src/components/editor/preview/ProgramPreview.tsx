@@ -122,6 +122,11 @@ export const ProgramPreview: React.FC = () => {
   // 4. REF DECLARATIONS (useRef)
   // =========================================================================
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+  const previewContainerRef = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    setContainerEl(node);
+  }, []);
   const [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
   const canvasRef = useCallback((node: HTMLCanvasElement | null) => {
     setCanvasEl(node);
@@ -327,10 +332,11 @@ export const ProgramPreview: React.FC = () => {
   }, [qualityMenuOpen]);
 
   useEffect(() => {
+    if (!containerEl) return;
+
     const updateDimensions = () => {
-      if (!containerRef.current) return;
-      const newWidth = containerRef.current.clientWidth;
-      const newHeight = containerRef.current.clientHeight;
+      const newWidth = containerEl.clientWidth;
+      const newHeight = containerEl.clientHeight;
 
       // Only update if dimensions actually changed (avoid unnecessary re-renders)
       setDimensions((prev) => {
@@ -345,7 +351,8 @@ export const ProgramPreview: React.FC = () => {
       setTimeout(updateDimensions, 100);
       setTimeout(updateDimensions, 300);
     };
-    if (containerRef.current) resizeObserver.observe(containerRef.current);
+    resizeObserver.observe(containerEl);
+    updateDimensions();
     window.addEventListener("resize", updateDimensions);
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
@@ -355,7 +362,7 @@ export const ProgramPreview: React.FC = () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
       document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
     };
-  }, []);
+  }, [containerEl]);
 
   useEffect(() => {
     if (!project) return;
@@ -613,7 +620,7 @@ export const ProgramPreview: React.FC = () => {
     return (
       <div className="flex-1 bg-bg flex flex-col min-h-0 rounded-tl-xl border-l border-t border-white/3">
         <div className="flex-1 flex items-center justify-center p-4 md:p-6 overflow-hidden relative bg-[#06080a]">
-          <div ref={containerRef} className="w-full h-full flex items-center justify-center">
+          <div ref={previewContainerRef} className="w-full h-full flex items-center justify-center">
             <div className="text-text-muted">Loading preview...</div>
           </div>
         </div>
@@ -643,7 +650,7 @@ export const ProgramPreview: React.FC = () => {
 
       {/* ── Video Area ─────────────────────────────────────────────── */}
       <div className="flex-1 flex items-center justify-center overflow-hidden bg-[#06080a] relative">
-        <div ref={containerRef} onPointerDownCapture={handlePreviewPointerDownCapture} className={cn("w-full h-full flex items-center justify-center relative z-10 overflow-hidden", isPanning && "cursor-grabbing", spacePressed && !isPanning && "cursor-grab")}>
+        <div ref={previewContainerRef} onPointerDownCapture={handlePreviewPointerDownCapture} className={cn("w-full h-full flex items-center justify-center relative z-10 overflow-hidden", isPanning && "cursor-grabbing", spacePressed && !isPanning && "cursor-grab")}>
           <div data-testid="program-preview-viewport" className="relative flex shrink-0 items-center justify-center overflow-hidden shadow-[0_0_40px_rgba(0,0,0,0.36)]" style={{ width: displayWidth, height: displayHeight }}>
             <>
               {/* Canvas-based preview (matches export rendering) */}

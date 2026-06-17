@@ -178,7 +178,9 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
         startTime: relativeStartTime,
         duration: relativeDuration,
         trimIn: relativeTrimIn,
-        volume: clip.volume ?? 1.0,
+        volume: Math.max(0, Math.min(1, clip.volume ?? 1.0)),
+        fadeIn: Math.max(0, Math.min(relativeDuration, (clip as any).fadeIn ?? 0)),
+        fadeOut: Math.max(0, Math.min(relativeDuration, (clip as any).fadeOut ?? 0)),
       };
     });
 

@@ -62,6 +62,9 @@ export interface RustMediaAsset {
   coverArt?: string;
   size: number;
   rotation?: number;
+  stickerFormat?: "static" | "gif" | "lottie";
+  stickerAnimationPath?: string;
+  stickerSourceId?: string;
   contentBounds?: {
     x: number;
     y: number;
@@ -177,6 +180,9 @@ export function fromRustMediaAsset(rust: RustMediaAsset): MediaAsset {
     size: rust.size,
     rotation: rust.rotation,
     contentBounds: rust.contentBounds,
+    stickerFormat: rust.stickerFormat,
+    stickerAnimationPath: rust.stickerAnimationPath,
+    stickerSourceId: rust.stickerSourceId,
   };
 }
 
@@ -334,6 +340,9 @@ export function toRustMediaAsset(frontend: MediaAsset): RustMediaAsset {
     size: frontend.size,
     rotation: frontend.rotation,
     contentBounds: frontend.contentBounds,
+    stickerFormat: frontend.stickerFormat,
+    stickerAnimationPath: frontend.stickerAnimationPath,
+    stickerSourceId: frontend.stickerSourceId,
   };
 }
 

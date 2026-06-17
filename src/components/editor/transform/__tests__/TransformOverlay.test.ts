@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldScaleTextFontForHandle } from "../TransformOverlay";
+import { isClipActiveAtTime, shouldScaleTextFontForHandle } from "../TransformOverlay";
 import type { TransformHandle } from "@/types";
 
 describe("TransformOverlay resize policy", () => {
@@ -17,5 +17,16 @@ describe("TransformOverlay resize policy", () => {
     for (const handle of cornerHandles) {
       expect(shouldScaleTextFontForHandle(handle)).toBe(true);
     }
+  });
+});
+
+describe("TransformOverlay visibility policy", () => {
+  it("shows selected handles only while the selected clip is active at the playhead", () => {
+    const clip = { startTime: 3, duration: 5 };
+
+    expect(isClipActiveAtTime(clip, 2.999)).toBe(false);
+    expect(isClipActiveAtTime(clip, 3)).toBe(true);
+    expect(isClipActiveAtTime(clip, 7.999)).toBe(true);
+    expect(isClipActiveAtTime(clip, 8)).toBe(false);
   });
 });

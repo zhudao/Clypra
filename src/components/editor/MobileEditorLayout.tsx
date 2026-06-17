@@ -23,12 +23,13 @@ import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibrar
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useStickersStore } from "@/features/stickers/store/stickersStore";
 import { filterCacheManager } from "@/features/filters/cache/filterCache";
+import { AddClipCommand } from "@/core/history/commands/DeleteClipCommand";
 
 export const MobileEditorLayout: React.FC = () => {
   const { tracks, clips, addClip, addTrack, insertTrackAt, getTimelineEndTime, createTransitionBetweenClips } = useTimelineStore();
   const { mediaAssets, project, updateProject, addMediaAsset } = useProjectStore();
   const { selectedClipIds } = useUIStore();
-  const { undo, redo, state: historyState } = useHistoryStore();
+  const { undo, redo, state: historyState, execute } = useHistoryStore();
   const { importMedia, isLoading: isImporting } = useMediaImport();
   const { getCachedFile } = useAudioLibraryStore();
 
@@ -142,6 +143,7 @@ export const MobileEditorLayout: React.FC = () => {
         shadow: item.shadow,
         background: item.background,
         styleId: item.styleId,
+        effectDefinition: item.effectDefinition,
         templateId: item.templateId,
         customization: item.customization,
       });
@@ -231,6 +233,7 @@ export const MobileEditorLayout: React.FC = () => {
         }
 
         const absolutePath = await join(appCache, relativePath);
+        const absoluteAnimationPath = cachedSticker.localAnimationPath ? await join(appCache, cachedSticker.localAnimationPath) : undefined;
 
         const mediaAsset: MediaAsset = {
           id: `sticker-${item.id}`,
@@ -239,6 +242,9 @@ export const MobileEditorLayout: React.FC = () => {
           type: "image",
           duration: 3.0,
           size: 0,
+          stickerFormat: cachedSticker.format,
+          stickerAnimationPath: absoluteAnimationPath,
+          stickerSourceId: item.id,
         };
 
         addMediaAsset(mediaAsset);
@@ -261,16 +267,15 @@ export const MobileEditorLayout: React.FC = () => {
 
         if (!targetTrackId) return;
 
-        addClip(
-          createClipFromAsset({
-            asset: mediaAsset,
-            trackId: targetTrackId,
-            startTime: placement.startTime,
-            width: project?.canvasWidth || 1920,
-            height: project?.canvasHeight || 1080,
-            fitMode: resolveDefaultFitModeForAsset(mediaAsset),
-          }),
-        );
+        const stickerClip = createClipFromAsset({
+          asset: mediaAsset,
+          trackId: targetTrackId,
+          startTime: placement.startTime,
+          width: project?.canvasWidth || 1920,
+          height: project?.canvasHeight || 1080,
+          fitMode: resolveDefaultFitModeForAsset(mediaAsset),
+        });
+        execute(new AddClipCommand(stickerClip));
       })().catch((error) => {
         console.error("[MobileEditorLayout] Failed to add sticker to timeline:", error);
       });

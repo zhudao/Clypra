@@ -116,6 +116,12 @@ export interface MediaAsset {
   size: number;
   /** Source media rotation from container metadata (0, 90, 180, 270) */
   rotation?: number;
+  /** Sticker source format when this media asset represents a sticker. */
+  stickerFormat?: "static" | "gif" | "lottie";
+  /** Local cached animation source path for animated stickers. */
+  stickerAnimationPath?: string;
+  /** Stable sticker library id used to recover cached metadata. */
+  stickerSourceId?: string;
 }
 
 export type ClipKind = "video" | "audio" | "image" | "sticker" | "text" | "filter" | "video-effect" | "body-effect" | "animated-overlay";
@@ -153,6 +159,9 @@ export interface Clip {
     name: string;
     intensity: number; // 0.0 to 1.0
   };
+  stickerFormat?: "static" | "gif" | "lottie";
+  stickerAnimationPath?: string;
+  stickerSourceId?: string;
 }
 
 /** Video overlay applied to a clip (actual video file) */

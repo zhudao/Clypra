@@ -54,4 +54,13 @@ describe("buildClipPropertyTransform", () => {
     expect(newCenterX).toBeCloseTo(oldCenterX);
     expect(newCenterY).toBeCloseTo(oldCenterY);
   });
+
+  it("keeps duration synchronized when trim points change through properties", () => {
+    const { oldTransform, newTransform } = buildClipPropertyTransform(baseTextClip, { trimIn: 1.25 }, 640, 960);
+
+    expect(oldTransform.trimIn).toBe(0);
+    expect(oldTransform.duration).toBe(5);
+    expect(newTransform.trimIn).toBe(1.25);
+    expect(newTransform.duration).toBe(3.75);
+  });
 });

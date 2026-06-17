@@ -1,7 +1,5 @@
 import React, { useState } from "react";
-import { Type, Layout, Sparkles, Film, Music, Image, FileText, Clock, Shuffle, Smile, Filter } from "lucide-react";
-import { PropertySection } from "./properties/primitives/PropertySection";
-import { PropertySlider } from "./properties/primitives/PropertySlider";
+import { Type, Layout, Sparkles, Film, Music, Image, FileText, Clock, Shuffle, Smile } from "lucide-react";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useProjectStore } from "@/store/projectStore";
@@ -20,6 +18,7 @@ import { TextAnimationControls } from "./properties/TextAnimationControls";
 import { EffectsFiltersSection } from "./properties/EffectsFiltersSection";
 import { TransitionSection } from "./properties/TransitionSection";
 import { StickerSettingsSection } from "./properties/StickerSettingsSection";
+import { TimelineEffectSection } from "./properties/TimelineEffectSection";
 
 const TEXT_BOUNDS_STYLE_KEYS: (keyof TextClip)[] = ["text", "fontSize", "fontFamily", "fontWeight", "fontStyle", "styleId", "stroke", "shadow", "background", "letterSpacing", "lineHeight"];
 const MANUAL_BOUNDS_KEYS: (keyof Clip)[] = ["x", "y", "width", "height"];
@@ -32,6 +31,15 @@ export function shouldRecalculateTextBoundsForPropertyUpdate(updates: Record<str
 
 export function buildClipPropertyTransform(clip: Clip, updates: Record<string, unknown>, canvasWidth: number, canvasHeight: number): { oldTransform: Record<string, unknown>; newTransform: Record<string, unknown> } {
   let newTransform = { ...updates };
+
+  if ("trimIn" in newTransform || "trimOut" in newTransform) {
+    const nextTrimIn = typeof newTransform.trimIn === "number" && Number.isFinite(newTransform.trimIn) ? newTransform.trimIn : clip.trimIn;
+    const nextTrimOut = typeof newTransform.trimOut === "number" && Number.isFinite(newTransform.trimOut) ? newTransform.trimOut : clip.trimOut;
+    newTransform = {
+      ...newTransform,
+      duration: Math.max(0, nextTrimOut - nextTrimIn),
+    };
+  }
 
   if ("text" in clip && shouldRecalculateTextBoundsForPropertyUpdate(updates)) {
     const recalculated = recalculateTextClipBounds(clip as TextClip, updates as Partial<TextClip>, canvasWidth, canvasHeight);
@@ -53,10 +61,13 @@ export function buildClipPropertyTransform(clip: Clip, updates: Record<string, u
 }
 
 /** Clip type display info */
-function getClipTypeInfo(assetType: string | undefined, isText: boolean, isSticker?: boolean, isFilter?: boolean) {
+function getClipTypeInfo(assetType: string | undefined, clipKind: Clip["kind"] | undefined, isText: boolean, isSticker?: boolean) {
   if (isText) return { icon: FileText, label: "Text", color: "text-purple-400" };
   if (isSticker) return { icon: Smile, label: "Sticker", color: "text-pink-400" };
-  if (isFilter) return { icon: Sparkles, label: "Filter", color: "text-violet-400" };
+  if (clipKind === "filter") return { icon: Sparkles, label: "Filter", color: "text-violet-400" };
+  if (clipKind === "video-effect") return { icon: Sparkles, label: "Video Effect", color: "text-violet-400" };
+  if (clipKind === "body-effect") return { icon: Sparkles, label: "Body Effect", color: "text-violet-400" };
+  if (clipKind === "animated-overlay") return { icon: Sparkles, label: "Animated Overlay", color: "text-violet-400" };
   switch (assetType) {
     case "video":
       return { icon: Film, label: "Video", color: "text-blue-400" };
@@ -193,11 +204,12 @@ export const PropertiesPanel: React.FC = () => {
 
   const isSticker = selectedClip?.kind === "sticker" || selectedClip?.mediaId.startsWith("sticker-");
   const isFilter = selectedClip?.kind === "filter" || selectedClip?.id.startsWith("filter-clip-");
+  const isTimelineEffectClip = isFilter || selectedClip?.kind === "video-effect" || selectedClip?.kind === "body-effect";
 
   // Clip type info for the header
-  const typeInfo = getClipTypeInfo(selectedAsset?.type, !!isTextClip, isSticker, isFilter);
+  const typeInfo = getClipTypeInfo(selectedAsset?.type, selectedClip.kind, !!isTextClip, isSticker);
   const TypeIcon = typeInfo.icon;
-  const clipName = isTextClip ? (textClip.text || "Text").slice(0, 24) : isFilter ? (selectedClip.name || "Filter") : selectedAsset?.name || "Clip";
+  const clipName = isTextClip ? (textClip.text || "Text").slice(0, 24) : isTimelineEffectClip ? (selectedClip.name || typeInfo.label) : selectedAsset?.name || "Clip";
   const clipDuration = selectedClip.duration.toFixed(1);
 
   return (
@@ -255,37 +267,13 @@ export const PropertiesPanel: React.FC = () => {
         {isTextClip && activePropertyTab === "animation" && <TextAnimationControls clip={textClip} handleUpdate={handleUpdate} handleUpdateMultiple={handleUpdateMultiple} />}
 
         {/* Transform (visual clips, or text clips on transform tab) */}
-        {(isVisualClip || (isTextClip && activePropertyTab === "transform")) && <TransformSection selectedClip={selectedClip} isVisualClip={isVisualClip} handleUpdate={handleUpdate} handleApplyFit={handleApplyFit} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
+        {(isVisualClip || (isTextClip && activePropertyTab === "transform")) && <TransformSection selectedClip={selectedClip} isVisualClip={isVisualClip} handleUpdate={handleUpdate} handleUpdateMultiple={handleUpdateMultiple} handleApplyFit={handleApplyFit} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
 
         {/* Effects and Filters */}
         {isVisualClip && <EffectsFiltersSection selectedClip={selectedClip} handleUpdate={handleUpdate} />}
 
-        {/* Filter Clip Settings */}
-        {isFilter && (
-          <PropertySection title="Filter Settings" icon={<Filter className="w-3.5 h-3.5 text-accent-soft" />}>
-            <div className="space-y-3">
-              <div className="flex items-center justify-between bg-surface-raised/40 border border-border/30 rounded-lg p-2.5">
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-semibold text-text-primary truncate">
-                    {selectedClip.name}
-                  </p>
-                  <p className="text-[10px] text-text-muted mt-0.5">Timeline Filter</p>
-                </div>
-              </div>
-
-              <PropertySlider
-                label="Intensity"
-                value={Math.round(((selectedClip as any).intensity ?? 0.8) * 100)}
-                min={0}
-                max={100}
-                step={1}
-                suffix="%"
-                onChange={(val) => handleUpdate("intensity", val / 100)}
-                compact
-              />
-            </div>
-          </PropertySection>
-        )}
+        {/* Timeline filter/effect clips */}
+        {isTimelineEffectClip && <TimelineEffectSection selectedClip={selectedClip} handleUpdate={handleUpdate} />}
       </div>
     </div>
   );

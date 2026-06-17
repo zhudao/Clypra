@@ -33,6 +33,11 @@ export function shouldScaleTextFontForHandle(handle: TransformHandle): boolean {
   return handle === "nw" || handle === "ne" || handle === "sw" || handle === "se";
 }
 
+export function isClipActiveAtTime(clip: { startTime: number; duration: number }, time: number): boolean {
+  const end = clip.startTime + clip.duration;
+  return clip.startTime <= time && time < end;
+}
+
 /**
  * Map cursor string to CSS class for Tauri compatibility.
  * Tauri desktop apps have issues with inline cursor styles, so we use CSS classes instead.
@@ -466,7 +471,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
   }, []);
 
   // Convert clip bounds to screen coordinates for handle rendering
-  if (!selectedClip) {
+  if (!selectedClip || !isClipActiveAtTime(selectedClip, currentTime)) {
     return (
       <div
         ref={overlayRef}

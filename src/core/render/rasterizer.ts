@@ -26,6 +26,7 @@ import { effectBleed } from "../../lib/text/textClip";
 import lottie from "lottie-web";
 import { useStickersStore } from "../../features/stickers/store/stickersStore";
 import { segmentBodyMask } from "../../features/body-effects/segmentation/bodySegmentationWorkerClient";
+import { sampleCanvasAlpha, textRenderTrace, textRenderWarn } from "@/lib/debug/textRenderTrace";
 
 interface LottieAnimationCacheEntry {
   anim: any;
@@ -363,14 +364,17 @@ const VIDEO_WARN_INTERVAL_MS = 5000;
 async function rasterizeMediaLayer(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, layer: EvaluatedMediaLayer, width: number, height: number, target: RasterTarget): Promise<void> {
   try {
     if (layer.clipKind === "sticker") {
-      const stickerId = layer.mediaId.replace("sticker-", "");
+      const stickerId = layer.stickerSourceId || layer.mediaId.replace("sticker-", "");
       let cachedSticker = useStickersStore.getState().getCachedSticker(stickerId);
       if (!cachedSticker) {
         await useStickersStore.getState().initializeCache();
         cachedSticker = useStickersStore.getState().getCachedSticker(stickerId);
       }
 
-      if (cachedSticker && cachedSticker.format === "lottie") {
+      const stickerFormat = cachedSticker?.format ?? layer.stickerFormat;
+      const lottieSourcePath = cachedSticker?.localAnimationPath ?? layer.stickerAnimationPath;
+
+      if (stickerFormat === "lottie" && lottieSourcePath) {
         let cacheEntry = lottieRenderCache.get(layer.clipId);
 
         if (!cacheEntry || cacheEntry.stickerId !== stickerId) {
@@ -381,9 +385,12 @@ async function rasterizeMediaLayer(ctx: CanvasRenderingContext2D | OffscreenCanv
 
           try {
             const { stickerCacheManager } = await import("@/features/stickers/cache/stickerCache");
-            const { appCacheDir, join } = await import("@tauri-apps/api/path");
-            const appCache = await appCacheDir();
-            const absoluteLottiePath = await join(appCache, cachedSticker.localAnimationPath!);
+            let absoluteLottiePath = lottieSourcePath;
+            if (!absoluteLottiePath.startsWith("/") && !absoluteLottiePath.startsWith("file:") && !absoluteLottiePath.startsWith("asset://")) {
+              const { appCacheDir, join } = await import("@tauri-apps/api/path");
+              const appCache = await appCacheDir();
+              absoluteLottiePath = await join(appCache, absoluteLottiePath);
+            }
 
             const lottieData = await stickerCacheManager.readLottieJson(absoluteLottiePath);
 
@@ -1102,7 +1109,7 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
 
   // fontSize for rendering: scaled to match the layer's on-canvas pixel size.
   const fontSize = layer.fontSize * scaleY;
-  const effectDef = layer.styleId ? useEffectsStore.getState().definitions[layer.styleId] : undefined;
+  const effectDef = layer.styleId ? useEffectsStore.getState().definitions[layer.styleId] ?? layer.styleDefinition : layer.styleDefinition;
   const declaredBleed = effectBleed({
     styleId: layer.styleId,
     effectDefinition: effectDef,
@@ -1120,6 +1127,22 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
   const effectPaddingY = Math.max(fontSize * 0.25, declaredBleed.y * scaleY);
   const offW = Math.max(1, Math.ceil(width + effectPaddingX * 2));
   const offH = Math.max(1, Math.ceil(height + effectPaddingY * 2));
+
+  textRenderTrace("rasterize-text-start", {
+    clipId: layer.clipId,
+    layerId: layer.layerId,
+    text: layer.text,
+    styleId: layer.styleId,
+    hasLayerStyleDefinition: !!layer.styleDefinition,
+    hasStoreDefinition: !!(layer.styleId && useEffectsStore.getState().definitions[layer.styleId]),
+    resolvedDefinitionId: effectDef?.id,
+    targetBox: { width, height, scaleX, scaleY },
+    layerBox: { x: layer.x, y: layer.y, width: layer.width, height: layer.height, opacity: layer.opacity },
+    fontSize,
+    bleed: declaredBleed,
+    padding: { x: effectPaddingX, y: effectPaddingY },
+    offscreen: { width: offW, height: offH },
+  });
 
   let engineConfig: TextEffectConfig;
 
@@ -1213,7 +1236,23 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
     } as any;
   }
 
-  console.log("[Rasterizer:Text] 🎬 Rendering timeline text layer using config:", engineConfig);
+  textRenderTrace("rasterize-text-config", {
+    clipId: layer.clipId,
+    styleId: layer.styleId,
+    text: engineConfig.text,
+    fontFamily: engineConfig.fontFamily,
+    fontSize: engineConfig.fontSize,
+    fontWeight: engineConfig.fontWeight,
+    fontStyle: engineConfig.fontStyle,
+    canvasWidth: engineConfig.canvasWidth,
+    canvasHeight: engineConfig.canvasHeight,
+    textPosX: (engineConfig as any).textPosX,
+    textPosY: (engineConfig as any).textPosY,
+    fillType: (engineConfig as any).fillType,
+    strokeEnabled: (engineConfig as any).strokeEnabled,
+    glowLayers: (engineConfig as any).glowLayers,
+    panelEnabled: (engineConfig as any).panelEnabled,
+  });
   const sceneDoc = textEffectConfigToScene(engineConfig);
 
   // Acquire canvas context from the unified CanvasDevice pool
@@ -1223,10 +1262,27 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
     if (typeof offCtx.setTransform === "function") {
       offCtx.setTransform(1, 0, 0, 1, 0, 0);
     }
-    offCtx.clearRect(0, 0, offW, offH);
-    engineEvaluateScene(sceneDoc, layer.time ?? 0, offCtx as unknown as CanvasRenderingContext2D);
-    ctx.drawImage(offscreen, 0, 0, offW, offH, -width / 2 - effectPaddingX, -height / 2 - effectPaddingY, offW, offH);
-  }
+	    offCtx.clearRect(0, 0, offW, offH);
+	    engineEvaluateScene(sceneDoc, layer.time ?? 0, offCtx as unknown as CanvasRenderingContext2D);
+    const alpha = sampleCanvasAlpha(offCtx, offW, offH);
+    textRenderTrace("rasterize-text-alpha", {
+      clipId: layer.clipId,
+      styleId: layer.styleId,
+      alpha,
+    });
+    if (alpha && alpha.visiblePixels === 0) {
+      textRenderWarn("rasterize-text-blank-offscreen", {
+        clipId: layer.clipId,
+        styleId: layer.styleId,
+        text: layer.text,
+        fontFamily: engineConfig.fontFamily,
+        fontSize: engineConfig.fontSize,
+        offscreen: { width: offW, height: offH },
+        hasEffectDef: !!effectDef,
+      });
+    }
+	    ctx.drawImage(offscreen, 0, 0, offW, offH, -width / 2 - effectPaddingX, -height / 2 - effectPaddingY, offW, offH);
+	  }
   CanvasDevice.release(offscreen);
 }
 

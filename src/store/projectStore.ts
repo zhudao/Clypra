@@ -28,6 +28,7 @@ import type { Project, MediaAsset, TransitionTimelineItem } from "@/types";
 import { MAX_PROJECT_NAME_LENGTH } from "@/types";
 import { toRustProject } from "@/types/serialization";
 import { generateId } from "@/lib/utils/id";
+import { convertRawConfigToDefinition } from "@/features/text-effects/lib/definitionConversion";
 import { useSettingsStore } from "./settingsStore";
 // import { TIMELINE_PPS_PER_ZOOM, TIMELINE_ZOOM_DEFAULT } from "@/lib/timelineZoom";
 
@@ -104,7 +105,7 @@ async function preloadTextEffectDefinitionsFromClips(clips: any[] | undefined): 
       useEffectsStore.setState((state) => {
         const definitions = { ...state.definitions };
         for (const definition of embeddedDefinitions) {
-          definitions[definition.id] = definition;
+          definitions[definition.id] = convertRawConfigToDefinition(definition);
         }
         return { definitions };
       });

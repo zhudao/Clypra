@@ -9,21 +9,26 @@ interface TimelineWaveformProps {
   audioPath: string;
   clipWidthPx: number;
   duration: number;
+  trimIn?: number;
+  trimOut?: number;
   className?: string;
 }
 
 const waveformCache = new Map<string, WaveformBucket[]>();
 
-export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, clipWidthPx, duration, className = "" }) => {
+export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, clipWidthPx, duration, trimIn = 0, trimOut, className = "" }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [waveformData, setWaveformData] = useState<WaveformBucket[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
   const [themeRevision, setThemeRevision] = useState(0);
 
   // Calculate optimal sample count based on clip width
   // Professional NLE behavior: more zoom = more detail
   const validClipWidth = typeof clipWidthPx === "number" && !isNaN(clipWidthPx) ? clipWidthPx : 300;
   const sampleCount = Math.min(Math.max(Math.floor(validClipWidth / 1.5), 200), 2000);
+  const sourceStart = Math.max(0, Number.isFinite(trimIn) ? trimIn : 0);
+  const sourceDuration = Math.max(0, Math.min(duration, (Number.isFinite(trimOut) ? trimOut! : sourceStart + duration) - sourceStart));
 
   // Watch for theme changes on document element and trigger redraw
   useEffect(() => {
@@ -42,11 +47,12 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
     const resolvedPath = audioPath.startsWith("asset://") ? audioPath : platform.convertFileSrc(audioPath);
 
     // Create cache key that includes sample count for zoom-responsive caching
-    const cacheKey = `${resolvedPath}:${sampleCount}`;
+    const cacheKey = `${resolvedPath}:${sourceStart.toFixed(3)}:${sourceDuration.toFixed(3)}:${sampleCount}`;
 
     // Check cache first
     if (waveformCache.has(cacheKey)) {
       setWaveformData(waveformCache.get(cacheKey)!);
+      setHasError(false);
       setIsLoading(false);
       return;
     }
@@ -56,6 +62,7 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
     const generateWaveform = async () => {
       try {
         setIsLoading(true);
+        setHasError(false);
 
         // Try Rust backend first (professional peak + RMS extraction)
         try {
@@ -65,6 +72,8 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
           const buckets = await invoke<WaveformBucket[]>("extract_waveform_data", {
             path: filePath,
             numBuckets: sampleCount,
+            startTime: sourceStart,
+            duration: sourceDuration || duration,
           });
 
           if (!isCancelled && buckets && buckets.length > 0) {
@@ -91,8 +100,11 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
         }
 
         const channelData = audioBuffer.getChannelData(0);
+        const startSample = Math.max(0, Math.floor(sourceStart * audioBuffer.sampleRate));
+        const endSample = Math.max(startSample + 1, Math.min(channelData.length, Math.floor((sourceStart + (sourceDuration || duration)) * audioBuffer.sampleRate)));
+        const visibleChannelData = channelData.subarray(startSample, endSample);
         const samples = sampleCount;
-        const blockSize = Math.floor(channelData.length / samples);
+        const blockSize = Math.max(1, Math.floor(visibleChannelData.length / samples));
         const rmsOnly: number[] = [];
 
         // Calculate RMS for each block
@@ -100,8 +112,8 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
           const start = i * blockSize;
           const end = start + blockSize;
           let sum = 0;
-          for (let j = start; j < end && j < channelData.length; j++) {
-            sum += channelData[j] * channelData[j];
+          for (let j = start; j < end && j < visibleChannelData.length; j++) {
+            sum += visibleChannelData[j] * visibleChannelData[j];
           }
           const rms = Math.sqrt(sum / blockSize);
           rmsOnly.push(rms);
@@ -122,18 +134,9 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
         audioContext.close();
       } catch (error) {
         console.error("[TimelineWaveform] Failed to generate waveform:", error);
-        // Generate fallback pattern with peak + RMS
         if (!isCancelled) {
-          const fallback: WaveformBucket[] = Array.from({ length: sampleCount }, (_, i) => {
-            const seed = Math.sin(i * 0.15) * 0.5 + 0.5;
-            const rms = seed * (0.3 + Math.random() * 0.7);
-            return {
-              rms,
-              peak: Math.min(1.0, rms / 0.85),
-            };
-          });
-          waveformCache.set(cacheKey, fallback);
-          setWaveformData(fallback);
+          setWaveformData([]);
+          setHasError(true);
           setIsLoading(false);
         }
       }
@@ -144,7 +147,7 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
     return () => {
       isCancelled = true;
     };
-  }, [audioPath, sampleCount]);
+  }, [audioPath, duration, sampleCount, sourceDuration, sourceStart]);
 
   // Draw professional waveform on canvas
   useEffect(() => {
@@ -167,6 +170,10 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
     // Use professional dense bar renderer with logical dimensions
     drawProfessionalWaveform(canvas, waveformData, color, rect.width, rect.height);
   }, [waveformData, themeRevision]);
+
+  if (hasError) {
+    return <div className={`w-full h-full rounded-[2px] border border-border/30 bg-surface-raised/30 ${className}`} title="Waveform unavailable" />;
+  }
 
   return (
     <canvas

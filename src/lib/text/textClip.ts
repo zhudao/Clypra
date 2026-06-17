@@ -8,6 +8,7 @@ import type { TextClip } from "../../types";
 import type { TextEffectDefinition } from "@clypra/engine";
 import { generateId } from "../utils/id";
 import { useEffectsStore } from "../../features/text-effects/store/effectsStore";
+import { textRenderTrace } from "@/lib/debug/textRenderTrace";
 
 export interface CreateTextClipOptions {
   /** Track ID to place the clip on */
@@ -31,6 +32,12 @@ export interface CreateTextClipOptions {
 
   /** Font family */
   fontFamily?: string;
+
+  /** Font line height multiplier */
+  lineHeight?: number;
+
+  /** Letter spacing in pixels */
+  letterSpacing?: number;
 
   /** Text color */
   color?: string;
@@ -148,12 +155,24 @@ export function calculateTextClipSize(options: { text: string; fontFamily: strin
   return { width, height, bleed, measuredWidth };
 }
 
+function resolveTextEffectDefinition(styleId?: string, effectDefinition?: TextEffectDefinition): TextEffectDefinition | undefined {
+  if (effectDefinition) return effectDefinition;
+  if (!styleId) return undefined;
+  return useEffectsStore.getState().definitions[styleId] as TextEffectDefinition | undefined;
+}
+
 /**
  * Create a text clip with sensible defaults.
  */
 export function createTextClip(options: CreateTextClipOptions): TextClip {
   const defaultFontSize = options.styleId ? 96 : 100;
-  const { trackId, startTime, duration = 5.0, text = "Text", canvasWidth, canvasHeight, fontSize = defaultFontSize, fontFamily = "Inter, system-ui, sans-serif", color = "#ffffff", bold = false, italic = false, position = "center", textRole, words, styleId, templateId, customization, fontWeight, fontStyle, stroke, shadow, background, effectDefinition } = options;
+  const { trackId, startTime, duration = 5.0, text = "Text", canvasWidth, canvasHeight, fontSize = defaultFontSize, color = "#ffffff", bold = false, italic = false, position = "center", textRole, words, styleId, templateId, customization, stroke, shadow, background, effectDefinition } = options;
+  const resolvedEffectDefinition = resolveTextEffectDefinition(styleId, effectDefinition);
+  const fontFamily = options.fontFamily ?? resolvedEffectDefinition?.font?.family ?? "Inter, system-ui, sans-serif";
+  const fontWeight = options.fontWeight ?? resolvedEffectDefinition?.font?.weight;
+  const fontStyle = options.fontStyle ?? resolvedEffectDefinition?.font?.style;
+  const lineHeight = options.lineHeight ?? resolvedEffectDefinition?.font?.lineHeight ?? 1.2;
+  const letterSpacing = options.letterSpacing ?? resolvedEffectDefinition?.font?.letterSpacing ?? 0;
 
   const sizing = calculateTextClipSize({
     text,
@@ -162,7 +181,7 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     bold,
     fontWeight,
     styleId,
-    effectDefinition,
+    effectDefinition: resolvedEffectDefinition,
     stroke,
     shadow,
     background,
@@ -172,7 +191,7 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
   // Calculate position based on preset using the dynamic box sizes
   const { x, y, width, height } = calculateTextPosition(position, canvasWidth, canvasHeight, sizing.width, sizing.height);
 
-  return {
+  const clip: TextClip = {
     id: generateId("text-clip"),
     kind: "text",
     trackId,
@@ -196,19 +215,42 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     fontStyle: fontStyle || (italic ? "italic" : "normal"),
     align: "center",
     valign: "middle",
-    lineHeight: 1.2,
-    letterSpacing: 0,
+    lineHeight,
+    letterSpacing,
     paddingX: 16,
     paddingY: 16,
     textRole,
     words, // Include word-level timestamps for karaoke-style highlighting
     styleId,
+    styleDefinition: resolvedEffectDefinition,
     templateId,
     customization,
     stroke,
     shadow,
     background,
   };
+
+  textRenderTrace("createTextClip", {
+    clipId: clip.id,
+    text: clip.text,
+    startTime: clip.startTime,
+    duration: clip.duration,
+    x: clip.x,
+    y: clip.y,
+    width: clip.width,
+    height: clip.height,
+    fontFamily: clip.fontFamily,
+    fontSize: clip.fontSize,
+    fontWeight: clip.fontWeight,
+    styleId: clip.styleId,
+    hasStyleDefinition: !!clip.styleDefinition,
+    styleDefinitionFont: clip.styleDefinition?.font,
+    background: clip.background,
+    stroke: clip.stroke,
+    shadow: clip.shadow,
+  });
+
+  return clip;
 }
 
 /**
@@ -326,9 +368,11 @@ export const TEXT_PRESETS = {
  */
 export function recalculateTextClipBounds(clip: TextClip, updates: Partial<TextClip>, canvasWidth: number, canvasHeight: number): TextClip {
   const merged = { ...clip, ...updates };
-  const { text = "Text", fontFamily = "Inter, system-ui, sans-serif", fontSize = 48, fontWeight, fontStyle, styleId, stroke, shadow, background } = merged;
+  const { text = "Text", fontSize = 48, styleId, stroke, shadow, background } = merged;
 
-  const effectDefinition = styleId ? (useEffectsStore.getState().definitions[styleId] as TextEffectDefinition | undefined) : undefined;
+  const effectDefinition = resolveTextEffectDefinition(styleId);
+  const fontFamily = merged.fontFamily ?? effectDefinition?.font?.family ?? "Inter, system-ui, sans-serif";
+  const fontWeight = merged.fontWeight ?? effectDefinition?.font?.weight;
 
   const sizing = calculateTextClipSize({
     text,

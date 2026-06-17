@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateTextClipSize } from "../text/textClip";
+import { calculateTextClipSize, createTextClip } from "../text/textClip";
 import type { TextEffectDefinition } from "@clypra/engine";
 
 const inkGlowEffect = {
@@ -27,6 +27,26 @@ const inkGlowEffect = {
 } satisfies TextEffectDefinition;
 
 describe("calculateTextClipSize", () => {
+  it("uses text effect typography when creating a style clip without explicit overrides", () => {
+    const clip = createTextClip({
+      trackId: "track-1",
+      startTime: 0,
+      duration: 3,
+      text: "NEON",
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      styleId: inkGlowEffect.id,
+      effectDefinition: inkGlowEffect,
+    });
+
+    expect(clip.fontFamily).toBe("Bebas Neue");
+    expect(clip.fontWeight).toBe(400);
+    expect(clip.fontStyle).toBe("italic");
+    expect(clip.lineHeight).toBe(1.2);
+    expect(clip.letterSpacing).toBe(8);
+    expect(clip.styleDefinition).toBe(inkGlowEffect);
+  });
+
   it("does not put ink-effect render bleed into the editable text box height", () => {
     const sized = calculateTextClipSize({
       text: "CLYPRA",

@@ -1,6 +1,7 @@
 import { TextEffectDefinition } from "../types/types";
 import { TemplateDefinition } from "@/features/text-templates/types";
 import { getApiHeaders, getApiBaseUrl } from "@/lib/api";
+import { convertRawConfigToDefinition } from "../lib/definitionConversion";
 
 export interface TextEffectSummary {
   id: string;
@@ -65,8 +66,8 @@ export const TextEffectsApi = {
       });
       if (!res.ok) throw new Error(`Failed to load heavy configuration for effect: ${id}`);
 
-      data = await res.json();
-      this._effectsCache.set(cacheKey, data); // store in cache
+      data = convertRawConfigToDefinition(await res.json()) as TextEffectDefinition;
+      this._effectsCache.set(cacheKey, data); // store normalized definition in cache
     }
 
     // Sync to store cache to prevent duplicate fetches & loading errors
