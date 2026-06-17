@@ -171,8 +171,15 @@ export const TextEffectsApi = {
     local: { success: boolean };
     server: { success: boolean; cacheApi: any; kv: any };
   }> {
-    // Clear local cache first
-    this.clearLocalCache();
+    // Clear ALL local caches using the centralized manager
+    try {
+      const { TextEffectsCacheManager } = await import("../cache/cacheManager");
+      await TextEffectsCacheManager.clearAll();
+    } catch (e) {
+      console.error("[TextEffectsApi] Failed to clear local caches:", e);
+      // Fallback to old method
+      this.clearLocalCache();
+    }
 
     // Clear server-side caches
     const res = await fetch(`${BASE}/admin/purge-all`, {

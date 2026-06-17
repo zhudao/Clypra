@@ -141,7 +141,8 @@ export function useCacheManager(): UseCacheManagerReturn {
           stats,
         });
 
-        await refreshCacheInfo();
+        // Refresh cache info in the background (non-blocking)
+        refreshCacheInfo().catch((err) => console.warn("Failed to refresh cache info:", err));
       } catch (error) {
         setLastResult({
           success: false,

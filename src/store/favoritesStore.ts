@@ -11,6 +11,9 @@ interface FavoritesState {
   startDownload: (id: string) => void;
   completeDownload: (id: string, type: "effect" | "template") => void;
   cancelDownload: (id: string) => void;
+  clearDownloadedEffects: () => void;
+  clearDownloadedTemplates: () => void;
+  clearAllDownloaded: () => void;
 }
 
 // Safe localStorage parsers
@@ -62,20 +65,16 @@ export const useFavoritesStore = create<FavoritesState>((set, get) => {
     completeDownload: (id, type) => {
       set((state) => {
         const nextDownloading = state.downloadingIds.filter((x) => x !== id);
-        
+
         if (type === "effect") {
-          const nextDownloaded = state.downloadedEffects.includes(id)
-            ? state.downloadedEffects
-            : [...state.downloadedEffects, id];
+          const nextDownloaded = state.downloadedEffects.includes(id) ? state.downloadedEffects : [...state.downloadedEffects, id];
           saveArray("clypra_downloaded_effects", nextDownloaded);
           return {
             downloadingIds: nextDownloading,
             downloadedEffects: nextDownloaded,
           };
         } else {
-          const nextDownloaded = state.downloadedTemplates.includes(id)
-            ? state.downloadedTemplates
-            : [...state.downloadedTemplates, id];
+          const nextDownloaded = state.downloadedTemplates.includes(id) ? state.downloadedTemplates : [...state.downloadedTemplates, id];
           saveArray("clypra_downloaded_templates", nextDownloaded);
           return {
             downloadingIds: nextDownloading,
@@ -89,6 +88,22 @@ export const useFavoritesStore = create<FavoritesState>((set, get) => {
       set((state) => ({
         downloadingIds: state.downloadingIds.filter((x) => x !== id),
       }));
+    },
+
+    clearDownloadedEffects: () => {
+      set({ downloadedEffects: [] });
+      saveArray("clypra_downloaded_effects", []);
+    },
+
+    clearDownloadedTemplates: () => {
+      set({ downloadedTemplates: [] });
+      saveArray("clypra_downloaded_templates", []);
+    },
+
+    clearAllDownloaded: () => {
+      set({ downloadedEffects: [], downloadedTemplates: [] });
+      saveArray("clypra_downloaded_effects", []);
+      saveArray("clypra_downloaded_templates", []);
     },
   };
 });

@@ -165,6 +165,21 @@ function convertConfigToDefinition(preset: any): EffectDefinitionWithBounds {
   };
 }
 
+/**
+ * Convert raw API config (flat structure) to EffectFullDefinition (nested structure)
+ * API returns: { fontFamily, fontWeight, strokeEnabled, strokeColor, ... }
+ * Engine expects: { font: {}, strokes: [], shadows: [], ... }
+ */
+function convertRawConfigToDefinition(rawConfig: any): EffectDefinitionWithBounds {
+  // If it already has nested structure, return as-is
+  if (rawConfig.font && Array.isArray(rawConfig.fills)) {
+    return rawConfig as EffectDefinitionWithBounds;
+  }
+
+  // Transform flat API structure to nested engine structure
+  return convertConfigToDefinition({ ...rawConfig, config: rawConfig });
+}
+
 function calculateBoundingBox(cfg: TextEffectConfig): BoundingBoxSpec {
   if (cfg.panelEnabled) {
     const strokeWidth = cfg.panelStrokeEnabled ? cfg.panelStrokeWidth || 0 : 0;
@@ -336,6 +351,7 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     console.log(`[EffectsStore:Cache] 🌐 Fetching from API: ${id} (category: ${category})`);
 
     // 4. Fetch from API (last resort)
+    // API returns raw TextEffectConfig format (flat structure)
     const catKey = category.toLowerCase();
     const startTime = performance.now();
     const res = await fetch(`${API_BASE}/text-effects/${catKey}/${id}`, {
@@ -343,13 +359,14 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
       headers: getApiHeaders(),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as EffectFullDefinition;
+    const data = await res.json();
     const fetchTime = (performance.now() - startTime).toFixed(2);
 
     console.log(`[EffectsStore:Cache] ✅ API FETCH SUCCESS - Effect "${id}" downloaded in ${fetchTime}ms`);
-    console.log(`[EffectsStore:Cache] 💾 Caching effect "${id}" to memory + IndexedDB`);
+    console.log(`[EffectsStore:Cache] 📦 Raw data has fontFamily:`, data.fontFamily);
+    console.log(`[EffectsStore:Cache] 💾 Caching effect "${id}" to memory + IndexedDB (raw format)`);
 
-    // Store in all cache layers
+    // Store raw data in all cache layers (no transformation)
     set((state) => ({
       definitions: { ...state.definitions, [id]: data },
     }));
@@ -357,6 +374,7 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
 
     console.log(`[EffectsStore:Cache] ✅ CACHE SAVED - Effect "${id}" now available in all cache layers`);
 
+    return data;
     return data;
   },
 

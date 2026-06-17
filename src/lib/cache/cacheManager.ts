@@ -226,49 +226,67 @@ export class CacheManager {
       errors: [],
     };
 
+    // Run all async operations in parallel for better performance
+    const operations = [];
+
     // Clear app cache
     if (appCache) {
-      const result = await this.clearAppCache();
-      stats.appCacheCleared = result.success;
-      if (result.error) stats.errors.push(`App cache: ${result.error}`);
+      operations.push(
+        this.clearAppCache().then((result) => {
+          stats.appCacheCleared = result.success;
+          if (result.error) stats.errors.push(`App cache: ${result.error}`);
+        }),
+      );
     }
 
     // Clear WebView cache (Windows)
     if (webViewCache) {
-      const result = await this.clearWebViewCache();
-      stats.webViewCacheCleared = result.success;
-      if (result.error) stats.errors.push(`WebView cache: ${result.error}`);
+      operations.push(
+        this.clearWebViewCache().then((result) => {
+          stats.webViewCacheCleared = result.success;
+          if (result.error) stats.errors.push(`WebView cache: ${result.error}`);
+        }),
+      );
     }
 
-    // Clear GPU cache
+    // Clear HTTP cache (Cache API / Disk Cache)
+    if (httpCache) {
+      operations.push(
+        this.clearHTTPCache().then((result) => {
+          if (result.error) stats.errors.push(`HTTP cache: ${result.error}`);
+        }),
+      );
+    }
+
+    // Clear IndexedDB
+    if (indexedDB) {
+      operations.push(
+        this.clearIndexedDB().then((result) => {
+          if (result.error) stats.errors.push(`IndexedDB: ${result.error}`);
+        }),
+      );
+    }
+
+    // Wait for all async operations to complete
+    await Promise.all(operations);
+
+    // Clear GPU cache (synchronous)
     if (gpuCache) {
       const result = this.clearGPUCache();
       stats.gpuCacheCleared = result.success;
       if (result.error) stats.errors.push(`GPU cache: ${result.error}`);
     }
 
-    // Clear HTTP cache (Cache API / Disk Cache)
-    if (httpCache) {
-      const result = await this.clearHTTPCache();
-      if (result.error) stats.errors.push(`HTTP cache: ${result.error}`);
-    }
-
-    // Clear localStorage
+    // Clear localStorage (synchronous)
     if (clearLS) {
       const result = this.clearLocalStorage();
       if (result.error) stats.errors.push(`localStorage: ${result.error}`);
     }
 
-    // Clear sessionStorage
+    // Clear sessionStorage (synchronous)
     if (clearSS) {
       const result = this.clearSessionStorage();
       if (result.error) stats.errors.push(`sessionStorage: ${result.error}`);
-    }
-
-    // Clear IndexedDB
-    if (indexedDB) {
-      const result = await this.clearIndexedDB();
-      if (result.error) stats.errors.push(`IndexedDB: ${result.error}`);
     }
 
     return stats;

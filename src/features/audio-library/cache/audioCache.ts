@@ -288,28 +288,59 @@ class AudioCacheManager {
    * Clear all cached audio files
    */
   async clearAllCache(): Promise<void> {
-    await this.initialize();
+    try {
+      await this.initialize();
+    } catch (initError) {
+      console.error("[AudioCache] Initialization failed during clearAllCache:", initError);
+      // If we can't initialize, just clear the in-memory index
+      this.cacheIndex.clear();
+      return;
+    }
 
-    if (!this.cacheDir) return;
+    if (!this.cacheDir) {
+      console.warn("[AudioCache] No cache directory, clearing in-memory index only");
+      this.cacheIndex.clear();
+      return;
+    }
 
     try {
       // Read all files in cache directory
       const entries = await readDir(this.cacheDir, { baseDir: BaseDirectory.AppCache });
 
       // Delete all files except index
-      for (const entry of entries) {
-        if (entry.name !== CACHE_INDEX_FILE) {
-          const filePath = await join(this.cacheDir, entry.name);
-          await remove(filePath, { baseDir: BaseDirectory.AppCache });
-        }
-      }
+      const deletePromises = entries
+        .filter((entry) => entry.name !== CACHE_INDEX_FILE)
+        .map(async (entry) => {
+          try {
+            const filePath = await join(this.cacheDir!, entry.name);
+            await remove(filePath, { baseDir: BaseDirectory.AppCache });
+          } catch (err) {
+            console.warn(`[AudioCache] Failed to delete ${entry.name}:`, err);
+            // Continue with other files
+          }
+        });
+
+      await Promise.all(deletePromises);
 
       // Clear index
       this.cacheIndex.clear();
       await this.saveIndex();
+
+      console.log("[AudioCache] All cache cleared successfully");
     } catch (error) {
       console.error("[AudioCache] Failed to clear all cache:", error);
-      throw error;
+
+      // Fallback: at least clear the in-memory index
+      this.cacheIndex.clear();
+
+      // Try to save empty index
+      try {
+        await this.saveIndex();
+      } catch (saveError) {
+        console.warn("[AudioCache] Failed to save empty index:", saveError);
+      }
+
+      throw new Error(`Failed to clear audio cache: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   }
 
