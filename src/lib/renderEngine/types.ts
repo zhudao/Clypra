@@ -291,9 +291,13 @@ export interface TierBoundary {
 
 export type SrpConfig = Record<SpatialTier, TierBoundary>;
 
-/** Default SRP tier boundaries per spec R1. */
+/** Default SRP tier boundaries per spec R1.
+ *
+ * Extended L0 minimum to 0.1× to handle deep zoom-out without blurriness.
+ * L0 (160×90) thumbnails are now used from 0.1× to 0.5× zoom levels.
+ */
 export const DEFAULT_SRP_CONFIG: SrpConfig = {
-  [SpatialTier.L0]: { min: 0.25, max: 0.5 },
+  [SpatialTier.L0]: { min: 0.1, max: 0.5 }, // Extended from 0.25 to 0.1 for deep zoom-out
   [SpatialTier.L1]: { min: 0.5, max: 1.0 },
   [SpatialTier.L2]: { min: 1.0, max: 2.0 },
   [SpatialTier.L3]: { min: 2.0, max: 4.0 },
