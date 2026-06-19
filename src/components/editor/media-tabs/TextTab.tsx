@@ -60,7 +60,7 @@ const templateCategories = TEMPLATE_CATEGORIES.map((cat) =>
 
 export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const [activeTab, setActiveTab] = useState<"effects" | "templates" | "yours" | "captions">("effects");
-  const [activeCategory, setActiveCategory] = useState<string>("3D");
+  const [activeCategory, setActiveCategory] = useState<string>("Lower Third");
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Consume global favorites and downloads store
@@ -80,22 +80,29 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const [isEffectsLoading, setIsEffectsLoading] = useState(false);
   const [isEffectsApiConnected, setIsEffectsApiConnected] = useState(false);
 
-  // Fetch from the API on mount
+  // Load templates only when the "templates" sub-tab is active and templates are not loaded yet
   useEffect(() => {
-    loadTemplates();
+    if (activeTab === "templates" && templates.length === 0) {
+      loadTemplates();
+    }
+  }, [activeTab, templates.length]);
 
-    setIsEffectsLoading(true);
-    TextEffectsApi.checkApiHealth()
-      .then((isOnline: boolean) => {
-        setIsEffectsApiConnected(isOnline);
-      })
-      .catch(() => {
-        setIsEffectsApiConnected(false);
-      })
-      .finally(() => {
-        setIsEffectsLoading(false);
-      });
-  }, []);
+  // Load effects health/data only when the "effects" sub-tab is active
+  useEffect(() => {
+    if (activeTab === "effects" && !isEffectsApiConnected) {
+      setIsEffectsLoading(true);
+      TextEffectsApi.checkApiHealth()
+        .then((isOnline: boolean) => {
+          setIsEffectsApiConnected(isOnline);
+        })
+        .catch(() => {
+          setIsEffectsApiConnected(false);
+        })
+        .finally(() => {
+          setIsEffectsLoading(false);
+        });
+    }
+  }, [activeTab, isEffectsApiConnected]);
 
   const hasAudioOrVideoClips = clips.some((clip) => {
     const asset = mediaAssets.find((a) => a.id === clip.mediaId);
