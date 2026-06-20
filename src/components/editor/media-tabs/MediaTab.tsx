@@ -35,6 +35,10 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
     return new Set(clips.map((clip) => clip.mediaId));
   }, [clips]);
 
+  const visibleAssets = useMemo(() => {
+    return mediaAssets.filter((asset) => asset.type !== "sticker");
+  }, [mediaAssets]);
+
   const getMediaType = (path: string): "video" | "audio" | "image" => {
     const lower = path.toLowerCase();
     if (/\.(mp4|mov|mkv|webm|flv)$/i.test(lower)) return "video";
@@ -112,11 +116,11 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
       </div>
 
       <div className="flex-1 overflow-y-auto scrollbar-thin">
-        {mediaAssets.length === 0 ? (
+        {visibleAssets.length === 0 ? (
           <EmptyState icon={CloudUpload} title="No media imported" description="Import videos, audio, or images to get started" />
         ) : (
           <div className="grid grid-cols-2 gap-2 p-1">
-            {mediaAssets.map((asset) => (
+            {visibleAssets.map((asset) => (
               <MediaCard
                 key={asset.id}
                 asset={asset}
