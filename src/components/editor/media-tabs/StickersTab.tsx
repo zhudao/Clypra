@@ -234,8 +234,27 @@ const StickerCard: React.FC<{ sticker: StickerItem; onAddToTimeline?: (item: any
 
       {/* Preview area - with hover scale animation like TemplateCard */}
       <div className="flex-1 flex items-center justify-center w-full select-none relative overflow-hidden transition-transform duration-500 ease-out group-hover:scale-[1.05]">
-        {/* Video Preview (shown on hover) - plays .webm without downloading Lottie JSON */}
-        <video src={sticker.preview} autoPlay={isHovered} loop muted playsInline className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-100 z-10" : "opacity-0 z-0"}`} />
+        {/* Preview (shown on hover) - plays .webm or displays .gif without downloading Lottie JSON */}
+        {sticker.preview?.endsWith(".gif") || sticker.preview?.includes("-preview.gif") ? (
+          <img
+            src={sticker.preview}
+            alt={`${sticker.name} preview`}
+            className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${
+              isHovered ? "opacity-100 z-10" : "opacity-0 z-0"
+            }`}
+          />
+        ) : (
+          <video
+            src={sticker.preview}
+            autoPlay={isHovered}
+            loop
+            muted
+            playsInline
+            className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${
+              isHovered ? "opacity-100 z-10" : "opacity-0 z-0"
+            }`}
+          />
+        )}
 
         {/* Static Thumbnail */}
         {!imageError ? (
