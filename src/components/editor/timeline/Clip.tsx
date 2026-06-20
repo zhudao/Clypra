@@ -541,11 +541,6 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
       data-clip-id={clip.id}
       data-clip-start={clip.startTime}
       data-clip-duration={clip.duration}
-      onPointerDownCapture={(e) => {
-        if (isPointerOnResizeHandle(e.target)) {
-          e.stopPropagation();
-        }
-      }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
