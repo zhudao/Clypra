@@ -95,6 +95,7 @@ export interface TextTemplate {
   
   // Optional and legacy properties for backwards compatibility
   lottieData?: any;
+  templateData?: any;
   thumbnailUrl?: string;
   thumbnailFrame?: number;
   durationFrames?: number;

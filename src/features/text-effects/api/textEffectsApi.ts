@@ -26,7 +26,7 @@ export const TEXT_EFFECT_CATEGORIES = [
 export const TextEffectsApi = {
   // In-memory cache map to avoid duplicate network calls when users toggle effects
   _effectsCache: new Map<string, TextEffectDefinition>(),
-  _lottieCache: new Map<string, any>(),
+  _templateCache: new Map<string, any>(),
 
   // 0. Checks if the API is online by hitting the health endpoint
   async checkApiHealth(): Promise<boolean> {
@@ -111,21 +111,21 @@ export const TextEffectsApi = {
     return res.json();
   },
 
-  // 5. LAZY-LOAD heavy Lottie animations on-timeline placement with RAM caching
-  async getLottieTemplate(category: string, id: string): Promise<any> {
+  // 5. LAZY-LOAD heavy canvas templates on-timeline placement with RAM caching
+  async getTemplateData(category: string, id: string): Promise<any> {
     const cacheKey = `${category}:${id}`;
-    if (this._lottieCache.has(cacheKey)) {
-      return this._lottieCache.get(cacheKey)!;
+    if (this._templateCache.has(cacheKey)) {
+      return this._templateCache.get(cacheKey)!;
     }
 
     const res = await fetch(`${BASE}/text-templates/${category}/${id}`, {
       cache: "reload",
       headers: getApiHeaders(),
     });
-    if (!res.ok) throw new Error(`Failed to load Lottie animation payload for: ${id}`);
+    if (!res.ok) throw new Error(`Failed to load template payload for: ${id}`);
 
     const data = await res.json();
-    this._lottieCache.set(cacheKey, data); // store in cache
+    this._templateCache.set(cacheKey, data); // store in cache
     return data;
   },
 
@@ -136,7 +136,7 @@ export const TextEffectsApi = {
    */
   clearLocalCache(): void {
     this._effectsCache.clear();
-    this._lottieCache.clear();
+    this._templateCache.clear();
   },
 
   /**

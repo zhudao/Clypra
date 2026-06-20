@@ -1081,18 +1081,18 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
       }
     }
     const rawTemplate = templates.find((t) => t.id === layer.templateId);
-    let template = rawTemplate?.lottieData;
+    let template = rawTemplate?.templateData || rawTemplate?.lottieData;
 
     if (rawTemplate && !template) {
       try {
         const { TextEffectsApi } = await import("@/features/text-effects/api/textEffectsApi");
-        const lottieData = await TextEffectsApi.getLottieTemplate(rawTemplate.category, rawTemplate.id);
+        const templateData = await TextEffectsApi.getTemplateData(rawTemplate.category, rawTemplate.id);
         useTemplateStore.setState((state) => ({
-          templates: state.templates.map((t) => (t.id === rawTemplate.id ? { ...t, lottieData } : t)),
+          templates: state.templates.map((t) => (t.id === rawTemplate.id ? { ...t, templateData, lottieData: templateData } : t)),
         }));
-        template = lottieData;
+        template = templateData;
       } catch (err) {
-        console.error(`[Clypra:Rasterizer] Failed to lazy-load Lottie data for template ${rawTemplate.id}:`, err);
+        console.error(`[Clypra:Rasterizer] Failed to lazy-load template data for template ${rawTemplate.id}:`, err);
       }
     }
 
@@ -1132,13 +1132,39 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
 
       const localTime = layer.time !== undefined && layer.clipStartTime !== undefined ? layer.time - layer.clipStartTime : 0;
 
+      // Get the bounds of the actual template content to scale it relative to the content rather than the empty canvas
+      const tempCanvas = typeof OffscreenCanvas !== "undefined"
+        ? new OffscreenCanvas(template.canvasWidth, template.canvasHeight)
+        : document.createElement("canvas");
+      tempCanvas.width = template.canvasWidth;
+      tempCanvas.height = template.canvasHeight;
+      const tempCtx = tempCanvas.getContext("2d");
+      if (tempCtx) {
+        renderer.drawFrame(tempCtx, localTime, { skipClear: true });
+      }
+      const bounds = renderer.getContentBounds();
+
       ctx.save();
       // Translate from the center back to the top-left corner of the layer bounding box
       ctx.translate(-width / 2, -height / 2);
 
-      const sX = width / template.canvasWidth;
-      const sY = height / template.canvasHeight;
-      ctx.scale(sX, sY);
+      if (bounds && bounds.width > 0 && bounds.height > 0) {
+        // Map content bounds to layer box with uniform scaling to avoid distortion
+        const sX = width / bounds.width;
+        const sY = height / bounds.height;
+        const scale = Math.min(sX, sY);
+
+        // Center the content bounds within the layer bounding box
+        const offsetX = (width - bounds.width * scale) / 2;
+        const offsetY = (height - bounds.height * scale) / 2;
+
+        ctx.scale(scale, scale);
+        ctx.translate(-bounds.x + offsetX / scale, -bounds.y + offsetY / scale);
+      } else {
+        const sX = width / template.canvasWidth;
+        const sY = height / template.canvasHeight;
+        ctx.scale(sX, sY);
+      }
 
       renderer.drawFrame(ctx as CanvasRenderingContext2D, localTime, { skipClear: true });
       ctx.restore();

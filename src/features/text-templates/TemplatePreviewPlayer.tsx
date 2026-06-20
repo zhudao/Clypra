@@ -13,7 +13,8 @@ export interface TemplatePreviewPlayerHandle {
 }
 
 export interface TemplatePreviewPlayerProps {
-  lottieData:   any | null; // Represents TextTemplate payload
+  lottieData?:  any | null; // Represents TextTemplate payload
+  templateData?: any | null; // Represents TextTemplate payload
   autoplay?:    boolean;
   loop?:        boolean;
   speed?:       number;
@@ -31,7 +32,8 @@ export interface TemplatePreviewPlayerProps {
 
 export const TemplatePreviewPlayer = forwardRef<TemplatePreviewPlayerHandle, TemplatePreviewPlayerProps>(
   ({
-    lottieData: template,
+    lottieData,
+    templateData,
     autoplay  = true,
     loop      = true,
     speed     = 1,
@@ -46,6 +48,7 @@ export const TemplatePreviewPlayer = forwardRef<TemplatePreviewPlayerHandle, Tem
     mode      = "auto",
     fitToContent = false,
   }, ref) => {
+    const template = templateData || lottieData;
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
 

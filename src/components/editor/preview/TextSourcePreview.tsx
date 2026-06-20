@@ -104,7 +104,7 @@ export const TextSourcePreview: React.FC<TextSourcePreviewProps> = ({ preset }) 
     };
   }, []);
 
-  const isTemplate = preset?.presetType === "template" || !!(preset as any)?.lottieData;
+  const isTemplate = preset?.presetType === "template" || !!(preset as any)?.templateData || !!(preset as any)?.lottieData;
   const isEffect = !isTemplate && (preset?.presetType === "effect" || !!(preset as any)?.fontFamily);
 
   console.log("[TextSourcePreview] Type check", { isTemplate, isEffect });
@@ -213,7 +213,7 @@ export const TextSourcePreview: React.FC<TextSourcePreviewProps> = ({ preset }) 
   if (isTemplate) {
     return (
       <div className="w-full aspect-video checkerboard flex items-center justify-center relative p-8 shadow-[0_0_40px_rgba(0,0,0,0.8)] border border-white/5 overflow-hidden">
-        <TemplatePreviewPlayer lottieData={(preset as any).injectedData || (preset as any).lottieData || preset} autoplay={true} loop={true} mode="canvas" fitToContent={true} className="w-full h-full object-contain" />
+        <TemplatePreviewPlayer lottieData={(preset as any).injectedData || (preset as any).templateData || (preset as any).lottieData || preset} autoplay={true} loop={true} mode="canvas" fitToContent={true} className="w-full h-full object-contain" />
       </div>
     );
   }

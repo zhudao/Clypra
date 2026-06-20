@@ -32,7 +32,7 @@ vi.mock("@/features/text-templates", () => {
 // Mock TextEffectsApi
 vi.mock("@/features/text-effects/api/textEffectsApi", () => ({
   TextEffectsApi: {
-    getLottieTemplate: vi.fn(),
+    getTemplateData: vi.fn(),
   },
 }));
 
@@ -99,7 +99,7 @@ describe("TemplateCard Component", () => {
 
     // Renders player immediately
     expect(screen.getByTestId("mock-lottie-player")).toBeInTheDocument();
-    expect(TextEffectsApi.getLottieTemplate).not.toHaveBeenCalled();
+    expect(TextEffectsApi.getTemplateData).not.toHaveBeenCalled();
   });
 
   it("calls onPreview when clicked", () => {

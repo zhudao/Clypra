@@ -46,8 +46,8 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
     set({ isLoading: true });
     try {
       const apiTemplates = await TextEffectsApi.getTemplatesIndex();
-      // Initially, the API templates won't have lottieData populated.
-      // We will fetch their lottieData on-demand when selected or previewed.
+      // Initially, the API templates won't have templateData populated.
+      // We will fetch their templateData on-demand when selected or previewed.
       set({
         templates: apiTemplates,
         isApiConnected: true,
@@ -74,36 +74,41 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
 
     let loadedTemplate = { ...template };
 
-    // On-demand fetch of Lottie JSON data if it is not yet loaded
-    if (!loadedTemplate.lottieData) {
+    // On-demand fetch of template JSON data if it is not yet loaded
+    const templateData = loadedTemplate.templateData || loadedTemplate.lottieData;
+    if (!templateData) {
       try {
         set({ isLoading: true });
-        // The clypra-api expects category and template ID to load Lottie JSON
-        const lottieData = await TextEffectsApi.getLottieTemplate(loadedTemplate.category, loadedTemplate.id);
-        loadedTemplate.lottieData = lottieData;
+        // The clypra-api expects category and template ID to load template JSON
+        const data = await TextEffectsApi.getTemplateData(loadedTemplate.category, loadedTemplate.id);
+        loadedTemplate.templateData = data;
+        loadedTemplate.lottieData = data; // for backwards compatibility
 
-        // Cache the fetched Lottie data in the templates list
+        // Cache the fetched template data in the templates list
         set((state) => ({
-          templates: state.templates.map((t) => (t.id === loadedTemplate.id ? { ...t, lottieData } : t)),
+          templates: state.templates.map((t) => (t.id === loadedTemplate.id ? { ...t, templateData: data, lottieData: data } : t)),
           isLoading: false,
         }));
       } catch (err) {
-        console.error(`[Clypra:TemplateStore] Failed to load Lottie data for template ${loadedTemplate.id}:`, err);
+        console.error(`[Clypra:TemplateStore] Failed to load template data for template ${loadedTemplate.id}:`, err);
         set({ isLoading: false });
 
         // If dynamic loading failed, look up in the static templates fallback as absolute safety net
         const fallback = ALL_TEMPLATES.find((t) => t.id === loadedTemplate.id);
-        if (fallback && fallback.lottieData) {
-          loadedTemplate.lottieData = fallback.lottieData;
+        const fallbackData = fallback?.templateData || fallback?.lottieData;
+        if (fallbackData) {
+          loadedTemplate.templateData = fallbackData;
+          loadedTemplate.lottieData = fallbackData;
         } else {
           // If no fallback is found, proceed with empty data to avoid hard crashes
+          loadedTemplate.templateData = {};
           loadedTemplate.lottieData = {};
         }
       }
     }
 
     // Initialize customisation with defaults from the selected template
-    const fullTemplate = loadedTemplate.lottieData || loadedTemplate;
+    const fullTemplate = loadedTemplate.templateData || loadedTemplate.lottieData || loadedTemplate;
     const textLayers = (fullTemplate.layers || []).filter((l: any) => l.kind === "text") as any[];
     const primary = textLayers.find((tl) => tl.role === "primary")?.content || "Clypra";
     const secondary = textLayers.find((tl) => tl.role === "secondary")?.content || "";
@@ -148,16 +153,16 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
 
     try {
       // 1. Prepare customizable Template object
-      let data = selected.lottieData || selected;
+      let data = selected.templateData || selected.lottieData || selected;
 
       // Ensure template data is dynamically fetched if we bypass standard select
       if (!data.layers || data.layers.length === 0) {
         try {
-          data = await TextEffectsApi.getLottieTemplate(selected.category, selected.id);
+          data = await TextEffectsApi.getTemplateData(selected.category, selected.id);
         } catch (e) {
           // Fallback to static meta
           const staticFallback = ALL_TEMPLATES.find((t) => t.id === selected.id);
-          data = staticFallback?.lottieData || staticFallback || selected;
+          data = staticFallback?.templateData || staticFallback?.lottieData || staticFallback || selected;
         }
       }
 

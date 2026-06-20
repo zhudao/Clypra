@@ -292,7 +292,7 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
             {
               ...updatedTemplate,
               presetType: "template",
-              injectedData: updatedTemplate.lottieData,
+              injectedData: updatedTemplate.templateData || updatedTemplate.lottieData,
             },
             type,
           );
