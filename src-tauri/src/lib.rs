@@ -44,6 +44,7 @@ pub fn run() {
             clear_thumbnail_cache,
             extract_poster_frame_command,
             get_media_metadata,
+            #[allow(deprecated)]
             get_video_metadata,
             extract_poster_frame,
             extract_audio_artwork,

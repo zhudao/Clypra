@@ -7,12 +7,10 @@ use proptest::prelude::*;
 use std::path::PathBuf;
 use crate::thumbnail_engine::*;
 
-/// Property 1: Cache key round-trip preservation
-///
-/// For any valid video path, timestamp, density, and DPR, serializing a CacheKey
-/// to string and parsing it back must produce an equivalent CacheKey.
-///
-/// Design Property Reference: Property 1 — Cache Key Round-Trip
+// Property 1: Cache key round-trip preservation
+// For any valid video path, timestamp, density, and DPR, serializing a CacheKey
+// to string and parsing it back must produce an equivalent CacheKey.
+// Design Property Reference: Property 1 — Cache Key Round-Trip
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -38,13 +36,11 @@ proptest! {
     }
 }
 
-/// Property 9: DPR to resolution tier mapping
-///
-/// For any DPR value, the resolution tier mapping must follow:
-/// - DPR < 1.5 → Tier1x
-/// - DPR >= 1.5 → Tier2x
-///
-/// Design Property Reference: Property 9 — DPR to Resolution Tier
+// Property 9: DPR to resolution tier mapping
+// For any DPR value, the resolution tier mapping must follow:
+// - DPR < 1.5 → Tier1x
+// - DPR >= 1.5 → Tier2x
+// Design Property Reference: Property 9 — DPR to Resolution Tier
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -80,13 +76,11 @@ proptest! {
     }
 }
 
-/// Property 10: Frame count calculation
-///
-/// For any valid visible range and time per thumbnail, the number of generated
-/// timestamps must equal the expected frame count (range / time_per_thumb, rounded),
-/// plus 2 buffer thumbnails (one before, one after).
-///
-/// Design Property Reference: Property 10 — Frame Count Calculation
+// Property 10: Frame count calculation
+// For any valid visible range and time per thumbnail, the number of generated
+// timestamps must equal the expected frame count (range / time_per_thumb, rounded),
+// plus 2 buffer thumbnails (one before, one after).
+// Design Property Reference: Property 10 — Frame Count Calculation
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -117,12 +111,10 @@ proptest! {
     }
 }
 
-/// Property 11: Frame count capping for long videos
-///
-/// For any video duration and time per thumbnail, the generated timestamps
-/// must scale linearly with duration/density, with a small buffer overhead.
-///
-/// Design Property Reference: Property 11 — Frame Count Capping
+// Property 11: Frame count capping for long videos
+// For any video duration and time per thumbnail, the generated timestamps
+// must scale linearly with duration/density, with a small buffer overhead.
+// Design Property Reference: Property 11 — Frame Count Capping
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -155,12 +147,10 @@ proptest! {
     }
 }
 
-/// Property 12: LRU eviction ordering
-///
-/// For any cache state exceeding the memory limit, evicted entries must follow
-/// LRU ordering: lowest access count first, then oldest timestamp.
-///
-/// Design Property Reference: Property 12 — LRU Eviction Ordering
+// Property 12: LRU eviction ordering
+// For any cache state exceeding the memory limit, evicted entries must follow
+// LRU ordering: lowest access count first, then oldest timestamp.
+// Design Property Reference: Property 12 — LRU Eviction Ordering
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -218,12 +208,10 @@ proptest! {
     }
 }
 
-/// Property 15: Exponential backoff retry timing
-///
-/// For any retry attempt, the backoff delay must follow base-4 exponential growth:
-/// attempt 1: 100ms, attempt 2: 400ms, attempt 3: 1600ms, etc.
-///
-/// Design Property Reference: Property 15 — Exponential Backoff
+// Property 15: Exponential backoff retry timing
+// For any retry attempt, the backoff delay must follow base-4 exponential growth:
+// attempt 1: 100ms, attempt 2: 400ms, attempt 3: 1600ms, etc.
+// Design Property Reference: Property 15 — Exponential Backoff
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -249,12 +237,10 @@ proptest! {
     }
 }
 
-/// Property 7: Fallback chain ordering
-///
-/// For any cache with frames at various densities, the fallback chain must
-/// prioritize: exact match > higher density > lower density (High → Medium → Low).
-///
-/// Design Property Reference: Property 7 — Fallback Chain Ordering
+// Property 7: Fallback chain ordering
+// For any cache with frames at various densities, the fallback chain must
+// prioritize: exact match > higher density > lower density (High → Medium → Low).
+// Design Property Reference: Property 7 — Fallback Chain Ordering
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 

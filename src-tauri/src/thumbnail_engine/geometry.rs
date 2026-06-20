@@ -1,6 +1,5 @@
 /// Geometry utilities for thumbnail rendering.
 /// Consolidated aspect ratio and dimension calculations.
-
 /// Calculate fitted dimensions preserving aspect ratio within a max box.
 /// 
 /// This is the single source of truth for aspect-preserving dimension fitting.
