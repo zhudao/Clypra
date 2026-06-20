@@ -113,7 +113,7 @@ export const SourcePreview: React.FC = () => {
 
   // Load Lottie JSON from cache on demand
   useEffect(() => {
-    const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
+    const isLottie = sourceAsset && (sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))));
     const lottiePath = sourceAsset?.stickerAnimationPath || sourceAsset?.path;
     if (!isLottie || !lottiePath) {
       setLottieData(null);
@@ -159,7 +159,7 @@ export const SourcePreview: React.FC = () => {
   useEffect(() => {
     setUseGPU(USE_GPU_PREVIEW && sourceAsset?.type === "video");
     setGpuFailed(false);
-    const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
+    const isLottie = sourceAsset && (sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))));
     if (isLottie) {
       setDuration(lottieDuration);
       setCurrentTime(0);
@@ -169,7 +169,7 @@ export const SourcePreview: React.FC = () => {
 
   // Set duration when Lottie duration changes
   useEffect(() => {
-    const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
+    const isLottie = sourceAsset && (sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))));
     if (isLottie) {
       setDuration(lottieDuration);
     }
@@ -187,7 +187,7 @@ export const SourcePreview: React.FC = () => {
 
   // Virtual clock for Lottie playback
   useEffect(() => {
-    const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
+    const isLottie = sourceAsset && (sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))));
     if (!isLottie) return;
     if (!isPlaying) return;
 
@@ -226,7 +226,7 @@ export const SourcePreview: React.FC = () => {
         setCurrentTime(Math.max(0, Math.min(time, 3.0)));
         return;
       }
-      const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
+      const isLottie = sourceAsset && (sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))));
       if (isLottie) {
         const targetTime = Math.max(0, Math.min(time, duration));
         setCurrentTime(targetTime);
@@ -253,7 +253,7 @@ export const SourcePreview: React.FC = () => {
       });
       return;
     }
-    const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
+    const isLottie = sourceAsset && (sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))));
     if (isLottie) {
       setIsPlaying((prev) => {
         const next = !prev;
@@ -523,28 +523,26 @@ export const SourcePreview: React.FC = () => {
                 }
               }}
             />
-          ) : sourceAsset.type === "image" ? (
-            (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json")) ? (
-              lottieError ? (
-                <div className="text-red-400 text-xs">{lottieError}</div>
-              ) : lottieData ? (
-                <StickerSourcePreview
-                  ref={lottiePlayerRef}
-                  lottieData={lottieData}
-                  isPlaying={isPlaying}
-                  loop={true}
-                  speed={1}
-                  className="max-w-full max-h-full"
-                />
-              ) : (
-                <div className="text-text-muted text-xs flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Loading preview...
-                </div>
-              )
+          ) : sourceAsset.type === "sticker" || (sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"))) ? (
+            lottieError ? (
+              <div className="text-red-400 text-xs">{lottieError}</div>
+            ) : lottieData ? (
+              <StickerSourcePreview
+                ref={lottiePlayerRef}
+                lottieData={lottieData}
+                isPlaying={isPlaying}
+                loop={true}
+                speed={1}
+                className="max-w-full max-h-full"
+              />
             ) : (
-              <ImageSourcePreview src={sourcePath} alt={sourceAsset.name} />
+              <div className="text-text-muted text-xs flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Loading preview...
+              </div>
             )
+          ) : sourceAsset.type === "image" ? (
+            <ImageSourcePreview src={sourcePath} alt={sourceAsset.name} />
           ) : sourceAsset.type === "text" ? (
             <TextSourcePreview preset={sourceTextPreset} />
           ) : (

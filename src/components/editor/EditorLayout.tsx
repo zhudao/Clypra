@@ -272,7 +272,7 @@ export const EditorLayout: React.FC = () => {
           id: `sticker-${item.id}`,
           name: item.name || "Sticker",
           path: absolutePath,
-          type: "image",
+          type: "sticker",
           duration: 3.0,
           size: 0,
           stickerFormat: "lottie",
@@ -335,7 +335,7 @@ export const EditorLayout: React.FC = () => {
         const currentTime = getPlaybackClock().time;
         const visualClips = clips.filter((c) => {
           const asset = mediaAssets.find((a) => a.id === c.mediaId);
-          return asset && (asset.type === "video" || asset.type === "image");
+          return asset && (asset.type === "video" || asset.type === "image" || asset.type === "sticker");
         });
         targetClip = visualClips.find((c) => currentTime >= c.startTime && currentTime <= c.startTime + c.duration);
       }
@@ -346,8 +346,8 @@ export const EditorLayout: React.FC = () => {
       }
 
       const asset = mediaAssets.find((a) => a.id === targetClip.mediaId);
-      if (asset?.type !== "video" && asset?.type !== "image") {
-        useProjectStore.getState().showToast("Effects can only be applied to video or image clips", "warning");
+      if (asset?.type !== "video" && asset?.type !== "image" && asset?.type !== "sticker") {
+        useProjectStore.getState().showToast("Effects can only be applied to video, image, or sticker clips", "warning");
         return;
       }
 

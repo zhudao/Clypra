@@ -42,7 +42,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ asset, isSelected, isUsedI
           <img src={asset.posterFrame} alt={asset.name} className="w-full h-full object-contain" />
         ) : asset.type === "audio" ? (
           <MediaCardWaveform audioPath={asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path)} duration={asset.duration} className="w-full h-full" />
-        ) : asset.type === "image" ? (
+        ) : asset.type === "image" || asset.type === "sticker" ? (
           <img src={asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path)} alt={asset.name} className="w-full h-full object-contain" />
         ) : (
           <div className="w-8 h-8">

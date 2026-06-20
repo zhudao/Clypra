@@ -54,7 +54,7 @@ export interface RustMediaAsset {
   id: string;
   name: string;
   path: string;
-  type: "video" | "audio" | "image";
+  type: "video" | "audio" | "image" | "sticker";
   duration: number;
   width?: number;
   height?: number;

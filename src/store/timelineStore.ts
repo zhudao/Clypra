@@ -762,7 +762,7 @@ export const useTimelineStore = create<TimelineStore>(
       // Clamp trimming to underlying media duration when available.
       // Falls back to Infinity (no cap) when the media asset cannot be resolved.
       let mediaDurationBound = Infinity;
-      let mediaType: "video" | "audio" | "image" | null = null;
+      let mediaType: "video" | "audio" | "image" | "sticker" | null = null;
       try {
         // Lazy import to avoid circular deps during store init.
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -774,7 +774,7 @@ export const useTimelineStore = create<TimelineStore>(
       } catch {
         // ignore; keep Infinity bound
       }
-      if (mediaType === "image") {
+      if (mediaType === "image" || mediaType === "sticker") {
         mediaDurationBound = Math.max(mediaDurationBound, 60 * 60); // 1 hour guardrail
       }
 

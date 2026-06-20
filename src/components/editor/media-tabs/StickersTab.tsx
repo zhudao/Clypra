@@ -186,7 +186,7 @@ const StickerCard: React.FC<{ sticker: StickerItem; onAddToTimeline?: (item: any
         id: `sticker-${sticker.id}`,
         name: sticker.name || "Sticker",
         path: absoluteImagePath,
-        type: "image",
+        type: "sticker",
         duration: 3.0,
         size: 0,
         stickerFormat: "lottie",

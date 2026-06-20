@@ -117,7 +117,7 @@ export const PropertiesPanel: React.FC = () => {
   const selectedClipId = selectedClipIds[0] ?? null;
   const selectedClip = clips.find((c) => c.id === selectedClipId);
   const selectedAsset = mediaAssets.find((a) => a.id === selectedClip?.mediaId);
-  const isVisualClip = selectedAsset?.type === "video" || selectedAsset?.type === "image";
+  const isVisualClip = selectedAsset?.type === "video" || selectedAsset?.type === "image" || selectedAsset?.type === "sticker";
   // Audio library clips have kind="audio" and audioPath on the clip but no matching mediaAsset entry
   const isAudioClip = selectedAsset?.type === "audio" || selectedClip?.kind === "audio" || !!(selectedClip as any)?.audioPath;
   const isVideoClip = selectedAsset?.type === "video"; // Video clips have audio tracks

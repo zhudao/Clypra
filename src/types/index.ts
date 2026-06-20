@@ -124,7 +124,7 @@ export interface MediaAsset {
   id: string;
   name: string;
   path: string;
-  type: "video" | "audio" | "image";
+  type: "video" | "audio" | "image" | "sticker";
   duration: number;
   width?: number;
   height?: number;
@@ -152,7 +152,7 @@ export interface MediaAsset {
 
 /** Type guard to check if asset has visual dimensions */
 export function hasVisualDimensions(asset: MediaAsset): asset is MediaAsset & { width: number; height: number } {
-  return (asset.type === "video" || asset.type === "image") && asset.width !== undefined && asset.height !== undefined;
+  return (asset.type === "video" || asset.type === "image" || asset.type === "sticker") && asset.width !== undefined && asset.height !== undefined;
 }
 
 export type ClipKind = "video" | "audio" | "image" | "sticker" | "text" | "filter" | "video-effect" | "body-effect" | "animated-overlay";
@@ -361,7 +361,7 @@ export interface TextClip extends Clip {
   exitAnimation?: TextAnimation;
 }
 
-export type TimelineItemKind = "video" | "audio" | "image" | "text" | "transition";
+export type TimelineItemKind = "video" | "audio" | "image" | "sticker" | "text" | "transition";
 export type TimelineItemRole = "primary" | "overlay" | "text" | "effect" | "background" | "audio";
 
 export interface TimelinePlacement {
@@ -412,7 +412,7 @@ export interface BaseTimelineItem {
 }
 
 export interface MediaTimelineItem extends BaseTimelineItem {
-  kind: "video" | "audio" | "image";
+  kind: "video" | "audio" | "image" | "sticker";
   source: TimelineSourceRange;
   transform: TimelineTransform;
   audio?: TimelineAudioProperties;
