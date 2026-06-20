@@ -641,7 +641,7 @@ export const ProgramPreview: React.FC = () => {
 
   if (dimensions.width === 0 || dimensions.height === 0) {
     return (
-      <div className="flex-1 bg-bg flex flex-col min-h-0 rounded-tl-xl border-l border-t border-white/3">
+      <div className="flex-1 bg-bg flex flex-col min-h-0 border-l border-t border-white/3">
         <div className="flex-1 flex items-center justify-center p-4 md:p-6 overflow-hidden relative bg-[#06080a]">
           <div ref={previewContainerRef} className="w-full h-full flex items-center justify-center">
             <div className="text-text-muted">Loading preview...</div>
@@ -659,7 +659,7 @@ export const ProgramPreview: React.FC = () => {
   const step = 1 / Math.max(1, frameRate);
 
   return (
-    <div className="flex-1 bg-bg flex flex-col min-h-0 rounded-tl-xl border-l border-t border-white/3">
+    <div className="flex-1 bg-bg flex flex-col min-h-0 border-l border-t border-white/3">
       <div className="flex items-center px-4 h-10 shrink-0 gap-2">
         <span className="text-[13px] font-semibold text-text-primary tracking-tight">Program Preview</span>
         <span className="text-[13px] text-text-muted">— Timeline</span>
