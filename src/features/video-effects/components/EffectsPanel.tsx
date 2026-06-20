@@ -37,7 +37,7 @@ export interface EffectsPanelProps {
 export function EffectsPanel({ onAddToTimeline }: EffectsPanelProps) {
   const [activeTab, setActiveTab] = useState<EffectTab>("video");
   const [selectedVideoCategory, setSelectedVideoCategory] = useState<string>("essentials");
-  const [selectedBodyCategory, setSelectedBodyCategory] = useState<string>("aura");
+  const [selectedBodyCategory, setSelectedBodyCategory] = useState<string>("trending");
 
   const handleEffectSelect = (effect: EffectPreset) => {
     if (onAddToTimeline) {
