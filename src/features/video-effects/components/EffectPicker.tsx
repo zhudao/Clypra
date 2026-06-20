@@ -5,6 +5,7 @@ import { VideoEffectsApi } from "../api/videoEffectsApi";
 import { useFavoritesStore } from "@/store/favoritesStore";
 
 interface EffectPickerProps {
+  selectedCategory: string;
   onSelect: (effect: EffectPreset) => void;
 }
 
@@ -17,8 +18,7 @@ const BODY_EFFECT_CATEGORIES = [
   { id: "fun", name: "Fun" },
 ];
 
-export function EffectPicker({ onSelect }: EffectPickerProps) {
-  const [selectedCategory, setSelectedCategory] = useState<string>("aura"); // Default to "aura" since that's where the default effects are
+export function EffectPicker({ selectedCategory, onSelect }: EffectPickerProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [effects, setEffects] = useState<EffectPreset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -90,14 +90,6 @@ export function EffectPicker({ onSelect }: EffectPickerProps) {
 
   return (
     <div className="flex flex-col h-full bg-transparent">
-      {/* Category Pills */}
-      <div className="flex gap-1 overflow-x-auto scrollbar-none border-b border-border p-1 shrink-0" style={{ scrollbarWidth: "none" }}>
-        {BODY_EFFECT_CATEGORIES.map((cat) => (
-          <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} className={`shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-semibold transition-colors flex items-center ${selectedCategory === cat.id ? "bg-accent text-white" : "text-text-muted hover:bg-surface-raised hover:text-text-primary"}`}>
-            <span>{cat.name}</span>
-          </button>
-        ))}
-      </div>
 
       {/* Search Input */}
       <div className="p-1 border-b border-border shrink-0">

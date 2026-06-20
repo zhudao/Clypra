@@ -13,6 +13,7 @@ import type { TabType } from "@/components/editor/media-tabs/types";
 import { useFavoritesStore } from "@/store/favoritesStore";
 
 interface RendererEffectsBrowserProps {
+  selectedCategory: string;
   onEffectSelect?: (effectId: EffectRendererType) => void;
   onAddToTimeline?: (item: any, type: TabType) => void;
   showApplyButton?: boolean;
@@ -27,8 +28,7 @@ const VIDEO_EFFECT_CATEGORIES = [
   { id: "color", name: "Color" },
 ];
 
-export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showApplyButton = true }: RendererEffectsBrowserProps) {
-  const [selectedCategory, setSelectedCategory] = useState<string>("essentials");
+export function RendererEffectsBrowser({ selectedCategory, onEffectSelect, onAddToTimeline, showApplyButton = true }: RendererEffectsBrowserProps) {
   const [effects, setEffects] = useState<EffectMetadata[]>([]);
   const [loading, setLoading] = useState(false);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
@@ -142,14 +142,6 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
 
   return (
     <div className="flex flex-col h-full bg-transparent">
-      {/* Category Pills */}
-      <div className="flex gap-1 overflow-x-auto scrollbar-none border-b border-border p-1 shrink-0" style={{ scrollbarWidth: "none" }}>
-        {VIDEO_EFFECT_CATEGORIES.map((cat) => (
-          <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} className={`shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-semibold transition-colors flex items-center ${selectedCategory === cat.id ? "bg-accent text-white" : "text-text-muted hover:bg-surface-raised hover:text-text-primary"}`}>
-            <span>{cat.name}</span>
-          </button>
-        ))}
-      </div>
 
       {/* Search Bar */}
       {/* <div className="p-1 border-b border-border shrink-0">
