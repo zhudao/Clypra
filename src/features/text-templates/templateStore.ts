@@ -220,6 +220,9 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
               set((state) => ({
                 templates: state.templates.map((t) => (t.id === id ? { ...t, templateData, lottieData: templateData } : t)),
               }));
+              import("@/store/timelineStore").then(({ useTimelineStore }) => {
+                useTimelineStore.getState().incrementEpoch();
+              }).catch(() => {});
             } catch (err) {
               console.error(`[Clypra:TemplateStore] Preload failed for template ${id}:`, err);
               return;
@@ -246,6 +249,8 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
         const { getFontLoader } = await import("@/core/fonts/FontLoader");
         try {
           await getFontLoader().ensureFonts(fontDescriptors);
+          const { useTimelineStore } = await import("@/store/timelineStore");
+          useTimelineStore.getState().incrementEpoch();
         } catch (fontErr) {
           console.warn("[Clypra:TemplateStore] Failed to preload template fonts:", fontErr);
         }

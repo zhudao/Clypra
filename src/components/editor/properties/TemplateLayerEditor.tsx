@@ -191,7 +191,7 @@ export const TemplateLayerEditor: React.FC<TemplateLayerEditorProps> = ({
                       label="Font Size"
                       value={currentFontSize}
                       min={10}
-                      max={150}
+                      max={1000}
                       step={1}
                       onChange={(v) => handleLayerFontPropertyChange(layer.id, "fontSize", v)}
                     />

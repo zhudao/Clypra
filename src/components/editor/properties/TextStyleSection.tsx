@@ -468,7 +468,7 @@ export const TextStyleSection: React.FC<TextStyleSectionProps> = ({ textClip, pr
             </div>
 
             {/* Font Size */}
-            <PropertySlider label="Font Size" value={textClip.fontSize || 48} min={10} max={150} step={1} suffix="px" onChange={(v) => handleCustomStyleUpdate("fontSize", v)} />
+            <PropertySlider label="Font Size" value={textClip.fontSize || 48} min={10} max={1000} step={1} suffix="px" onChange={(v) => handleCustomStyleUpdate("fontSize", v)} />
 
             {/* Font Weight */}
             <div>

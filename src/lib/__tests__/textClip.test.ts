@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { calculateTextClipSize, createTextClip, hasTextClipContentTransformDrift, measureTextEffectContentBounds, resolveTextClipContentTransform } from "../text/textClip";
+import { calculateTextClipSize, calculateTextTemplateClipSize, createTextClip, hasTextClipContentTransformDrift, measureTextEffectContentBounds, resolveTextClipContentTransform, resolveTextClipStyleUpdate } from "../text/textClip";
 import type { TextEffectDefinition } from "@clypra/engine";
+import type { TextClip } from "../../types";
 
 const inkGlowEffect = {
   id: "neon-crimson",
@@ -125,6 +126,7 @@ describe("calculateTextClipSize", () => {
       styleId: "neon-outline",
       effectDefinition: inkGlowEffect,
       canvasWidth: 640,
+      textRole: "caption",
     });
 
     const wrapped = calculateTextClipSize({
@@ -134,10 +136,41 @@ describe("calculateTextClipSize", () => {
       styleId: "neon-outline",
       effectDefinition: inkGlowEffect,
       canvasWidth: 640,
+      textRole: "caption",
     });
 
     expect(wrapped.width).toBeLessThanOrEqual(640 * 0.95);
     expect(wrapped.height).toBeGreaterThan(singleLine.height * 1.5);
+  });
+
+  it("allows titles and text effects to overflow canvas width without wrapping", () => {
+    const titleWide = calculateTextClipSize({
+      text: "VERY LONG TITLE TEXT THAT EXTENDS BEYOND",
+      fontFamily: "Inter, system-ui, sans-serif",
+      fontSize: 120,
+      styleId: "neon-outline",
+      effectDefinition: inkGlowEffect,
+      canvasWidth: 640,
+      textRole: "title",
+    });
+
+    const captionSame = calculateTextClipSize({
+      text: "VERY LONG TITLE TEXT THAT EXTENDS BEYOND",
+      fontFamily: "Inter, system-ui, sans-serif",
+      fontSize: 120,
+      styleId: "neon-outline",
+      effectDefinition: inkGlowEffect,
+      canvasWidth: 640,
+      textRole: "caption",
+    });
+
+    // Title should be single line (overflow allowed)
+    expect(titleWide.width).toBeGreaterThan(640 * 0.95);
+    expect(titleWide.height).toBeLessThan(200);
+
+    // Caption should wrap and be taller
+    expect(captionSame.width).toBeLessThanOrEqual(640 * 0.95);
+    expect(captionSame.height).toBeGreaterThan(titleWide.height * 2);
   });
 
   it("sizes panel effect bounds to visible text content instead of Studio preview canvas", () => {
@@ -343,5 +376,85 @@ describe("calculateTextClipSize", () => {
     });
 
     expect(spaced.contentWidth - normal.contentWidth).toBeCloseTo(120);
+  });
+
+  describe("text templates", () => {
+    const templateClip: TextClip = {
+      id: "text-clip-template",
+      kind: "text" as const,
+      trackId: "track-1",
+      mediaId: "",
+      startTime: 0,
+      duration: 5.0,
+      trimIn: 0,
+      trimOut: 5.0,
+      x: 100,
+      y: 200,
+      width: 500,
+      height: 300,
+      opacity: 1.0,
+      rotation: 0,
+      aspectRatioLocked: false,
+      text: "Original Template Text",
+      fontSize: 48,
+      fontFamily: "Inter",
+      color: "#ffffff",
+      fontWeight: "normal",
+      fontStyle: "normal",
+      align: "center" as const,
+      valign: "middle" as const,
+      lineHeight: 1.2,
+      letterSpacing: 0,
+      paddingX: 16,
+      paddingY: 16,
+      templateId: "tpl-123",
+      customization: {
+        primaryText: "Original Template Text",
+      },
+    };
+
+    it("resolveTextClipStyleUpdate bypasses recalculation for templates", () => {
+      const updates = { text: "Modified Text", fontSize: 60 };
+      const resolved = resolveTextClipStyleUpdate(templateClip, updates, 1920, 1080);
+      expect(resolved.x).toBeUndefined();
+      expect(resolved.y).toBeUndefined();
+      expect(resolved.width).toBeUndefined();
+      expect(resolved.height).toBeUndefined();
+      expect(resolved.text).toBe("Modified Text");
+      expect(resolved.fontSize).toBe(60);
+    });
+
+    it("resolveTextClipContentTransform returns the current geometry for templates", () => {
+      const transform = resolveTextClipContentTransform(templateClip, 1920, 1080);
+      expect(transform.x).toBe(100);
+      expect(transform.y).toBe(200);
+      expect(transform.width).toBe(500);
+      expect(transform.height).toBe(300);
+    });
+
+    it("hasTextClipContentTransformDrift returns false for templates", () => {
+      expect(hasTextClipContentTransformDrift(templateClip, 1920, 1080)).toBe(false);
+    });
+
+    it("calculateTextTemplateClipSize scales content bounds proportionally", () => {
+      // Test that template sizing respects canvas constraints
+      const result = calculateTextTemplateClipSize({
+        canvasWidth: 1920,
+        canvasHeight: 1080,
+        templateId: "test-template",
+        text: "Test Content",
+      });
+
+      // Verify dimensions are within expected bounds
+      expect(result.width).toBeGreaterThan(0);
+      expect(result.height).toBeGreaterThan(0);
+      expect(result.width).toBeLessThanOrEqual(1920 * 0.8 + 1); // +1 for rounding
+      expect(result.height).toBeLessThanOrEqual(1080 * 0.5 + 1); // +1 for rounding
+
+      // Verify aspect ratio is reasonable
+      const aspectRatio = result.width / result.height;
+      expect(aspectRatio).toBeGreaterThan(0.1);
+      expect(aspectRatio).toBeLessThan(10);
+    });
   });
 });

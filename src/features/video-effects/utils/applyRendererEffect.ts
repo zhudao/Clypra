@@ -79,7 +79,7 @@ export async function applyRendererEffectWithPreview(clipId: string, effectId: E
   try {
     const { VideoEffectsApi } = await import("../api/videoEffectsApi");
     await VideoEffectsApi.downloadEffectPreview(effectId as string, category);
-    console.log(`✓ Effect preview cached: ${effectId}`);
+    // console.log(`✓ Effect preview cached: ${effectId}`);
   } catch (error) {
     console.warn(`No preview available for effect: ${effectId}`);
   }

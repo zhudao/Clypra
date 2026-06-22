@@ -674,7 +674,7 @@ export const ProgramPreview: React.FC = () => {
       {/* ── Video Area ─────────────────────────────────────────────── */}
       <div className="flex-1 flex items-center justify-center overflow-hidden bg-[#06080a] relative">
         <div ref={previewContainerRef} onPointerDownCapture={handlePreviewPointerDownCapture} className={cn("w-full h-full flex items-center justify-center relative z-10 overflow-hidden", isPanning && "cursor-grabbing", spacePressed && !isPanning && "cursor-grab")}>
-          <div data-testid="program-preview-viewport" className="relative flex shrink-0 items-center justify-center overflow-hidden shadow-[0_0_40px_rgba(0,0,0,0.36)]" style={{ width: displayWidth, height: displayHeight }}>
+          <div data-testid="program-preview-viewport" className="relative flex shrink-0 items-center justify-center overflow-visible shadow-[0_0_40px_rgba(0,0,0,0.36)]" style={{ width: displayWidth, height: displayHeight }}>
             <>
               {/* Canvas-based preview (matches export rendering) */}
               <canvas

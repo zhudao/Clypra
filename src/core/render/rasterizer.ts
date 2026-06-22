@@ -1092,6 +1092,8 @@ async function rasterizeTextLayer(ctx: CanvasRenderingContext2D | OffscreenCanva
           templates: state.templates.map((t) => (t.id === rawTemplate.id ? { ...t, templateData, lottieData: templateData } : t)),
         }));
         template = templateData;
+        const { useTimelineStore } = await import("@/store/timelineStore");
+        useTimelineStore.getState().incrementEpoch();
       } catch (err) {
         console.error(`[Clypra:Rasterizer] Failed to lazy-load template data for template ${rawTemplate.id}:`, err);
       }
