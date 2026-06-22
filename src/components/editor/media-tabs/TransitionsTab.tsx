@@ -3,7 +3,7 @@
  * Displays available transitions that can be applied between clips on timeline
  */
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Wand2, Plus, AlertCircle } from "lucide-react";
 import type { TabProps } from "./types";
 import { useProjectStore } from "@/store/projectStore";
@@ -119,6 +119,21 @@ const SkeletonCard = () => (
 const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: () => void }> = ({ transition, onAddToTimeline }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [imageError, setImageError] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Handle video playback on hover
+  useEffect(() => {
+    if (videoRef.current) {
+      if (isHovered) {
+        videoRef.current.play().catch(() => {
+          // Autoplay failed, ignore
+        });
+      } else {
+        videoRef.current.pause();
+        videoRef.current.currentTime = 0;
+      }
+    }
+  }, [isHovered]);
 
   const handleAddToTimeline = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -138,7 +153,7 @@ const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: (
       {/* Preview area - with hover scale animation */}
       <div className="flex-1 flex items-center justify-center w-full select-none relative overflow-hidden transition-transform duration-500 ease-out group-hover:scale-[1.05]">
         {/* WebM Video Preview (shown on hover) */}
-        {transition.preview && <video src={transition.preview} autoPlay loop muted playsInline className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-100 z-10" : "opacity-0 z-0"}`} />}
+        {transition.preview && <video ref={videoRef} src={transition.preview} loop muted playsInline preload="metadata" className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-100 z-10" : "opacity-0 z-0"}`} />}
 
         {/* Static Thumbnail */}
         {!imageError ? (
