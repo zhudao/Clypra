@@ -297,6 +297,17 @@ export class PreviewMediaPool {
         this.updateVideoElement(managed, clip, syncState, tracks, isPrimaryAudibleVideo, isTrackMuted);
       } else {
         // Inactive element: pause but don't dispose
+        // CRITICAL: Also update audio routing so element is ready when it becomes active
+        const track = this.trackMap.get(clip.trackId);
+        const isTrackMuted = track?.muted === true;
+        const clipVolume = clip.volume ?? 1.0;
+        const combinedVolume = (syncState.volume / 100) * clipVolume;
+
+        // Pre-configure audio for when element becomes active
+        // This prevents "no sound" issues when clips are activated
+        managed.element.muted = syncState.muted || isTrackMuted || clipVolume === 0;
+        managed.element.volume = managed.element.muted ? 0 : Math.max(0, Math.min(1, combinedVolume));
+
         if (!managed.element.paused) {
           managed.element.pause();
         }
@@ -313,6 +324,28 @@ export class PreviewMediaPool {
     }
 
     this.activeClipBindings = newActiveBindings;
+
+    // CRITICAL: Pause any cached elements not in active bindings
+    // This handles split clips where one half is cached but not currently bound
+    const activeCacheKeys = new Set(newActiveBindings.values());
+    for (const [cacheKey, managed] of this.videoCache) {
+      if (!activeCacheKeys.has(cacheKey)) {
+        // This element is cached but not bound to any active clip
+        if (!managed.element.paused) {
+          console.log(`[PreviewMediaPool] Pausing orphaned cached element: ${cacheKey}`);
+          managed.element.pause();
+          managed.playbackState = "idle";
+        }
+        if (managed.rvfcHandle !== null && this.hasRVFC) {
+          try {
+            managed.element.cancelVideoFrameCallback(managed.rvfcHandle);
+          } catch {
+            // ignore
+          }
+          managed.rvfcHandle = null;
+        }
+      }
+    }
 
     // LRU eviction: Remove unused cached elements (not just inactive ones)
     this.evictUnusedElements();
@@ -657,13 +690,20 @@ export class PreviewMediaPool {
       const drift = Math.abs(video.currentTime - clampedTime);
       const now = performance.now();
 
-      // Detect user scrubbing: large drift change (>2s) indicates manual seek
+      // Detect abnormal situations requiring immediate seek:
+      // 1. User scrubbing: large drift (>2s) indicates manual seek
+      // 2. Window regained focus: very large drift (>5s) after browser throttling
       const isUserScrubbing = drift > 2.0;
+      const isPostThrottling = drift > 5.0;
 
-      if (isUserScrubbing) {
-        // User scrubbing: immediate seek, no rate limiting
+      if (isUserScrubbing || isPostThrottling) {
+        // Immediate seek without rate limiting
         video.currentTime = clampedTime;
         managed.lastHardSeekAtMs = now;
+
+        if (isPostThrottling) {
+          console.log(`[PreviewMediaPool] Large drift detected (${drift.toFixed(1)}s) - likely window regained focus, forcing sync`);
+        }
       } else {
         // Automatic sync: rate-limited seeks to prevent audio glitches
         // Professional policy:
