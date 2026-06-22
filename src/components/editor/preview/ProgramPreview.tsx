@@ -114,7 +114,7 @@ export const ProgramPreview: React.FC = () => {
     });
     // console.log(`[ProgramPreview] Render #${renderCountRef.current} - Changed: ${changes.length > 0 ? changes.join(", ") : "unknown (no deps changed - likely setState or parent re-render)"}`);
   } else {
-    console.log(`[ProgramPreview] Render #${renderCountRef.current} - Initial mount`);
+    // console.log(`[ProgramPreview] Render #${renderCountRef.current} - Initial mount`);
   }
   prevDepsRef.current = currentDeps;
 
@@ -452,15 +452,25 @@ export const ProgramPreview: React.FC = () => {
     let lastRenderedTime: number = -1;
     let lastRenderedEpoch: number = -1;
     const GPU_MEMORY_LIMIT_MB = 128;
+    let forceRenderNeeded = false;
     const renderLoop = () => {
       if (!isActive) return;
 
       const state = renderStateRef.current;
+      // Read time directly from the PlaybackClock (imperative, no throttling)
+      // This is the single source of truth for playback time
+      // clockState.time is throttled to 10fps for UI updates and lags behind
       const timeToRender = state.clock.time;
       const isPlaying = state.clockState.state === "playing";
       const timeChanged = timeToRender !== lastRenderedTime;
       const epochChanged = state.epoch !== lastRenderedEpoch;
-      const needsRender = isPlaying || timeChanged || epochChanged;
+      // Always render the first frame (lastRenderedTime === -1)
+      const isFirstFrame = lastRenderedTime === -1;
+      const needsRender = isPlaying || timeChanged || epochChanged || isFirstFrame || forceRenderNeeded;
+
+      if (forceRenderNeeded) {
+        forceRenderNeeded = false;
+      }
 
       // Get the active track-level filter at the rendering time
       const getActiveFilterIR = (time: number) => {
@@ -575,9 +585,18 @@ export const ProgramPreview: React.FC = () => {
           if (error.message !== "Job cancelled" && isActive) console.error("Failed to render frame:", error);
         });
     };
+
+    // Subscribe to clock state changes to trigger renders when seeking
+    // This ensures we respond immediately to seek operations
+    const unsubscribeClock = clock.subscribe(() => {
+      // When clock state changes (especially after seek), flag that we need a render
+      forceRenderNeeded = true;
+    });
+
     rafId = requestAnimationFrame(renderLoop);
     return () => {
       isActive = false;
+      unsubscribeClock();
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (lastJobId) scheduler.cancel(lastJobId);
     };

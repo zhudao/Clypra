@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Film, Image as ImageIcon, Plus, Trash2, Pencil, MoreHorizontal, Clock, ChevronRight, Sparkles, Settings } from "lucide-react";
+import { Film, Image as ImageIcon, Plus, Trash2, Pencil, MoreHorizontal, Clock, ChevronRight, Sparkles, Settings, Activity } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { useProjectStore } from "@/store/projectStore";
@@ -42,8 +42,29 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
   const [renameValue, setRenameValue] = useState("");
   const [isRenaming, setIsRenaming] = useState(false);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const [showDiagnosticsModal, setShowDiagnosticsModal] = useState(false);
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState({
+    performance: false,
+    projectLoad: false,
+    textRender: false,
+    timelinePerf: false,
+    textTemplate: false,
+  });
   const menuRef = React.useRef<HTMLDivElement>(null);
   const { toggleSettingsModal } = useUIStore();
+
+  // Check current diagnostics status
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setDiagnosticsEnabled({
+        performance: localStorage.getItem("clypra.debug.performance") === "1",
+        projectLoad: localStorage.getItem("clypra.debug.projectLoad") === "1",
+        textRender: localStorage.getItem("clypra.debug.textRender") === "1",
+        timelinePerf: localStorage.getItem("debug:timeline-perf") === "true",
+        textTemplate: localStorage.getItem("debug:text-template") === "true",
+      });
+    }
+  }, [showDiagnosticsModal]);
 
   useEffect(() => {
     const loadRecentProjects = async () => {
@@ -118,6 +139,20 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
     }
   };
 
+  const toggleDiagnostic = (key: "performance" | "projectLoad" | "textRender" | "timelinePerf" | "textTemplate") => {
+    const storageKey = key === "performance" ? "clypra.debug.performance" : key === "projectLoad" ? "clypra.debug.projectLoad" : key === "textRender" ? "clypra.debug.textRender" : key === "timelinePerf" ? "debug:timeline-perf" : "debug:text-template";
+
+    const newValue = !diagnosticsEnabled[key];
+
+    if (newValue) {
+      localStorage.setItem(storageKey, key === "timelinePerf" || key === "textTemplate" ? "true" : "1");
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+
+    setDiagnosticsEnabled((prev) => ({ ...prev, [key]: newValue }));
+  };
+
   const formatDate = (dateStr: string | number) => {
     const date = new Date(dateStr);
     const now = new Date();
@@ -160,9 +195,15 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
             </div>
           </div>
 
-          <Button variant="ghost" size="icon-sm" onClick={toggleSettingsModal} title="Settings" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
-            <Settings className="w-3.5 h-3.5" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="icon-sm" onClick={() => setShowDiagnosticsModal(true)} title="Performance Diagnostics" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties} className={diagnosticsEnabled.performance || diagnosticsEnabled.projectLoad || diagnosticsEnabled.textRender || diagnosticsEnabled.timelinePerf || diagnosticsEnabled.textTemplate ? "text-accent" : ""}>
+              <Activity className="w-3.5 h-3.5" />
+            </Button>
+
+            <Button variant="ghost" size="icon-sm" onClick={toggleSettingsModal} title="Settings" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
+              <Settings className="w-3.5 h-3.5" />
+            </Button>
+          </div>
         </header>
 
         {/* ── Hero / New Project ────────────────────────────────── */}
@@ -331,6 +372,84 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
             </Button>
             <Button variant="default" onClick={handleConfirmDelete} disabled={isDeleting} className="bg-danger hover:bg-danger/80 cursor-pointer">
               {isDeleting ? "Deleting..." : "Delete"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Performance Diagnostics Modal */}
+      <Modal isOpen={showDiagnosticsModal} onClose={() => setShowDiagnosticsModal(false)} title="Performance Diagnostics">
+        <div className="p-5 space-y-5">
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 p-3 rounded-lg bg-surface border border-border">
+              <input type="checkbox" id="diag-performance" checked={diagnosticsEnabled.performance} onChange={() => toggleDiagnostic("performance")} className="mt-0.5 cursor-pointer" />
+              <div className="flex-1">
+                <label htmlFor="diag-performance" className="text-sm font-semibold text-text-primary cursor-pointer block">
+                  Performance Monitoring
+                </label>
+                <p className="text-xs text-text-muted mt-1">
+                  Track frame rendering, timeline operations, and component performance. Use <code className="px-1 py-0.5 rounded bg-bg text-accent text-[10px]">__performanceMonitor.getSummary()</code> in console.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3 p-3 rounded-lg bg-surface border border-border">
+              <input type="checkbox" id="diag-projectload" checked={diagnosticsEnabled.projectLoad} onChange={() => toggleDiagnostic("projectLoad")} className="mt-0.5 cursor-pointer" />
+              <div className="flex-1">
+                <label htmlFor="diag-projectload" className="text-sm font-semibold text-text-primary cursor-pointer block">
+                  Project Load Diagnostics
+                </label>
+                <p className="text-xs text-text-muted mt-1">Detailed breakdown of project loading phases. Shows which parts take the longest to load.</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3 p-3 rounded-lg bg-surface border border-border">
+              <input type="checkbox" id="diag-textrender" checked={diagnosticsEnabled.textRender} onChange={() => toggleDiagnostic("textRender")} className="mt-0.5 cursor-pointer" />
+              <div className="flex-1">
+                <label htmlFor="diag-textrender" className="text-sm font-semibold text-text-primary cursor-pointer block">
+                  Text Render Tracing
+                </label>
+                <p className="text-xs text-text-muted mt-1">
+                  Verbose logging for text rendering pipeline. Use <code className="px-1 py-0.5 rounded bg-bg text-accent text-[10px]">localStorage.setItem("clypra.debug.textRender", "1")</code>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3 p-3 rounded-lg bg-accent/10 border border-accent/30">
+              <input type="checkbox" id="diag-timelineperf" checked={diagnosticsEnabled.timelinePerf} onChange={() => toggleDiagnostic("timelinePerf")} className="mt-0.5 cursor-pointer" />
+              <div className="flex-1">
+                <label htmlFor="diag-timelineperf" className="text-sm font-semibold text-accent cursor-pointer block">
+                  ⏱️ Timeline Performance (Focused)
+                </label>
+                <p className="text-xs text-text-muted mt-1">
+                  Focused timeline operation logging. Tracks hydration, clip additions, and timeline mutations. Use <code className="px-1 py-0.5 rounded bg-bg text-accent text-[10px]">__timelinePerf.enable()</code> in console.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+              <input type="checkbox" id="diag-texttemplate" checked={diagnosticsEnabled.textTemplate} onChange={() => toggleDiagnostic("textTemplate")} className="mt-0.5 cursor-pointer" />
+              <div className="flex-1">
+                <label htmlFor="diag-texttemplate" className="text-sm font-semibold text-yellow-600 dark:text-yellow-400 cursor-pointer block">
+                  📐 Text Template Bounds (Debug)
+                </label>
+                <p className="text-xs text-text-muted mt-1">
+                  Debug text template bounding box issues. Logs canvas size, content bounds, and clip dimensions. Use <code className="px-1 py-0.5 rounded bg-bg text-accent text-[10px]">__textTemplateDebug.enable()</code> in console.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-accent/10 border border-accent/20">
+            <p className="text-xs text-text-muted leading-relaxed">
+              <strong className="text-accent font-semibold">Note:</strong> These diagnostics output to the browser console. Open DevTools (F12 or Cmd+Option+I) to view detailed performance metrics and traces.
+              {(diagnosticsEnabled.performance || diagnosticsEnabled.projectLoad || diagnosticsEnabled.textRender || diagnosticsEnabled.timelinePerf || diagnosticsEnabled.textTemplate) && " Refresh the page after toggling for changes to take effect."}
+            </p>
+          </div>
+
+          <div className="flex gap-3 justify-end pt-2">
+            <Button variant="default" onClick={() => setShowDiagnosticsModal(false)}>
+              Done
             </Button>
           </div>
         </div>

@@ -30,8 +30,13 @@ interface TrackProps {
 }
 
 const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onClipDragStart, onClipDragMove, onClipDragEnd, dragState }) => {
-  const { selectedClipIds, selectedGapId, selectedTrackId, selectedTransitionId, selectTransition } = useUIStore();
-  const { gaps = [], transitions = [] } = useTimelineStore();
+  const selectedClipIds = useUIStore((s) => s.selectedClipIds);
+  const selectedGapId = useUIStore((s) => s.selectedGapId);
+  const selectedTrackId = useUIStore((s) => s.selectedTrackId);
+  const selectedTransitionId = useUIStore((s) => s.selectedTransitionId);
+  const selectTransition = useUIStore((s) => s.selectTransition);
+  const gaps = useTimelineStore((s) => s.gaps ?? []);
+  const transitions = useTimelineStore((s) => s.transitions ?? []);
   const { getMediaAsset } = useTimeline();
 
   // Drop handler for media assets from MediaTab
@@ -254,4 +259,41 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
   );
 };
 
-export const Track = React.memo(TrackInner);
+// Custom comparison function to prevent unnecessary re-renders
+const arePropsEqual = (prevProps: TrackProps, nextProps: TrackProps) => {
+  // Check track properties
+  if (prevProps.track.id !== nextProps.track.id || prevProps.track.locked !== nextProps.track.locked || prevProps.track.visible !== nextProps.track.visible || prevProps.track.height !== nextProps.track.height) {
+    return false;
+  }
+
+  // Check pixelsPerSecond
+  if (prevProps.pixelsPerSecond !== nextProps.pixelsPerSecond) {
+    return false;
+  }
+
+  // Check clips array - compare by length and IDs only (shallow check)
+  if (prevProps.clips.length !== nextProps.clips.length) {
+    return false;
+  }
+
+  // Check if clip IDs or key properties changed
+  for (let i = 0; i < prevProps.clips.length; i++) {
+    const prevClip = prevProps.clips[i];
+    const nextClip = nextProps.clips[i];
+    if (prevClip.id !== nextClip.id || prevClip.startTime !== nextClip.startTime || prevClip.duration !== nextClip.duration) {
+      return false;
+    }
+  }
+
+  // Check dragState
+  const prevDrag = prevProps.dragState;
+  const nextDrag = nextProps.dragState;
+  if (prevDrag?.draggingClipId !== nextDrag?.draggingClipId || prevDrag?.offsetX !== nextDrag?.offsetX || prevDrag?.offsetY !== nextDrag?.offsetY || prevDrag?.isInvalidPosition !== nextDrag?.isInvalidPosition || prevDrag?.targetTrackId !== nextDrag?.targetTrackId) {
+    return false;
+  }
+
+  // Props are equal - skip re-render
+  return true;
+};
+
+export const Track = React.memo(TrackInner, arePropsEqual);

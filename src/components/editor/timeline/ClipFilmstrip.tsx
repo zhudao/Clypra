@@ -20,6 +20,7 @@ import { createRasterSurface, type AnyRasterSurface } from "@/lib/renderEngine/w
 import { useFilmstrip } from "@/lib/filmstrip/useFilmstrip";
 import { getFilmstripTileWidthForTier } from "@/lib/filmstrip/filmstripLayout";
 import { normalizePathForTauriInvoke } from "@/lib/platform/tauri";
+import { useTimelineStore } from "@/store/timelineStore";
 import type { Clip, MediaAsset } from "@/types";
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
@@ -44,11 +45,13 @@ export interface ClipFilmstripProps {
   pixelsPerSecond: number;
   stripHeightPx?: number;
   className?: string;
-  viewportScrollLeft?: number;
-  viewportWidth?: number;
 }
 
-export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, stripHeightPx = 40, className, viewportScrollLeft = 0, viewportWidth = 1200 }: ClipFilmstripProps) {
+export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, stripHeightPx = 40, className }: ClipFilmstripProps) {
+  // PERF: Read viewport scroll state only in ClipFilmstrip (not in parent Clip component)
+  // This prevents all clips from re-rendering on scroll - only filmstrips re-render
+  const viewportScrollLeft = useTimelineStore((s) => s.scrollLeft);
+  const viewportWidth = useTimelineStore((s) => s.viewportWidth);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const surfaceRef = useRef<AnyRasterSurface | null>(null);
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);

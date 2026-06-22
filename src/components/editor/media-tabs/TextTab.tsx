@@ -533,7 +533,6 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
             <div className="flex flex-col h-full">
               {/* Category tabs for templates */}
               <div className="relative shrink-0 border-b border-border/40 bg-surface/5">
-                {/* <div className="absolute left-0 top-0 bottom-0 w-3 bg-linear-to-l to-surface from-transparent pointer-events-none z-10" /> */}
                 <div className="flex overflow-x-auto gap-2 p-1 whitespace-nowrap" style={{ scrollbarWidth: "none" }}>
                   {templateCategories.map((cat) => (
                     <button key={cat} onClick={() => setActiveCategory(cat)} className={`px-2 py-1 text-[11px] font-medium rounded-sm transition-colors cursor-pointer hover:bg-accent/10 hover:text-accent ${activeCategory === cat ? "bg-accent/10 text-accent" : "text-text-muted"}`}>
@@ -541,7 +540,6 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
                     </button>
                   ))}
                 </div>
-                {/* <div className="absolute right-0 top-0 bottom-0 w-3 bg-linear-to-l from-surface to-transparent pointer-events-none z-10" /> */}
               </div>
 
               {/* Templates grid */}

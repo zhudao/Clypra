@@ -49,7 +49,7 @@ function HTML5VideoFallback({ videoPath, currentTime, isPlaying, onTimeUpdate, c
     if (!video) return;
 
     if (isPlaying) {
-      video.play().catch((err) => console.log("Video play interrupted:", err));
+      video.play().catch(() => {});
     } else {
       video.pause();
     }
@@ -147,7 +147,6 @@ export function GPUPreview({ videoPath, currentTime, isPlaying, width, height, d
       gpuCacheRef.current = new GPUTextureCache(canvasRef.current);
       setUseGPUCache(true);
     } catch (err) {
-      console.error("[GPUPreview] ❌ Failed to initialize GPU cache:", err);
       setUseGPUCache(false);
     }
 
@@ -226,7 +225,7 @@ export function GPUPreview({ videoPath, currentTime, isPlaying, width, height, d
         globalGPUCache.registerViewport(componentId, new Set([textureKey]), 10);
       }
     } catch (err) {
-      console.error(`[GPUPreview] Failed to render frame at ${time}s:`, err);
+      // Frame render failed silently
     }
   };
 
