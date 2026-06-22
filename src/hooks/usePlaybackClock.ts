@@ -88,7 +88,10 @@ export function useTransportControls() {
 
   return useMemo(
     () => ({
-      play: () => authority?.play(),
+      play: () => {
+        getActiveSessionOrNull()?.unlockPreviewAudio();
+        authority?.play();
+      },
       pause: () => authority?.pause(),
       stop: () => authority?.stop(),
       seek: (time: number) => authority?.seek(time),

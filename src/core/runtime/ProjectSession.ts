@@ -306,6 +306,14 @@ export class ProjectSession {
   }
 
   /**
+   * Unlock autoplay restrictions for all video/audio preview elements.
+   * MUST be called synchronously inside a user gesture handler.
+   */
+  unlockPreviewAudio(): void {
+    this._previewMediaPool?.unlockAudio();
+  }
+
+  /**
    * @deprecated Video elements are now managed by PreviewMediaPool.
    * Kept for backward compatibility during transition.
    */

@@ -299,6 +299,51 @@ export class PreviewMediaPool {
     }
   }
 
+  /**
+   * Unlock autoplay audio restrictions for all pooled media elements.
+   * MUST be called synchronously inside a user gesture event handler (like click).
+   */
+  unlockAudio(): void {
+    for (const managed of this.videos.values()) {
+      const video = managed.element;
+      const wasMuted = video.muted;
+      video.muted = true;
+      const promise = video.play();
+      if (promise !== undefined) {
+        promise.then(() => {
+          video.pause();
+          video.muted = wasMuted;
+        }).catch(() => {
+          // Promise might be aborted, but user activation is registered anyway
+          video.pause();
+          video.muted = wasMuted;
+        });
+      } else {
+        video.pause();
+        video.muted = wasMuted;
+      }
+    }
+
+    for (const managed of this.audios.values()) {
+      const audio = managed.element;
+      const wasMuted = audio.muted;
+      audio.muted = true;
+      const promise = audio.play();
+      if (promise !== undefined) {
+        promise.then(() => {
+          audio.pause();
+          audio.muted = wasMuted;
+        }).catch(() => {
+          audio.pause();
+          audio.muted = wasMuted;
+        });
+      } else {
+        audio.pause();
+        audio.muted = wasMuted;
+      }
+    }
+  }
+
   // ─── Private: Video lifecycle ─────────────────────────────────────────────
 
   private createVideo(key: string, clipId: string, mediaId: string, sourcePath: string): ManagedVideo {
