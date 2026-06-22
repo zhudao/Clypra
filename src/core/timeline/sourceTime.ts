@@ -10,7 +10,7 @@ const clamp = (value: number, min: number, max: number): number => Math.max(min,
 
 export function resolveClipSourceTime(clip: Pick<Clip, "startTime" | "duration" | "trimIn" | "trimOut">, timelineTime: number, options?: { clampToRange?: boolean; frameRate?: number }): SourceTimeResolution {
   const localTime = timelineTime - clip.startTime;
-  const active = localTime >= 0 && localTime <= clip.duration;
+  const active = localTime >= 0 && localTime < clip.duration;
   const rawSourceTime = clip.trimIn + localTime;
 
   if (options?.clampToRange) {
@@ -29,7 +29,7 @@ export function resolveClipSourceTime(clip: Pick<Clip, "startTime" | "duration" 
 
 export function resolveTimelineItemSourceTime(source: TimelineSourceRange, placement: { startTime: number; duration: number }, timelineTime: number, options?: { clampToRange?: boolean }): SourceTimeResolution {
   const localTime = timelineTime - placement.startTime;
-  const active = localTime >= 0 && localTime <= placement.duration;
+  const active = localTime >= 0 && localTime < placement.duration;
   const rate = source.playbackRate || 1;
   const rawOffset = localTime * rate;
   const rawSourceTime = source.reverse ? source.trimOut - rawOffset : source.trimIn + rawOffset;

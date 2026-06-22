@@ -299,6 +299,13 @@ export class ProjectSession {
   }
 
   /**
+   * Immediately pause preview media elements without waiting for RAF sync.
+   */
+  pausePreviewMedia(): void {
+    this._previewMediaPool?.pauseAll();
+  }
+
+  /**
    * @deprecated Video elements are now managed by PreviewMediaPool.
    * Kept for backward compatibility during transition.
    */

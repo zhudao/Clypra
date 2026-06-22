@@ -85,7 +85,17 @@ function getClipSourceTime(clip: Clip, clockTime: number): number | null {
     return null; // Clip not active
   }
   const trimIn = clip.trimIn || 0;
-  return Math.max(0, trimIn + clipLocalTime);
+  const trimOut = clip.trimOut ?? trimIn + clip.duration;
+  const sourceTime = Math.max(0, trimIn + clipLocalTime);
+
+  // Keep the last decodable frame alive exactly at the clip boundary.
+  // This avoids a black flash when a split lands on the current playhead.
+  return Math.min(sourceTime, Math.max(0, trimOut - 0.001));
+}
+
+function getClipPrewarmSourceTime(clip: Clip, clockTime: number): number | null {
+  if (clockTime >= clip.startTime) return null;
+  return Math.max(0, clip.trimIn || 0);
 }
 
 export class PreviewMediaPool {
@@ -129,6 +139,7 @@ export class PreviewMediaPool {
       if (track?.visible === false) continue;
 
       const key = `${clip.id}-${clip.mediaId}`;
+
       if (asset?.type === "video") {
         desiredVideoKeys.add(key);
         // Video clip audio is handled by the video element decode clock.
@@ -242,6 +253,28 @@ export class PreviewMediaPool {
       result.set(key, managed.element);
     }
     return result;
+  }
+
+  /**
+   * Immediately pause all managed media elements.
+   * Used when the desktop app loses foreground before RAF has a chance to sync.
+   */
+  pauseAll(): void {
+    for (const managed of this.videos.values()) {
+      if (managed.rvfcHandle !== null && this.hasRVFC) {
+        try {
+          managed.element.cancelVideoFrameCallback(managed.rvfcHandle);
+        } catch {
+          // ignore
+        }
+        managed.rvfcHandle = null;
+      }
+      managed.element.pause();
+    }
+
+    for (const managed of this.audios.values()) {
+      managed.element.pause();
+    }
   }
 
   /**
@@ -398,6 +431,13 @@ export class PreviewMediaPool {
     }
 
     if (sourceTime === null) {
+      const prewarmSourceTime = getClipPrewarmSourceTime(clip, syncState.time);
+      if (prewarmSourceTime !== null) {
+        const clampedPrewarmTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.max(0, Math.min(prewarmSourceTime, video.duration - 0.001)) : prewarmSourceTime;
+        if (Math.abs(video.currentTime - clampedPrewarmTime) > 0.01) {
+          video.currentTime = clampedPrewarmTime;
+        }
+      }
       // Clip not active at current time
       if (!video.paused) {
         video.pause();

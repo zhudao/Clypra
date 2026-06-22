@@ -60,6 +60,10 @@ interface AtlasCell {
   vh: number;
 }
 
+function isValidArtifact(artifact: TransportArtifact): boolean {
+  return !!artifact.bitmap && artifact.bitmap.width > 0 && artifact.bitmap.height > 0;
+}
+
 function packAtlas(artifacts: readonly TransportArtifact[], cols: number): { atlasW: number; atlasH: number; cellW: number; cellH: number; cells: AtlasCell[] } {
   if (artifacts.length === 0) return { atlasW: 1, atlasH: 1, cellW: 1, cellH: 1, cells: [] };
 
@@ -153,7 +157,8 @@ export class WebGLRasterSurface {
   // ── Filmstrip render ────────────────────────────────────────────────────────
 
   drawFilmstrip(artifacts: readonly TransportArtifact[], layout: FilmstripLayout): void {
-    if (this._disposed || artifacts.length === 0) {
+    const validArtifacts = artifacts.filter(isValidArtifact);
+    if (this._disposed || validArtifacts.length === 0) {
       this._clear(layout);
       return;
     }
@@ -175,8 +180,8 @@ export class WebGLRasterSurface {
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     // ── Upload atlas ────────────────────────────────────────────────────────
-    const cols = Math.min(artifacts.length, 16); // max 16 per row
-    const { atlasW, atlasH, cellW, cellH, cells } = packAtlas(artifacts, cols);
+    const cols = Math.min(validArtifacts.length, 16); // max 16 per row
+    const { atlasW, atlasH, cellW, cellH, cells } = packAtlas(validArtifacts, cols);
 
     gl.bindTexture(gl.TEXTURE_2D, this._atlasTexture);
     // Allocate atlas
@@ -187,13 +192,8 @@ export class WebGLRasterSurface {
     }
 
     // Upload each bitmap into its atlas cell
-    // DEFENSIVE: Skip any invalid/closed bitmaps to prevent black gaps
-    for (let i = 0; i < artifacts.length; i++) {
-      const art = artifacts[i];
-      if (!art.bitmap || art.bitmap.width === 0 || art.bitmap.height === 0) {
-        console.warn(`[WebGLRasterSurface DEBUG] Skipping invalid/closed bitmap at index ${i}:`, art);
-        continue;
-      }
+    for (let i = 0; i < validArtifacts.length; i++) {
+      const art = validArtifacts[i];
       try {
         const col = i % cols;
         const row = Math.floor(i / cols);
@@ -215,8 +215,8 @@ export class WebGLRasterSurface {
     // Map tiles to artifacts based on timestamp, not array index.
     // This prevents blank gaps when artifacts.length < tileCount (heavy zoom).
     const hasTrim = layout.trimIn !== undefined && layout.trimOut !== undefined;
-    const firstTimestamp = hasTrim ? layout.trimIn! * 1000 : (artifacts[0]?.timestampMs ?? 0);
-    const lastTimestamp = hasTrim ? layout.trimOut! * 1000 : (artifacts[artifacts.length - 1]?.timestampMs ?? 0);
+    const firstTimestamp = hasTrim ? layout.trimIn! * 1000 : (validArtifacts[0]?.timestampMs ?? 0);
+    const lastTimestamp = hasTrim ? layout.trimOut! * 1000 : (validArtifacts[validArtifacts.length - 1]?.timestampMs ?? 0);
     const timeSpan = lastTimestamp - firstTimestamp;
 
     // Calculate pixelsPerSecond derived from total clip duration in seconds
@@ -237,12 +237,8 @@ export class WebGLRasterSurface {
       // Find closest valid artifact by timestamp (unbounded - no threshold)
       let artIdx = 0;
       let minDiff = Infinity;
-      for (let j = 0; j < artifacts.length; j++) {
-        const art = artifacts[j];
-        // DEFENSIVE: Skip invalid/closed bitmaps
-        if (!art.bitmap || art.bitmap.width === 0 || art.bitmap.height === 0) {
-          continue;
-        }
+      for (let j = 0; j < validArtifacts.length; j++) {
+        const art = validArtifacts[j];
         const diff = Math.abs(art.timestampMs - targetTimestamp);
         if (diff < minDiff) {
           minDiff = diff;
@@ -251,12 +247,8 @@ export class WebGLRasterSurface {
       }
 
       const cell = cells[artIdx];
-      const art = artifacts[artIdx];
+      const art = validArtifacts[artIdx];
 
-      // DEFENSIVE: Skip this tile if the selected artifact is invalid
-      if (!art.bitmap || art.bitmap.width === 0 || art.bitmap.height === 0) {
-        continue;
-      }
       const tileX = i * tileW;
 
       // Center-crop: scale bitmap to cover tile, then crop to fit
