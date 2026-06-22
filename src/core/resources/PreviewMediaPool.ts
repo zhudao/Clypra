@@ -70,6 +70,8 @@ interface ManagedVideo {
   isActive: boolean;
   /** Playback state machine */
   playbackState: "idle" | "playing" | "paused" | "blocked";
+  /** Grace period - don't mark as orphaned if recently created */
+  registrationGraceUntil: number;
 }
 
 interface ManagedAudio {
@@ -142,6 +144,9 @@ export class PreviewMediaPool {
   private videoCache = new Map<string, ManagedVideo>();
   // Active clip-to-element binding (changes as clips move in/out of window)
   private activeClipBindings = new Map<string, string>(); // clipId -> cacheKey
+  // CRITICAL: Timeline clip registry - tracks ALL clips in timeline (not just active ones)
+  // This prevents evicting elements for clips that still exist but are temporarily inactive
+  private timelineClipRegistry = new Map<string, string>(); // clipId -> cacheKey
 
   private audios = new Map<string, ManagedAudio>();
   private lastSyncState: PreviewSyncState | null = null;
@@ -173,7 +178,7 @@ export class PreviewMediaPool {
 
   // LRU cache limits
   private readonly MAX_CACHED_VIDEOS = 20;
-  private readonly CACHE_EVICTION_AGE_MS = 30000; // 30 seconds unused
+  private readonly CACHE_EVICTION_AGE_MS = 60000; // 60 seconds unused (increased for split workflows)
 
   constructor() {
     this.container = document.createElement("div");
@@ -224,9 +229,30 @@ export class PreviewMediaPool {
 
     this.trackMap = new Map(tracks.map((track) => [track.id, track]));
 
+    // DEBUG: Log what clips we received
+    if (this.syncCallCount % 50 === 0 || structuralChange.changed) {
+      console.log(`[PreviewMediaPool DEBUG] Sync #${this.syncCallCount} received:`, {
+        clipCount: clips.length,
+        clipIds: clips.map((c) => c.id),
+        structuralChange,
+        time: syncState.time.toFixed(3),
+      });
+    }
+
     // NEW ARCHITECTURE: Build desired state without immediate disposal
     const desiredVideoBindings = new Map<string, { cacheKey: string; clip: Clip; asset: MediaAsset; isActive: boolean }>();
     const desiredAudioKeys = new Set<string>();
+
+    // CRITICAL: Detect if this is a full sync (structural change) or partial sync (active window only)
+    // On project load or clip add/remove, we get structural changes. During playback, no changes.
+    const isFullSync = structuralChange.changed;
+
+    // If full sync with removals, clear and rebuild registry
+    if (isFullSync && structuralChange.removed.length > 0) {
+      for (const removedClipId of structuralChange.removed) {
+        this.timelineClipRegistry.delete(removedClipId);
+      }
+    }
 
     for (const clip of clips) {
       const asset = assets.find((a) => a.id === clip.mediaId);
@@ -245,10 +271,21 @@ export class PreviewMediaPool {
         const isActive = sourceTime !== null; // Is clip in active playback window?
 
         desiredVideoBindings.set(clip.id, { cacheKey, clip, asset, isActive });
+
+        // CRITICAL: Add/update this clip in timeline registry (accumulate during playback)
+        this.timelineClipRegistry.set(clip.id, cacheKey);
       } else if (asset?.type === "audio" || (clip.kind === "audio" && (clip as any).audioPath)) {
         const key = `${clip.id}-${clip.mediaId}`;
         desiredAudioKeys.add(key);
       }
+    }
+
+    // DEBUG: Log timeline registry contents
+    if (this.syncCallCount % 50 === 0) {
+      console.log(`[PreviewMediaPool DEBUG] Timeline registry:`, {
+        size: this.timelineClipRegistry.size,
+        entries: Array.from(this.timelineClipRegistry.entries()),
+      });
     }
 
     // Remove obsolete audio elements (audio disposal is simpler, keep existing logic)
@@ -325,14 +362,51 @@ export class PreviewMediaPool {
 
     this.activeClipBindings = newActiveBindings;
 
-    // CRITICAL: Pause any cached elements not in active bindings
-    // This handles split clips where one half is cached but not currently bound
+    // FIRST: Pause inactive elements (in timeline but not currently active in playback window)
+    // This prevents multiple clips from playing simultaneously
     const activeCacheKeys = new Set(newActiveBindings.values());
+    const timelineCacheKeys = new Set(this.timelineClipRegistry.values());
+
     for (const [cacheKey, managed] of this.videoCache) {
-      if (!activeCacheKeys.has(cacheKey)) {
-        // This element is cached but not bound to any active clip
+      const isActive = activeCacheKeys.has(cacheKey);
+      const isInTimeline = timelineCacheKeys.has(cacheKey);
+
+      // If element is in timeline but NOT currently active, pause it
+      if (isInTimeline && !isActive && !managed.element.paused) {
+        managed.element.pause();
+        managed.playbackState = "idle";
+        if (managed.rvfcHandle !== null && this.hasRVFC) {
+          try {
+            managed.element.cancelVideoFrameCallback(managed.rvfcHandle);
+          } catch {
+            // ignore
+          }
+          managed.rvfcHandle = null;
+        }
+      }
+    }
+
+    // SECOND: Clean up truly orphaned elements (not in timeline at all)
+    // These are elements from deleted clips or old cache entries
+    const now = performance.now();
+
+    // DEBUG: Log orphan check details
+    if (this.syncCallCount % 50 === 0) {
+      console.log(`[PreviewMediaPool DEBUG] Orphan check:`, {
+        cachedElements: Array.from(this.videoCache.keys()),
+        activeKeys: Array.from(activeCacheKeys),
+        timelineCacheKeys: Array.from(timelineCacheKeys),
+      });
+    }
+
+    for (const [cacheKey, managed] of this.videoCache) {
+      const isInGracePeriod = now < managed.registrationGraceUntil;
+      const isInTimeline = timelineCacheKeys.has(cacheKey);
+
+      // Only mark as orphaned if NOT in timeline AND past grace period
+      if (!isInTimeline && !isInGracePeriod) {
         if (!managed.element.paused) {
-          console.log(`[PreviewMediaPool] Pausing orphaned cached element: ${cacheKey}`);
+          console.log(`[PreviewMediaPool] Pausing truly orphaned element (not in timeline, grace expired): ${cacheKey}`);
           managed.element.pause();
           managed.playbackState = "idle";
         }
@@ -344,6 +418,9 @@ export class PreviewMediaPool {
           }
           managed.rvfcHandle = null;
         }
+      } else if (isInTimeline) {
+        // Element is in timeline - extend grace period (it's proven to be valid)
+        managed.registrationGraceUntil = now + 10000; // Keep grace for 10 more seconds
       }
     }
 
@@ -382,13 +459,16 @@ export class PreviewMediaPool {
 
   /**
    * Get video elements for scheduler rasterization bypass.
-   * Returns ALL cached elements (not just active ones) so scheduler can query readyState.
+   * Returns ALL timeline clip elements (not just currently active ones) so scheduler
+   * can query readyState and render transitions between clips.
    */
   getVideoElements(): Map<string, HTMLVideoElement> {
     const result = new Map<string, HTMLVideoElement>();
 
     // Map by clip-media composite key that rasterizer expects
-    for (const [clipId, cacheKey] of this.activeClipBindings) {
+    // Use timeline registry (not just active bindings) so rasterizer can access
+    // ALL clip elements including those temporarily inactive during transitions
+    for (const [clipId, cacheKey] of this.timelineClipRegistry) {
       const managed = this.videoCache.get(cacheKey);
       if (managed) {
         // Use legacy key format: ${clipId}-${mediaId}
@@ -450,6 +530,7 @@ export class PreviewMediaPool {
     }
     this.videoCache.clear();
     this.activeClipBindings.clear();
+    this.timelineClipRegistry.clear();
 
     for (const [key, managed] of this.audios) {
       this.disposeAudio(key, managed);
@@ -551,6 +632,9 @@ export class PreviewMediaPool {
       lastUsedAt: performance.now(),
       isActive: false,
       playbackState: "idle",
+      // Grace period: don't mark as orphaned for 5 seconds after creation
+      // This allows time for the clip to be seen by sync() and registered
+      registrationGraceUntil: performance.now() + 5000,
       // ────────────────────────────────────────────────────────────────────
     };
 
@@ -652,6 +736,11 @@ export class PreviewMediaPool {
 
     // Only one primary video clip is audible; others stay muted.
     const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || !isPrimaryAudibleVideo || clipVolume === 0;
+
+    if (!shouldMute && video.muted) {
+      console.log(`[PreviewMediaPool] Unmuting ${managed.clipId} - isPrimary:${isPrimaryAudibleVideo}`);
+    }
+
     video.muted = shouldMute;
     video.volume = shouldMute ? 0 : Math.max(0, Math.min(1, combinedVolume));
     video.playbackRate = syncState.speed;
@@ -691,19 +780,21 @@ export class PreviewMediaPool {
       const now = performance.now();
 
       // Detect abnormal situations requiring immediate seek:
-      // 1. User scrubbing: large drift (>2s) indicates manual seek
-      // 2. Window regained focus: very large drift (>5s) after browser throttling
-      const isUserScrubbing = drift > 2.0;
-      const isPostThrottling = drift > 5.0;
+      // 1. User scrubbing: large drift (>2s but <5s) indicates manual seek
+      // 2. Window regained focus: very large drift (≥5s) after browser throttling
+      const isUserScrubbing = drift > 2.0 && drift < 5.0;
+      const isPostThrottling = drift >= 5.0;
 
-      if (isUserScrubbing || isPostThrottling) {
-        // Immediate seek without rate limiting
+      if (isPostThrottling) {
+        // Very large drift - likely browser throttling during window blur
+        // Force immediate resync and allow rapid subsequent seeks by setting timer to distant past
+        video.currentTime = clampedTime;
+        managed.lastHardSeekAtMs = now - 10000; // Set to 10s ago to allow immediate next seek
+        console.log(`[PreviewMediaPool] Large drift detected (${drift.toFixed(1)}s) - forcing resync, timer reset for rapid recovery`);
+      } else if (isUserScrubbing) {
+        // User scrubbing: immediate seek without rate limiting
         video.currentTime = clampedTime;
         managed.lastHardSeekAtMs = now;
-
-        if (isPostThrottling) {
-          console.log(`[PreviewMediaPool] Large drift detected (${drift.toFixed(1)}s) - likely window regained focus, forcing sync`);
-        }
       } else {
         // Automatic sync: rate-limited seeks to prevent audio glitches
         // Professional policy:
@@ -878,26 +969,42 @@ export class PreviewMediaPool {
   /**
    * Evict unused elements from cache (LRU policy).
    * Called from sync() after reconciliation.
+   *
+   * CRITICAL: Never evict elements for clips that still exist in timeline.
+   * Only evict elements that are both:
+   * 1. Not referenced by any clip in timeline registry
+   * 2. Either too old OR cache is over capacity
    */
   private evictUnusedElements(): void {
     const now = performance.now();
     const toEvict: string[] = [];
 
-    // Find candidates: unused for CACHE_EVICTION_AGE_MS
+    // Build set of cache keys that are protected (referenced by timeline clips)
+    const protectedCacheKeys = new Set(this.timelineClipRegistry.values());
+
+    // Find candidates: unused for CACHE_EVICTION_AGE_MS AND not in timeline
     for (const [key, managed] of this.videoCache) {
+      // NEVER evict elements for clips still in timeline
+      if (protectedCacheKeys.has(key)) {
+        continue;
+      }
+
       const age = now - managed.lastUsedAt;
       if (age > this.CACHE_EVICTION_AGE_MS) {
         toEvict.push(key);
       }
     }
 
-    // If still over limit, evict oldest first
+    // If still over limit, evict oldest unprotected first
     if (this.videoCache.size > this.MAX_CACHED_VIDEOS) {
-      const sorted = Array.from(this.videoCache.entries()).sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+      // Only consider unprotected elements for eviction
+      const unprotectedElements = Array.from(this.videoCache.entries())
+        .filter(([key]) => !protectedCacheKeys.has(key))
+        .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
 
       const excess = this.videoCache.size - this.MAX_CACHED_VIDEOS;
-      for (let i = 0; i < excess; i++) {
-        const key = sorted[i][0];
+      for (let i = 0; i < Math.min(excess, unprotectedElements.length); i++) {
+        const key = unprotectedElements[i][0];
         if (!toEvict.includes(key)) {
           toEvict.push(key);
         }
@@ -908,7 +1015,7 @@ export class PreviewMediaPool {
     for (const key of toEvict) {
       const managed = this.videoCache.get(key);
       if (managed) {
-        console.log(`[PreviewMediaPool] Evicting unused element: ${key} (unused for ${((now - managed.lastUsedAt) / 1000).toFixed(1)}s)`);
+        console.log(`[PreviewMediaPool] Evicting unused element: ${key} (unused for ${((now - managed.lastUsedAt) / 1000).toFixed(1)}s, not in timeline)`);
         this.disposeVideo(key, managed);
       }
     }
