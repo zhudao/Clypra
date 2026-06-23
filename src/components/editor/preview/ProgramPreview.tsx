@@ -462,10 +462,18 @@ export const ProgramPreview: React.FC = () => {
       // This is the single source of truth for playback time
       // clockState.time is throttled to 10fps for UI updates and lags behind
       const timeToRender = state.clock.time;
+
+      // FINDING-023: Round time to codec precision to prevent unnecessary seeks
+      // Video codecs use keyframes at intervals (e.g., 30fps = ~33ms precision)
+      // High-precision time values cause decoder resets every frame
+      // Round to 30fps precision (33.33ms) to match typical codec granularity
+      const codecPrecisionFps = 30;
+      const timeToRenderRounded = Math.round(timeToRender * codecPrecisionFps) / codecPrecisionFps;
+
       const playbackState = state.clock.state;
       const playbackSpeed = state.clock.speed;
       const isPlaying = playbackState === "playing";
-      const timeChanged = timeToRender !== lastRenderedTime;
+      const timeChanged = timeToRenderRounded !== lastRenderedTime;
       const epochChanged = state.epoch !== lastRenderedEpoch;
       // Always render the first frame (lastRenderedTime === -1)
       const isFirstFrame = lastRenderedTime === -1;
@@ -529,8 +537,8 @@ export const ProgramPreview: React.FC = () => {
       if (needsSync) {
         if (session && session.state === "active") {
           try {
-            session.syncPreviewMedia(getPreviewMediaSyncClips(state.clips, timeToRender), state.mediaAssets, state.tracks, {
-              time: timeToRender,
+            session.syncPreviewMedia(getPreviewMediaSyncClips(state.clips, timeToRenderRounded), state.mediaAssets, state.tracks, {
+              time: timeToRenderRounded,
               state: playbackState,
               speed: playbackSpeed,
               muted: isMuted,
@@ -549,7 +557,7 @@ export const ProgramPreview: React.FC = () => {
       }
 
       isRendering = true;
-      lastRenderedTime = timeToRender;
+      lastRenderedTime = timeToRenderRounded;
       lastRenderedEpoch = state.epoch;
       lastRenderedPlaybackState = playbackState;
       scheduler.updateTimeline(state.clips, state.tracks, state.mediaAssets, state.project, state.epoch, state.transitions);
@@ -559,10 +567,10 @@ export const ProgramPreview: React.FC = () => {
       if (gpuCache) {
         const renderW = profile.maxWidth;
         const renderH = profile.maxHeight;
-        const cacheKey = `preview:${state.project?.id}:${state.epoch}:${timeToRender.toFixed(3)}:${renderW}x${renderH}:${state.dpr}`;
+        const cacheKey = `preview:${state.project?.id}:${state.epoch}:${timeToRenderRounded.toFixed(3)}:${renderW}x${renderH}:${state.dpr}`;
         if (gpuCache.hasTexture(cacheKey)) {
           gpuCache.clear();
-          const filterIR = getActiveFilterIR(timeToRender);
+          const filterIR = getActiveFilterIR(timeToRenderRounded);
           gpuCache.renderTexture(cacheKey, 0, 0, state.displayWidth * state.dpr, state.displayHeight * state.dpr, filterIR);
           isRendering = false;
           return;
@@ -571,7 +579,7 @@ export const ProgramPreview: React.FC = () => {
       if (lastJobId) scheduler.cancel(lastJobId);
       const activeVideoElements = session?.getPreviewVideoElements() ?? new Map<string, HTMLVideoElement>();
       const jobId = scheduler.schedule({
-        time: timeToRender,
+        time: timeToRenderRounded,
         resolution: { width: profile.maxWidth, height: profile.maxHeight },
         pixelRatio: profile.useDpr ? profile.dprScale : 1.0,
         outputFormat: "imagebitmap",
@@ -591,10 +599,10 @@ export const ProgramPreview: React.FC = () => {
           }
           if (result.data instanceof ImageBitmap) {
             if (gpuCache) {
-              const cacheKey = `preview:${latestState.project?.id}:${latestState.epoch}:${timeToRender.toFixed(3)}:${profile.maxWidth}x${profile.maxHeight}:${latestState.dpr}`;
+              const cacheKey = `preview:${latestState.project?.id}:${latestState.epoch}:${timeToRenderRounded.toFixed(3)}:${profile.maxWidth}x${profile.maxHeight}:${latestState.dpr}`;
               gpuCache.uploadTexture(cacheKey, result.data, result.data.width, result.data.height);
               gpuCache.clear();
-              const filterIR = getActiveFilterIR(timeToRender);
+              const filterIR = getActiveFilterIR(timeToRenderRounded);
               gpuCache.renderTexture(cacheKey, 0, 0, latestState.displayWidth * latestState.dpr, latestState.displayHeight * latestState.dpr, filterIR);
               result.data.close();
               gpuCache.evictLRU(GPU_MEMORY_LIMIT_MB);
