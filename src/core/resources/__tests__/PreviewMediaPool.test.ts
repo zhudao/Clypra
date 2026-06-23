@@ -2526,3 +2526,381 @@ describe("PreviewMediaPool — FINDING-016: Play Promise Cancellation", () => {
     }
   });
 });
+
+describe("PreviewMediaPool — FINDING-022: Conditional Property Updates", () => {
+  let pool: PreviewMediaPool;
+
+  beforeEach(() => {
+    pool = new PreviewMediaPool();
+  });
+
+  afterEach(() => {
+    pool.dispose();
+  });
+
+  it("should not update element properties when values unchanged", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Initial sync
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    const videoElements = pool.getVideoElements();
+    const element = Array.from(videoElements.values())[0];
+    expect(element).toBeDefined();
+
+    // Track property setter calls by wrapping them
+    let mutedSetCount = 0;
+    let volumeSetCount = 0;
+    let playbackRateSetCount = 0;
+
+    const originalMutedDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "muted");
+    const originalVolumeDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "volume");
+    const originalPlaybackRateDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "playbackRate");
+
+    Object.defineProperty(element, "muted", {
+      get: originalMutedDescriptor?.get || (() => false),
+      set: (value: boolean) => {
+        mutedSetCount++;
+        originalMutedDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    Object.defineProperty(element, "volume", {
+      get: originalVolumeDescriptor?.get || (() => 1),
+      set: (value: number) => {
+        volumeSetCount++;
+        originalVolumeDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    Object.defineProperty(element, "playbackRate", {
+      get: originalPlaybackRateDescriptor?.get || (() => 1),
+      set: (value: number) => {
+        playbackRateSetCount++;
+        originalPlaybackRateDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    // Second sync with SAME properties - should not set properties
+    pool.sync(clips, assets, tracks, {
+      time: 2.6, // Time changed (needsRender=true)
+      state: "playing" as const,
+      speed: 1.0, // Same speed
+      muted: false, // Same muted
+      volume: 100, // Same volume
+    });
+
+    // With optimization: properties not set again (counts remain 0)
+    // Without optimization: properties set every sync (counts would be 1+)
+    expect(mutedSetCount).toBe(0);
+    expect(volumeSetCount).toBe(0);
+    expect(playbackRateSetCount).toBe(0);
+  });
+
+  it("should update element properties when values change", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Initial sync
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Change muted state
+    pool.sync(clips, assets, tracks, {
+      time: 2.6,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: true, // Changed
+      volume: 100,
+    });
+
+    const videoElements = pool.getVideoElements();
+    const element = Array.from(videoElements.values())[0];
+    expect(element.muted).toBe(true);
+
+    // Change volume
+    pool.sync(clips, assets, tracks, {
+      time: 2.7,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: true,
+      volume: 50, // Changed
+    });
+
+    // Volume should be updated (roughly 0.5 since muted=true sets volume to 0)
+    // When muted changes to false, volume will be set
+
+    // Unmute and set volume
+    pool.sync(clips, assets, tracks, {
+      time: 2.8,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false, // Changed
+      volume: 50,
+    });
+
+    // Change playback rate
+    pool.sync(clips, assets, tracks, {
+      time: 2.9,
+      state: "playing" as const,
+      speed: 2.0, // Changed
+      muted: false,
+      volume: 50,
+    });
+
+    expect(element.playbackRate).toBe(2.0);
+  });
+
+  it("should avoid unnecessary property updates during 60fps playback", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 10)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Initial sync
+    pool.sync(clips, assets, tracks, {
+      time: 0.0,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    const videoElements = pool.getVideoElements();
+    const element = Array.from(videoElements.values())[0];
+
+    // Track setter calls
+    let totalSetterCalls = 0;
+    const originalMutedDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "muted");
+    const originalVolumeDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "volume");
+    const originalPlaybackRateDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "playbackRate");
+
+    Object.defineProperty(element, "muted", {
+      get: originalMutedDescriptor?.get || (() => false),
+      set: (value: boolean) => {
+        totalSetterCalls++;
+        originalMutedDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    Object.defineProperty(element, "volume", {
+      get: originalVolumeDescriptor?.get || (() => 1),
+      set: (value: number) => {
+        totalSetterCalls++;
+        originalVolumeDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    Object.defineProperty(element, "playbackRate", {
+      get: originalPlaybackRateDescriptor?.get || (() => 1),
+      set: (value: number) => {
+        totalSetterCalls++;
+        originalPlaybackRateDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    // Simulate 60fps playback for 1 second (60 frames)
+    for (let frame = 1; frame <= 60; frame++) {
+      pool.sync(clips, assets, tracks, {
+        time: frame / 60,
+        state: "playing" as const,
+        speed: 1.0,
+        muted: false,
+        volume: 100,
+      });
+    }
+
+    // With optimization: 0 setter calls (properties unchanged)
+    // Without optimization: 180 setter calls (3 properties × 60 frames)
+    expect(totalSetterCalls).toBe(0);
+  });
+
+  it("should use volume tolerance of 0.01 to avoid floating point issues", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Sync with volume that might have floating point precision issues
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 33.333333, // Repeating decimal
+    });
+
+    const videoElements = pool.getVideoElements();
+    const element = Array.from(videoElements.values())[0];
+
+    let volumeSetCount = 0;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "volume");
+
+    Object.defineProperty(element, "volume", {
+      get: originalDescriptor?.get || (() => 0.33333),
+      set: (value: number) => {
+        volumeSetCount++;
+        originalDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    // Sync again with nearly identical volume (within 0.01 tolerance)
+    pool.sync(clips, assets, tracks, {
+      time: 2.6,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 33.334, // Very close to previous
+    });
+
+    // Should not update due to tolerance
+    expect(volumeSetCount).toBe(0);
+  });
+
+  it("should update volume when change exceeds tolerance threshold", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 50,
+    });
+
+    const videoElements = pool.getVideoElements();
+    const element = Array.from(videoElements.values())[0];
+
+    let volumeSetCount = 0;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "volume");
+
+    Object.defineProperty(element, "volume", {
+      get: originalDescriptor?.get || (() => 0.5),
+      set: (value: number) => {
+        volumeSetCount++;
+        originalDescriptor?.set?.call(element, value);
+      },
+      configurable: true,
+    });
+
+    // Change volume by more than tolerance (>0.01)
+    pool.sync(clips, assets, tracks, {
+      time: 2.6,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 60, // Changed by 10% = 0.1 difference
+    });
+
+    // Should update (difference > 0.01)
+    expect(volumeSetCount).toBeGreaterThan(0);
+  });
+
+  it("should handle rapid property changes efficiently", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 10)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    pool.sync(clips, assets, tracks, {
+      time: 0,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    const videoElements = pool.getVideoElements();
+    const element = Array.from(videoElements.values())[0];
+
+    let setterCallCount = 0;
+    const props = ["muted", "volume", "playbackRate"] as const;
+
+    props.forEach((prop) => {
+      const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), prop);
+      Object.defineProperty(element, prop, {
+        get: descriptor?.get || (() => (prop === "muted" ? false : 1)),
+        set: (value: any) => {
+          setterCallCount++;
+          descriptor?.set?.call(element, value);
+        },
+        configurable: true,
+      });
+    });
+
+    // Alternate between two states rapidly
+    for (let i = 0; i < 20; i++) {
+      pool.sync(clips, assets, tracks, {
+        time: i / 10,
+        state: "playing" as const,
+        speed: i % 2 === 0 ? 1.0 : 2.0, // Alternate speed
+        muted: i % 2 === 0, // Alternate muted
+        volume: i % 2 === 0 ? 100 : 50, // Alternate volume
+      });
+    }
+
+    // With optimization: only updates when values change
+    // 20 iterations with alternating values = ~20 updates per property = ~60 total
+    // Without optimization: 20 iterations × 3 properties = 60 unconditional updates
+    // With optimization, we avoid some redundant sets
+    expect(setterCallCount).toBeGreaterThan(0);
+    expect(setterCallCount).toBeLessThan(60); // Fewer than unconditional approach
+  });
+
+  it("should maintain correct audio routing despite optimization", () => {
+    const clips = [
+      createMockClip("clip-1", "media-1", 0, 5),
+      createMockClip("clip-2", "media-2", 0, 5), // Overlapping
+    ];
+    const assets = [createMockAsset("media-1", "/path/to/video1.mp4"), createMockAsset("media-2", "/path/to/video2.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Sync with both clips
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    const videoElements = pool.getVideoElements();
+    const elements = Array.from(videoElements.values());
+
+    // One element should be unmuted (primary), others muted
+    const unmutedCount = elements.filter((e) => !e.muted).length;
+    expect(unmutedCount).toBeLessThanOrEqual(1); // At most one unmuted
+
+    // Sync again - muted states should remain correct
+    pool.sync(clips, assets, tracks, {
+      time: 2.6,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    const unmutedCountAfter = elements.filter((e) => !e.muted).length;
+    expect(unmutedCountAfter).toBeLessThanOrEqual(1);
+  });
+});
