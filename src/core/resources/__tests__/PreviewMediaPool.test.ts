@@ -3236,3 +3236,155 @@ describe("PreviewMediaPool — FINDING-002 & FINDING-003: Grace Period and Origi
     expect(elements2.size).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ─── FINDING-013: Cache Key Precision (Normalize trimIn) ────────────────────────
+describe("PreviewMediaPool — FINDING-013: Cache Key Precision", () => {
+  let pool: PreviewMediaPool;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    pool = new PreviewMediaPool();
+  });
+
+  afterEach(() => {
+    pool.dispose();
+    if (container && container.parentNode) {
+      container.parentNode.removeChild(container);
+    }
+  });
+
+  it("should normalize trimIn values to prevent floating point rounding errors", () => {
+    // PROBLEM: Without normalization, 5.1234999 and 5.1234001 could produce
+    // different cache keys due to toFixed(3) rounding, causing duplicate elements
+    // FIX: Math.round(trimIn * 1000) / 1000 normalizes before toFixed(3)
+
+    const asset: MediaAsset = {
+      id: "asset-1",
+      name: "test.mp4",
+      path: "/path/test.mp4",
+      type: "video",
+      duration: 10,
+      thumbnail: "",
+    };
+
+    const tracks = [{ id: "track-1", type: "video", visible: true, muted: false }];
+    const syncState = {
+      time: 0.5,
+      state: "playing" as const,
+      speed: 1,
+      muted: false,
+      volume: 100,
+    };
+
+    // Clip with trimIn that should normalize to 5.123
+    const clip: Clip = {
+      id: "clip-1",
+      mediaId: "asset-1",
+      trackId: "track-1",
+      startTime: 0,
+      duration: 2,
+      trimIn: 5.1234999, // Math.round(5123.4999) / 1000 = 5123 / 1000 = 5.123
+      trimOut: 7.1234999,
+      kind: "video",
+    };
+
+    pool.sync([clip], [asset], tracks, syncState);
+    const cacheKeys = Array.from((pool as any).videoCache.keys());
+
+    // Should produce normalized cache key
+    expect(cacheKeys[0]).toBe("asset-1-/path/test.mp4-trim5.123");
+  });
+
+  it("should create different cache keys for genuinely different trimIn values", () => {
+    const asset: MediaAsset = {
+      id: "asset-1",
+      name: "test.mp4",
+      path: "/path/test.mp4",
+      type: "video",
+      duration: 10,
+      thumbnail: "",
+    };
+
+    const tracks = [{ id: "track-1", type: "video", visible: true, muted: false }];
+    const syncState = {
+      time: 0.5,
+      state: "playing" as const,
+      speed: 1,
+      muted: false,
+      volume: 100,
+    };
+
+    const clip1: Clip = {
+      id: "clip-1",
+      mediaId: "asset-1",
+      trackId: "track-1",
+      startTime: 0,
+      duration: 2,
+      trimIn: 5.0,
+      trimOut: 7.0,
+      kind: "video",
+    };
+
+    const clip2: Clip = {
+      id: "clip-2",
+      mediaId: "asset-1",
+      trackId: "track-1",
+      startTime: 2,
+      duration: 2,
+      trimIn: 5.01, // 10ms different - should be separate element
+      trimOut: 7.01,
+      kind: "video",
+    };
+
+    pool.sync([clip1, clip2], [asset], tracks, syncState);
+    const cacheKeys = new Set(Array.from((pool as any).videoCache.keys()));
+
+    expect(cacheKeys.size).toBe(2);
+    expect(cacheKeys.has("asset-1-/path/test.mp4-trim5.000")).toBe(true);
+    expect(cacheKeys.has("asset-1-/path/test.mp4-trim5.010")).toBe(true);
+  });
+
+  it("should handle 29.97fps frame calculations correctly", () => {
+    // 29.97fps produces repeating decimals that can cause precision issues
+    const asset: MediaAsset = {
+      id: "asset-1",
+      name: "test.mp4",
+      path: "/path/test.mp4",
+      type: "video",
+      duration: 10,
+      thumbnail: "",
+    };
+
+    const tracks = [{ id: "track-1", type: "video", visible: true, muted: false }];
+    const syncState = {
+      time: 0.5,
+      state: "playing" as const,
+      speed: 1,
+      muted: false,
+      volume: 100,
+    };
+
+    // Frame 155 at 29.97fps = 5.172172172... seconds
+    const frameDuration = 1 / 29.97;
+    const frame155 = frameDuration * 155;
+
+    const clip: Clip = {
+      id: "clip-1",
+      mediaId: "asset-1",
+      trackId: "track-1",
+      startTime: 0,
+      duration: 2,
+      trimIn: frame155,
+      trimOut: frame155 + 2,
+      kind: "video",
+    };
+
+    pool.sync([clip], [asset], tracks, syncState);
+    const cacheKeys = Array.from((pool as any).videoCache.keys());
+
+    // Should normalize to consistent value
+    expect(cacheKeys[0]).toBe("asset-1-/path/test.mp4-trim5.172");
+  });
+});

@@ -295,8 +295,10 @@ export class PreviewMediaPool {
 
           // Cache key strategy: For split clips that share media, we need separate elements
           // to prevent rebinding conflicts during overlap. Use trimIn to differentiate.
+          // FINDING-013: Normalize trimIn to prevent floating-point rounding differences
           const trimIn = clip.trimIn || 0;
-          const cacheKey = `${clip.mediaId}-${sourcePath}-trim${trimIn.toFixed(3)}`;
+          const normalizedTrimIn = Math.round(trimIn * 1000) / 1000;
+          const cacheKey = `${clip.mediaId}-${sourcePath}-trim${normalizedTrimIn.toFixed(3)}`;
 
           const sourceTime = getClipSourceTime(clip, syncState.time);
           const isActive = sourceTime !== null; // Is clip in active playback window?
