@@ -299,6 +299,21 @@ export class ProjectSession {
   }
 
   /**
+   * Immediately pause preview media elements without waiting for RAF sync.
+   */
+  pausePreviewMedia(): void {
+    this._previewMediaPool?.pauseAll();
+  }
+
+  /**
+   * Unlock autoplay restrictions for all video/audio preview elements.
+   * MUST be called synchronously inside a user gesture handler.
+   */
+  unlockPreviewAudio(): void {
+    this._previewMediaPool?.unlockAudio();
+  }
+
+  /**
    * @deprecated Video elements are now managed by PreviewMediaPool.
    * Kept for backward compatibility during transition.
    */

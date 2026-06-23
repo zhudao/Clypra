@@ -196,6 +196,36 @@ describe("SplitClipCommand", () => {
       expect(atEnd.apply(state)).toEqual(state);
     });
 
+    it("rejects split when frame snapping lands on the clip start", () => {
+      const clip = createTestClip({
+        startTime: 10,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+      });
+
+      const command = new SplitClipCommand("clip-1", 10.001, 30, clip);
+      const state = { clips: [clip], epoch: 0 };
+
+      expect(command.apply(state)).toEqual(state);
+      expect(command.getCreatedClipId()).toBeNull();
+    });
+
+    it("rejects split when frame snapping lands on the clip end", () => {
+      const clip = createTestClip({
+        startTime: 10,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+      });
+
+      const command = new SplitClipCommand("clip-1", 14.999, 30, clip);
+      const state = { clips: [clip], epoch: 0 };
+
+      expect(command.apply(state)).toEqual(state);
+      expect(command.getCreatedClipId()).toBeNull();
+    });
+
     it("handles missing clip gracefully", () => {
       const clip = createTestClip();
       const command = new SplitClipCommand("nonexistent", 5, 30, clip);

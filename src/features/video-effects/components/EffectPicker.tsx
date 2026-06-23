@@ -8,17 +8,8 @@ interface EffectPickerProps {
   onSelect: (effect: EffectPreset) => void;
 }
 
-const BODY_EFFECT_CATEGORIES = [
-  { id: "trending", name: "Trending" },
-  { id: "motion", name: "Motion" },
-  { id: "aura", name: "Aura" },
-  { id: "wings", name: "Wings" },
-  { id: "energy", name: "Energy" },
-  { id: "fun", name: "Fun" },
-];
-
 export function EffectPicker({ onSelect }: EffectPickerProps) {
-  const [selectedCategory, setSelectedCategory] = useState<string>("aura"); // Default to "aura" since that's where the default effects are
+  const [selectedCategory, setSelectedCategory] = useState<string>("trending"); // Default to "autrendingra" since that's where the default effects are
   const [searchQuery, setSearchQuery] = useState("");
   const [effects, setEffects] = useState<EffectPreset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -77,12 +68,7 @@ export function EffectPicker({ onSelect }: EffectPickerProps) {
 
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(
-        (e: EffectPreset) =>
-          e.name.toLowerCase().includes(query) ||
-          e.description.toLowerCase().includes(query) ||
-          e.tags?.some((t) => t.toLowerCase().includes(query))
-      );
+      filtered = filtered.filter((e: EffectPreset) => e.name.toLowerCase().includes(query) || e.description.toLowerCase().includes(query) || e.tags?.some((t) => t.toLowerCase().includes(query)));
     }
 
     return filtered;
@@ -90,15 +76,6 @@ export function EffectPicker({ onSelect }: EffectPickerProps) {
 
   return (
     <div className="flex flex-col h-full bg-transparent">
-      {/* Category Pills */}
-      <div className="flex gap-1 overflow-x-auto scrollbar-none border-b border-border p-1 shrink-0" style={{ scrollbarWidth: "none" }}>
-        {BODY_EFFECT_CATEGORIES.map((cat) => (
-          <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} className={`shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-semibold transition-colors flex items-center ${selectedCategory === cat.id ? "bg-accent text-white" : "text-text-muted hover:bg-surface-raised hover:text-text-primary"}`}>
-            <span>{cat.name}</span>
-          </button>
-        ))}
-      </div>
-
       {/* Search Input */}
       <div className="p-1 border-b border-border shrink-0">
         <div className="relative">
@@ -164,23 +141,11 @@ interface EffectCardProps {
   onApply: (e: React.MouseEvent) => void;
 }
 
-function EffectCard({
-  effect,
-  isFavorite,
-  isDownloaded,
-  isDownloading,
-  onFavorite,
-  onApply,
-}: EffectCardProps) {
+function EffectCard({ effect, isFavorite, isDownloaded, isDownloading, onFavorite, onApply }: EffectCardProps) {
   const [isHovered, setIsHovered] = useState(false);
 
   return (
-    <div
-      onClick={onApply}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      className="w-full aspect-square bg-surface-raised/40 hover:bg-surface-raised/80 border border-border/40 hover:border-accent/40 rounded-xl relative overflow-hidden flex flex-col justify-between p-1 transition-all duration-300 group cursor-pointer shadow-[0_4px_16px_rgba(0,0,0,0.3)]"
-    >
+    <div onClick={onApply} onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)} className="w-full aspect-square bg-surface-raised/40 hover:bg-surface-raised/80 border border-border/40 hover:border-accent/40 rounded-xl relative overflow-hidden flex flex-col justify-between p-1 transition-all duration-300 group cursor-pointer shadow-[0_4px_16px_rgba(0,0,0,0.3)]">
       {/* Downloading Overlay */}
       {isDownloading && (
         <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center z-20 pointer-events-none">
@@ -201,12 +166,7 @@ function EffectCard({
       )}
 
       {/* Favorite Star */}
-      <button
-        onClick={onFavorite}
-        className={`absolute top-1 right-1 p-1 cursor-pointer rounded-full bg-surface/40 hover:bg-surface/60 border border-border/50 text-text-muted hover:text-text-primary transition-all duration-200 z-10 ${
-          isFavorite ? "opacity-100 text-yellow-400!" : "opacity-0 group-hover:opacity-100 group-hover:translate-y-0 translate-y-2"
-        }`}
-      >
+      <button onClick={onFavorite} className={`absolute top-1 right-1 p-1 cursor-pointer rounded-full bg-surface/40 hover:bg-surface/60 border border-border/50 text-text-muted hover:text-text-primary transition-all duration-200 z-10 ${isFavorite ? "opacity-100 text-yellow-400!" : "opacity-0 group-hover:opacity-100 group-hover:translate-y-0 translate-y-2"}`}>
         <Star className={`w-3 h-3 ${isFavorite ? "fill-yellow-400 text-yellow-400!" : ""}`} />
       </button>
 
@@ -216,9 +176,7 @@ function EffectCard({
           <img src={effect.thumbnail} alt={effect.name} className="w-full h-full object-cover rounded-lg" />
         ) : (
           <div className="flex flex-col items-center justify-center h-full w-full bg-linear-to-br from-accent/10 to-accent/0 text-center rounded-lg p-2">
-            <span className="text-4xl filter drop-shadow-[0_4px_8px_rgba(0,0,0,0.3)] group-hover:scale-[1.05] transition-transform duration-300">
-              {getCategoryIcon(effect.category || "aura")}
-            </span>
+            <span className="text-4xl filter drop-shadow-[0_4px_8px_rgba(0,0,0,0.3)] group-hover:scale-[1.05] transition-transform duration-300">{getCategoryIcon(effect.category || "aura")}</span>
           </div>
         )}
       </div>
@@ -228,24 +186,8 @@ function EffectCard({
         <span className="text-[9px] text-text-muted font-medium group-hover:text-text-primary transition-colors truncate max-w-[65px]" title={effect.name}>
           {effect.name}
         </span>
-        <button
-          onClick={onApply}
-          disabled={isDownloading}
-          className={`w-4 h-4 rounded-full flex items-center justify-center transition-all relative ${
-            isDownloaded
-              ? "bg-accent hover:bg-accent/85 border border-accent text-white cursor-pointer"
-              : isDownloading
-              ? "bg-accent/20 border border-accent cursor-wait"
-              : "bg-surface/40 hover:bg-surface/60 border border-border/50 text-text-muted hover:text-text-primary cursor-pointer"
-          }`}
-        >
-          {isDownloading ? (
-            <div className="w-2 h-2 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-          ) : isDownloaded ? (
-            <Plus className="w-3 h-3 group-hover:scale-110 transition-transform" />
-          ) : (
-            <Download className="w-2 h-2 group-hover:scale-115 transition-transform" />
-          )}
+        <button onClick={onApply} disabled={isDownloading} className={`w-4 h-4 rounded-full flex items-center justify-center transition-all relative ${isDownloaded ? "bg-accent hover:bg-accent/85 border border-accent text-white cursor-pointer" : isDownloading ? "bg-accent/20 border border-accent cursor-wait" : "bg-surface/40 hover:bg-surface/60 border border-border/50 text-text-muted hover:text-text-primary cursor-pointer"}`}>
+          {isDownloading ? <div className="w-2 h-2 rounded-full border-2 border-accent border-t-transparent animate-spin" /> : isDownloaded ? <Plus className="w-3 h-3 group-hover:scale-110 transition-transform" /> : <Download className="w-2 h-2 group-hover:scale-115 transition-transform" />}
         </button>
       </div>
     </div>

@@ -1,12 +1,15 @@
 /**
  * Transitions Types
- * Type definitions for transition effects between clips
+ * Re-exported from @clypra/engine for single source of truth
  */
 
+// Re-export all transition types from @clypra/engine (transitions module)
+export type { TransitionRenderer as TransitionRendererType, TransitionPreset, TransitionParameters, EasingFunction, AppliedTransition } from "@clypra/engine/transitions";
+
+// Legacy type for backwards compatibility with timeline
 export type TransitionType = "fade" | "dissolve" | "slide" | "wipe" | "zoom" | "creative";
 
-export type TransitionRenderer = "fade" | "dissolve" | "zoom_in" | "zoom_out" | "slide_left" | "slide_right" | "wipe";
-
+// App-specific types (not in engine)
 export interface TransitionAsset {
   id: string;
   name: string;
@@ -14,7 +17,8 @@ export interface TransitionAsset {
   category: string;
   description: string;
   thumbnail: string;
-  renderer: TransitionRenderer;
+  preview: string;
+  renderer: import("@clypra/engine").TransitionRendererType;
   duration?: {
     min: number;
     max: number;
@@ -22,18 +26,11 @@ export interface TransitionAsset {
   };
   tags?: string[];
   isPremium?: boolean;
+  published?: boolean;
 }
 
 export interface TransitionCategory {
   id: string;
   name: string;
   description: string;
-}
-
-export interface AppliedTransition {
-  id: string;
-  transitionId: string;
-  renderer: TransitionRenderer;
-  duration: number;
-  params?: Record<string, any>;
 }

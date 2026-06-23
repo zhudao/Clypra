@@ -53,6 +53,7 @@ export class PlaybackClock {
   private _speed: number = 1.0;
   private _duration: number = 0;
   private _frameRate: number = 30;
+  private _isSeeking: boolean = false;
 
   // RAF loop
   private _rafId: number | null = null;
@@ -73,10 +74,20 @@ export class PlaybackClock {
   // ─── Getters (Imperative reads) ────────────────────────────────────────────
 
   /**
+   * Check if seeking is in progress.
+   */
+  get isSeeking(): boolean {
+    return this._isSeeking;
+  }
+
+  /**
    * Get current time (imperative read).
    * This is how consumers should read time - NOT via React state.
    */
   get time(): number {
+    if (this._isSeeking) {
+      return this._time;
+    }
     // If playing, calculate time synchronously based on audio context.
     // This ensures accurate time even if requestAnimationFrame is suspended (e.g. background tab).
     if (this._state === "playing" && this._audioContext && this._audioContext.state === "running") {
@@ -205,9 +216,13 @@ export class PlaybackClock {
    * Pause playback.
    */
   pause(): void {
-    if (this._state !== "playing") return;
+    if (this._state !== "playing") {
+      this._isSeeking = false;
+      return;
+    }
 
     this._state = "paused";
+    this._isSeeking = false;
     this._notifyListeners();
 
     // Stop RAF loop
@@ -224,6 +239,7 @@ export class PlaybackClock {
     this.pause();
     this.seek(0);
     this._state = "stopped";
+    this._isSeeking = false;
     this._notifyListeners();
   }
 
@@ -239,11 +255,25 @@ export class PlaybackClock {
 
     const validTime = typeof time === "number" && !isNaN(time) && isFinite(time) ? time : 0;
     this._time = Math.max(0, Math.min(validTime, this._duration));
+    this._isSeeking = true;
     this._notifyListeners();
 
     if (wasPlaying) {
       this.play();
     }
+  }
+
+  /**
+   * Complete the seeking state and align playback start times.
+   */
+  completeSeek(): void {
+    if (!this._isSeeking) return;
+    this._isSeeking = false;
+    if (this._state === "playing" && this._audioContext) {
+      this._playStartAudioTime = this._audioContext.currentTime;
+      this._playStartClockTime = this._time;
+    }
+    this._notifyListeners();
   }
 
   // ─── RAF Loop (Private) ────────────────────────────────────────────────────
@@ -257,6 +287,17 @@ export class PlaybackClock {
     if (this._rafId === null) return;
 
     if (this._state !== "playing") return;
+
+    if (this._isSeeking) {
+      // While seeking, do not advance time, just notify listeners and keep RAF loop alive
+      const now = Date.now();
+      if (now - this._lastNotifyTime > this._notifyThrottleMs) {
+        this._notifyListeners();
+        this._lastNotifyTime = now;
+      }
+      this._rafId = requestAnimationFrame(this._tick);
+      return;
+    }
 
     // Calculate elapsed time using AudioContext (high precision)
     const audioContext = this._audioContext!;

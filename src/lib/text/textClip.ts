@@ -8,6 +8,7 @@ import type { TextClip } from "../../types";
 import { TemplateRenderer, type TextEffectDefinition, type TextTemplate } from "@clypra/engine";
 import { generateId } from "../utils/id";
 import { useEffectsStore } from "../../features/text-effects/store/effectsStore";
+import { logTextTemplate, logTemplateBounds, logRendererState } from "@/lib/debug/textTemplateDebug";
 import { useTemplateStore } from "../../features/text-templates/templateStore";
 import { textRenderTrace } from "@/lib/debug/textRenderTrace";
 
@@ -421,10 +422,31 @@ export function measureTextTemplateContentSize(options: { templateId?: string; t
       return { width: templateWidth, height: templateHeight, aspectRatio: fallbackAspect, bounds: null, source: "fallback" };
     }
 
+    logRendererState("Creating renderer", {
+      layers: template.layers?.length,
+      canvasDimensions: { width: templateWidth, height: templateHeight },
+    });
+
     const renderer = new TemplateRenderer(template);
     applyTemplateCustomization(renderer, template, options.text ?? "Text", options.customization);
+
+    const drawStart = performance.now();
     renderer.drawFrame(ctx, 0, { skipClear: true });
+    const drawTime = performance.now() - drawStart;
+
     const bounds = renderer.getContentBounds();
+
+    logTemplateBounds("Template bounds measured", {
+      templateId: options.templateId ?? template.id,
+      text: options.text,
+      canvasSize: { width: templateWidth, height: templateHeight },
+      contentBounds: bounds,
+    });
+
+    logRendererState("Draw complete", {
+      drawTime,
+      layers: template.layers?.length,
+    });
 
     textRenderTrace("text-template-measure-bounds", {
       templateId: options.templateId ?? template.id,
@@ -442,11 +464,32 @@ export function measureTextTemplateContentSize(options: { templateId?: string; t
       return { width: templateWidth, height: templateHeight, aspectRatio: fallbackAspect, bounds: null, source: "fallback" };
     }
 
+    // Calculate bounds position relative to template canvas
+    const boundsOffsetX = bounds.x;
+    const boundsOffsetY = bounds.y;
+    const boundsEndX = bounds.x + bounds.width;
+    const boundsEndY = bounds.y + bounds.height;
+    const boundsRelativeToCanvas = {
+      offsetX: boundsOffsetX,
+      offsetY: boundsOffsetY,
+      offsetXPercent: (boundsOffsetX / templateWidth) * 100,
+      offsetYPercent: (boundsOffsetY / templateHeight) * 100,
+      coverageXPercent: (bounds.width / templateWidth) * 100,
+      coverageYPercent: (bounds.height / templateHeight) * 100,
+    };
+
     textRenderTrace("text-template-measure-success", {
       templateId: options.templateId ?? template.id,
+      templateCanvasSize: { width: templateWidth, height: templateHeight },
       contentBounds: bounds,
+      boundsRelativeToCanvas,
       aspectRatio: bounds.width / bounds.height,
       source: "template",
+      analysis: {
+        hasPositionOffset: boundsOffsetX > 0 || boundsOffsetY > 0,
+        largeVerticalOffset: boundsOffsetY > templateHeight * 0.3,
+        largeHorizontalOffset: boundsOffsetX > templateWidth * 0.3,
+      },
     });
 
     return {
@@ -479,60 +522,58 @@ export function calculateTextTemplateClipSize(options: { canvasWidth: number; ca
 
   // If we successfully measured content bounds, use them
   if (content?.source === "template" && content.bounds && content.bounds.width > 0 && content.bounds.height > 0) {
+    // Use the actual content bounds dimensions - this is the tight bounding box
+    // of visible text content from the template renderer
     const contentWidth = content.bounds.width;
     const contentHeight = content.bounds.height;
     const contentAspect = contentWidth / contentHeight;
 
-    // Scale content bounds to fit within a reasonable portion of the canvas
-    // Use a max of 80% canvas width and 50% canvas height for flexibility
-    const maxWidth = options.canvasWidth * 0.8;
-    const maxHeight = options.canvasHeight * 0.5;
+    // For text templates, we want to use the actual measured content size
+    // to ensure the transform overlay wraps tightly around visible text.
+    // Only scale down if the content is unreasonably large for the canvas.
+    const maxWidth = options.canvasWidth * 0.95; // Allow up to 95% of canvas width
+    const maxHeight = options.canvasHeight * 0.8; // Allow up to 80% of canvas height
 
     let width: number;
     let height: number;
 
     textRenderTrace("text-template-calculate-size-using-bounds", {
       templateId: options.templateId,
+      contentBounds: content.bounds,
       contentWidth,
       contentHeight,
       contentAspect,
       maxWidth,
       maxHeight,
+      canvas: { width: options.canvasWidth, height: options.canvasHeight },
     });
 
-    // Determine if we're width-constrained or height-constrained
+    // Determine if we need to scale down
     if (contentWidth > maxWidth || contentHeight > maxHeight) {
       // Content is larger than max, scale it down proportionally
-      if (maxWidth / maxHeight > contentAspect) {
-        // Height-constrained
-        height = maxHeight;
-        width = height * contentAspect;
-        textRenderTrace("text-template-calculate-size-height-constrained", {
-          templateId: options.templateId,
-          width,
-          height,
-          scaleFactor: height / contentHeight,
-        });
-      } else {
-        // Width-constrained
-        width = maxWidth;
-        height = width / contentAspect;
-        textRenderTrace("text-template-calculate-size-width-constrained", {
-          templateId: options.templateId,
-          width,
-          height,
-          scaleFactor: width / contentWidth,
-        });
-      }
+      const widthScale = maxWidth / contentWidth;
+      const heightScale = maxHeight / contentHeight;
+      const scale = Math.min(widthScale, heightScale);
+
+      width = contentWidth * scale;
+      height = contentHeight * scale;
+
+      textRenderTrace("text-template-calculate-size-scaled-down", {
+        templateId: options.templateId,
+        originalSize: { width: contentWidth, height: contentHeight },
+        scaledSize: { width, height },
+        scale,
+      });
     } else {
-      // Content fits within max bounds, use actual size
+      // Content fits within constraints - use actual content bounds size!
+      // This ensures the transform overlay is exactly the size of visible content
       width = contentWidth;
       height = contentHeight;
-      textRenderTrace("text-template-calculate-size-actual-size", {
+      textRenderTrace("text-template-calculate-size-actual-content", {
         templateId: options.templateId,
         width,
         height,
-        contentFits: true,
+        usedActualBounds: true,
       });
     }
 
@@ -542,6 +583,13 @@ export function calculateTextTemplateClipSize(options: { canvasWidth: number; ca
       finalHeight: height,
       contentBounds: content.bounds,
       source: "template-bounds",
+    });
+
+    logTemplateBounds("Final clip size calculated", {
+      templateId: options.templateId,
+      text: options.text,
+      contentBounds: content.bounds,
+      clipSize: { x: 0, y: 0, width, height },
     });
 
     return { width, height, content };
@@ -871,16 +919,6 @@ function calculateTextClipContentTransform(clip: TextClip, updates: Partial<Text
   // However, allow manual transforms (drag/resize) to update position/size
   if (merged.templateId) {
     const hasManualTransform = updates.x !== undefined || updates.y !== undefined || updates.width !== undefined || updates.height !== undefined;
-
-    console.log("[TEMPLATE TRANSFORM]", {
-      clipId: clip.id,
-      templateId: merged.templateId,
-      hasManualTransform,
-      updatesKeys: Object.keys(updates),
-      updates: { x: updates.x, y: updates.y, width: updates.width, height: updates.height },
-      clipValues: { x: clip.x, y: clip.y, width: clip.width, height: clip.height },
-      mergedValues: { x: merged.x, y: merged.y, width: merged.width, height: merged.height },
-    });
 
     return {
       merged,

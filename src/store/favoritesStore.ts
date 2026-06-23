@@ -23,7 +23,6 @@ const getSavedArray = (key: string): string[] => {
     const saved = localStorage.getItem(key);
     return saved ? JSON.parse(saved) : [];
   } catch (e) {
-    console.error(`Failed to load ${key} from localStorage:`, e);
     return [];
   }
 };
@@ -33,7 +32,7 @@ const saveArray = (key: string, arr: string[]) => {
   try {
     localStorage.setItem(key, JSON.stringify(arr));
   } catch (e) {
-    console.error(`Failed to save ${key} to localStorage:`, e);
+    // Silent fail
   }
 };
 

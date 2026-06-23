@@ -27,6 +27,7 @@ import { getPlaybackClock } from "@/hooks/usePlaybackClock";
 import { useUIStore } from "@/store/uiStore";
 import { SplitClipCommand, UpdateClipCommand } from "../history/commands";
 import type { Clip } from "@/types";
+import { snapToFrameBoundary } from "@/lib/utils/frameTime";
 
 /**
  * Split interaction context.
@@ -107,6 +108,13 @@ export class EditingActions {
 
     // Get frameRate from project store at call site
     const frameRate = useProjectStore.getState().project?.frameRate ?? 30;
+    const snappedTime = snapToFrameBoundary(time, frameRate);
+    if (snappedTime <= clip.startTime || snappedTime >= clipEndTime) {
+      return {
+        success: false,
+        error: `Split time ${time.toFixed(2)}s snaps to a clip boundary`,
+      };
+    }
 
     // Create and execute command
     const command = new SplitClipCommand(clipId, time, frameRate, clip);
@@ -117,12 +125,19 @@ export class EditingActions {
       // Find the new clip IDs (original clip + new clip)
       const newState = useTimelineStore.getState();
       const leftClip = newState.clips.find((c) => c.id === clipId);
-      const rightClip = newState.clips.find((c) => c.trackId === clip.trackId && c.startTime === time && c.mediaId === clip.mediaId);
+      const rightClipId = command.getCreatedClipId();
+      const rightClip = rightClipId ? newState.clips.find((c) => c.id === rightClipId) : undefined;
 
       // NLE-standard ergonomics: after split, select the right-hand clip
       // so repeated cuts can continue forward quickly.
       if (rightClip?.id) {
         useUIStore.getState().selectClip(rightClip.id);
+      } else {
+        return {
+          success: false,
+          error: "Split did not create a right-hand clip",
+          leftClipId: leftClip?.id,
+        };
       }
 
       return {

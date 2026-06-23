@@ -5,4 +5,4 @@
 
 export { TransitionRenderer } from "./TransitionRenderer";
 export { TransitionsApi } from "./api/transitionsApi";
-export type { TransitionType, TransitionRenderer as TransitionRendererType, TransitionAsset, TransitionCategory, AppliedTransition } from "./types";
+export type { TransitionType, TransitionRendererType, TransitionAsset, TransitionCategory, AppliedTransition } from "./types";

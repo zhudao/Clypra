@@ -45,6 +45,9 @@ export class SplitClipCommand implements Command {
 
     // ✅ SNAP split time to frame boundary BEFORE calculations
     const snappedSplitTime = snapToFrameBoundary(this.splitTime, this.frameRate);
+    if (snappedSplitTime <= clip.startTime || snappedSplitTime >= clipEndTime) {
+      return state;
+    }
 
     const timeSinceStart = snappedSplitTime - clip.startTime;
 
@@ -85,6 +88,10 @@ export class SplitClipCommand implements Command {
       ],
       epoch: state.epoch + 1, // ✅ Epoch increment inside command
     };
+  }
+
+  getCreatedClipId(): string | null {
+    return this.newClipId;
   }
 
   invert(): Command {

@@ -1,11 +1,12 @@
 import React, { useMemo } from "react";
-import { Lock, Shuffle } from "lucide-react";
+import { Lock } from "lucide-react";
 import { useDrop } from "react-dnd";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useTimeline } from "@/hooks/useTimeline";
 import { Clip } from "./Clip";
 import { GapIndicator } from "./GapIndicator";
+import { TransitionIndicator } from "./TransitionIndicator";
 import { handleDropOnTrack } from "@/lib/timeline/timelineUtils";
 import type { Clip as ClipType, Track as TrackType, DragItem } from "@/types";
 
@@ -30,8 +31,12 @@ interface TrackProps {
 }
 
 const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onClipDragStart, onClipDragMove, onClipDragEnd, dragState }) => {
-  const { selectedClipIds, selectedGapId, selectedTrackId, selectedTransitionId, selectTransition } = useUIStore();
-  const { gaps = [], transitions = [] } = useTimelineStore();
+  const selectedClipIds = useUIStore((s) => s.selectedClipIds);
+  const selectedGapId = useUIStore((s) => s.selectedGapId);
+  const selectedTrackId = useUIStore((s) => s.selectedTrackId);
+  const gaps = useTimelineStore((s) => s.gaps ?? []);
+  const transitions = useTimelineStore((s) => s.transitions ?? []);
+  const allClips = useTimelineStore((s) => s.clips);
   const { getMediaAsset } = useTimeline();
 
   // Drop handler for media assets from MediaTab
@@ -201,27 +206,11 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
       {/* Transitions layer */}
       {track.visible &&
         trackTransitions.map((t) => {
-          const isSelected = selectedTransitionId === t.id;
-          const left = t.placement.startTime * pixelsPerSecond;
-          const width = t.placement.duration * pixelsPerSecond;
+          // Find the from and to clips for this transition
+          const fromClip = allClips.find((c) => c.id === t.fromItemId);
+          const toClip = allClips.find((c) => c.id === t.toItemId);
 
-          return (
-            <button
-              key={t.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                selectTransition(t.id);
-              }}
-              className={`absolute top-1/2 -translate-y-1/2 h-7 rounded z-35 flex items-center justify-center cursor-pointer transition-all border ${isSelected ? "bg-accent/80 text-white border-white shadow-md scale-105" : "bg-surface-raised/80 hover:bg-surface-raised border-border/40 text-text-muted hover:text-text-primary hover:border-accent/30"}`}
-              style={{
-                left: `${left}px`,
-                width: `${width}px`,
-              }}
-              title={`${t.type === "dissolve" ? "Dissolve" : "Fade"} Transition (${t.placement.duration.toFixed(1)}s)`}
-            >
-              <Shuffle className="w-3 h-3" />
-            </button>
-          );
+          return <TransitionIndicator key={t.id} transition={t} pixelsPerSecond={pixelsPerSecond} fromClip={fromClip} toClip={toClip} />;
         })}
 
       {/* Gaps layer - render permanent gaps */}
@@ -254,4 +243,41 @@ const TrackInner: React.FC<TrackProps> = ({ track, pixelsPerSecond, clips, onCli
   );
 };
 
-export const Track = React.memo(TrackInner);
+// Custom comparison function to prevent unnecessary re-renders
+const arePropsEqual = (prevProps: TrackProps, nextProps: TrackProps) => {
+  // Check track properties
+  if (prevProps.track.id !== nextProps.track.id || prevProps.track.locked !== nextProps.track.locked || prevProps.track.visible !== nextProps.track.visible || prevProps.track.height !== nextProps.track.height) {
+    return false;
+  }
+
+  // Check pixelsPerSecond
+  if (prevProps.pixelsPerSecond !== nextProps.pixelsPerSecond) {
+    return false;
+  }
+
+  // Check clips array - compare by length and IDs only (shallow check)
+  if (prevProps.clips.length !== nextProps.clips.length) {
+    return false;
+  }
+
+  // Check if clip IDs or key properties changed
+  for (let i = 0; i < prevProps.clips.length; i++) {
+    const prevClip = prevProps.clips[i];
+    const nextClip = nextProps.clips[i];
+    if (prevClip.id !== nextClip.id || prevClip.startTime !== nextClip.startTime || prevClip.duration !== nextClip.duration) {
+      return false;
+    }
+  }
+
+  // Check dragState
+  const prevDrag = prevProps.dragState;
+  const nextDrag = nextProps.dragState;
+  if (prevDrag?.draggingClipId !== nextDrag?.draggingClipId || prevDrag?.offsetX !== nextDrag?.offsetX || prevDrag?.offsetY !== nextDrag?.offsetY || prevDrag?.isInvalidPosition !== nextDrag?.isInvalidPosition || prevDrag?.targetTrackId !== nextDrag?.targetTrackId) {
+    return false;
+  }
+
+  // Props are equal - skip re-render
+  return true;
+};
+
+export const Track = React.memo(TrackInner, arePropsEqual);

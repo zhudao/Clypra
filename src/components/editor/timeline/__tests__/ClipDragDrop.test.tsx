@@ -19,11 +19,15 @@ const mockUpdateClip = vi.fn();
 const mockSelectClip = vi.fn();
 
 vi.mock("@/store/uiStore", () => ({
-  useUIStore: () => ({
-    selectedClipIds: [],
-    selectedTrackId: null,
-    selectClip: mockSelectClip,
-    toggleClipSelection: vi.fn(),
+  useUIStore: vi.fn((selector) => {
+    const state = {
+      selectedClipIds: [],
+      selectedGapId: null,
+      selectedTrackId: null,
+      selectClip: mockSelectClip,
+      toggleClipSelection: vi.fn(),
+    };
+    return selector ? selector(state) : state;
   }),
 }));
 
@@ -38,11 +42,17 @@ vi.mock("@/hooks/useTimeline", () => ({
 }));
 
 vi.mock("@/store/timelineStore", () => ({
-  useTimelineStore: () => ({
-    updateClip: mockUpdateClip,
-    dragState: null,
-    setDragState: vi.fn(),
-    calculateShiftedPositions: vi.fn(() => []),
+  useTimelineStore: vi.fn((selector) => {
+    const state = {
+      updateClip: mockUpdateClip,
+      dragState: null,
+      setDragState: vi.fn(),
+      calculateShiftedPositions: vi.fn(() => []),
+      gaps: [],
+      transitions: [],
+      clips: [],
+    };
+    return selector ? selector(state) : state;
   }),
 }));
 

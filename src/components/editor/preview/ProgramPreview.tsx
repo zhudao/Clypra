@@ -1,12 +1,13 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Expand, Shrink } from "lucide-react";
 import { usePlaybackClock, usePlaybackControls, useTransportControls, getPlaybackClock } from "@/hooks/usePlaybackClock";
 import { useProjectStore } from "@/store/projectStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useUIStore } from "@/store/uiStore";
 import { useSettingsStore } from "@/store/settingsStore";
+import { isTauri as isTauriRuntime } from "@/core/platform/platform";
 import { getFrameScheduler } from "@/core/scheduler/FrameScheduler";
-import { getActiveSessionOrNull, subscribeToSessionChanges } from "@/core/runtime/ProjectSession";
+import { getActiveSessionOrNull } from "@/core/runtime/ProjectSession";
 import { useViewportState } from "@/hooks/useViewportController";
 import { PreviewTransport } from "./PreviewTransport";
 import { TransformOverlayMemoized as TransformOverlay } from "../transform/TransformOverlay";
@@ -20,6 +21,7 @@ import { AspectRatio, FilterClip } from "@/types";
 import { formatTime } from "@/lib/utils/timeFormatting";
 import { refitClipsForCanvasChange } from "@/lib/timeline/refitClips";
 import { normalizeFilterIntensity, resolveFilterToIR } from "../../../core/render/filterIR";
+import { getPreviewMediaSyncClips } from "./previewMediaSync";
 
 import { TelemetryOverlay, type TelemetryStats } from "./TelemetryOverlay";
 import { AspectSelector } from "./AspectSelector";
@@ -50,8 +52,6 @@ export const ProgramPreview: React.FC = () => {
 
   // Get viewport state from controller (throttled to 10fps to prevent render storms)
   const viewport = useViewportState();
-
-  const activeSession = useSyncExternalStore(subscribeToSessionChanges, getActiveSessionOrNull, () => null);
 
   const previewQuality = useSettingsStore((s) => s.previewQuality);
   const setPreviewQuality = useSettingsStore((s) => s.setPreviewQuality);
@@ -114,7 +114,7 @@ export const ProgramPreview: React.FC = () => {
     });
     // console.log(`[ProgramPreview] Render #${renderCountRef.current} - Changed: ${changes.length > 0 ? changes.join(", ") : "unknown (no deps changed - likely setState or parent re-render)"}`);
   } else {
-    console.log(`[ProgramPreview] Render #${renderCountRef.current} - Initial mount`);
+    // console.log(`[ProgramPreview] Render #${renderCountRef.current} - Initial mount`);
   }
   prevDepsRef.current = currentDeps;
 
@@ -452,15 +452,27 @@ export const ProgramPreview: React.FC = () => {
     let lastRenderedTime: number = -1;
     let lastRenderedEpoch: number = -1;
     const GPU_MEMORY_LIMIT_MB = 128;
+    let forceRenderNeeded = false;
     const renderLoop = () => {
       if (!isActive) return;
 
       const state = renderStateRef.current;
+      // Read time directly from the PlaybackClock (imperative, no throttling)
+      // This is the single source of truth for playback time
+      // clockState.time is throttled to 10fps for UI updates and lags behind
       const timeToRender = state.clock.time;
-      const isPlaying = state.clockState.state === "playing";
+      const playbackState = state.clock.state;
+      const playbackSpeed = state.clock.speed;
+      const isPlaying = playbackState === "playing";
       const timeChanged = timeToRender !== lastRenderedTime;
       const epochChanged = state.epoch !== lastRenderedEpoch;
-      const needsRender = isPlaying || timeChanged || epochChanged;
+      // Always render the first frame (lastRenderedTime === -1)
+      const isFirstFrame = lastRenderedTime === -1;
+      const needsRender = isPlaying || timeChanged || epochChanged || isFirstFrame || forceRenderNeeded;
+
+      if (forceRenderNeeded) {
+        forceRenderNeeded = false;
+      }
 
       // Get the active track-level filter at the rendering time
       const getActiveFilterIR = (time: number) => {
@@ -489,6 +501,20 @@ export const ProgramPreview: React.FC = () => {
       }
 
       rafId = requestAnimationFrame(renderLoop);
+      const session = getActiveSessionOrNull();
+      if (session) {
+        try {
+          session.syncPreviewMedia(getPreviewMediaSyncClips(state.clips, timeToRender), state.mediaAssets, state.tracks, {
+            time: timeToRender,
+            state: playbackState,
+            speed: playbackSpeed,
+            muted: isMuted,
+            volume,
+          });
+        } catch (error) {
+          console.error(`[PreviewPanel ERROR] Exception calling syncPreviewMedia:`, error);
+        }
+      }
       if (isRendering) {
         droppedFramesRef.current++;
         return;
@@ -513,7 +539,6 @@ export const ProgramPreview: React.FC = () => {
         }
       }
       if (lastJobId) scheduler.cancel(lastJobId);
-      const session = getActiveSessionOrNull();
       const activeVideoElements = session?.getPreviewVideoElements() ?? new Map<string, HTMLVideoElement>();
       const jobId = scheduler.schedule({
         time: timeToRender,
@@ -531,6 +556,9 @@ export const ProgramPreview: React.FC = () => {
           isRendering = false;
           if (!isActive) return;
           const latestState = renderStateRef.current;
+          if (latestState.clock.isSeeking) {
+            latestState.clock.completeSeek();
+          }
           if (result.data instanceof ImageBitmap) {
             if (gpuCache) {
               const cacheKey = `preview:${latestState.project?.id}:${latestState.epoch}:${timeToRender.toFixed(3)}:${profile.maxWidth}x${profile.maxHeight}:${latestState.dpr}`;
@@ -573,15 +601,28 @@ export const ProgramPreview: React.FC = () => {
         .catch((error: Error) => {
           isRendering = false;
           if (error.message !== "Job cancelled" && isActive) console.error("Failed to render frame:", error);
+          const latestState = renderStateRef.current;
+          if (latestState.clock.isSeeking) {
+            latestState.clock.completeSeek();
+          }
         });
     };
+
+    // Subscribe to clock state changes to trigger renders when seeking
+    // This ensures we respond immediately to seek operations
+    const unsubscribeClock = clock.subscribe(() => {
+      // When clock state changes (especially after seek), flag that we need a render
+      forceRenderNeeded = true;
+    });
+
     rafId = requestAnimationFrame(renderLoop);
     return () => {
       isActive = false;
+      unsubscribeClock();
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (lastJobId) scheduler.cancel(lastJobId);
     };
-  }, [useCanvasPreview, project, canvasWidth, canvasHeight, displayWidth, displayHeight, canvasEl]);
+  }, [useCanvasPreview, project, canvasWidth, canvasHeight, displayWidth, displayHeight, canvasEl, isMuted, volume]);
 
   // ── Clear selection when playback starts ──────────────────────────────
   // Transform overlays should not be visible during playback
@@ -591,51 +632,71 @@ export const ProgramPreview: React.FC = () => {
     }
   }, [clockState.state, clearSelection]);
 
-  // ── Handle page visibility changes ────────────────────────────────────
-  // When tab goes to background, pause playback to prevent audio drift
-  // Browser throttles RAF to ~1fps in background, but audio continues normally
+  // ── Pause when app loses foreground ────────────────────────────────────
+  // Desktop webviews throttle RAF/media heavily when hidden or unfocused.
+  // Pause instead of letting preview clocks drift into a stale frame state.
   useEffect(() => {
+    const pauseProgramPlayback = () => {
+      if (clock.state === "playing") {
+        clock.pause();
+      }
+      getActiveSessionOrNull()?.pausePreviewMedia();
+    };
+
+    const refreshCurrentFrame = () => {
+      if (document.hidden) return;
+      setActiveContext?.("program");
+      requestAnimationFrame(() => {
+        clock.seek(clock.time);
+      });
+    };
+
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        // Page is hidden - pause to prevent drift
-        if (clockState.state === "playing") {
-          transportPause();
-          // Store that we auto-paused due to visibility
-          sessionStorage.setItem("clypra-auto-paused", "true");
-        }
+        pauseProgramPlayback();
       } else {
-        // Page is visible again - resume if we auto-paused
-        const wasAutoPaused = sessionStorage.getItem("clypra-auto-paused");
-        if (wasAutoPaused === "true") {
-          sessionStorage.removeItem("clypra-auto-paused");
-          transportPlay();
-        }
+        refreshCurrentFrame();
       }
     };
 
+    let unlistenTauriFocus: (() => void) | null = null;
+    let cancelled = false;
+
+    if (isTauriRuntime) {
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          if (cancelled) return;
+          unlistenTauriFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+            if (focused) {
+              refreshCurrentFrame();
+            } else {
+              pauseProgramPlayback();
+            }
+          });
+        } catch (error) {
+          console.warn("[ProgramPreview] Failed to subscribe to native focus changes:", error);
+        }
+      })();
+    }
+
+    window.addEventListener("blur", pauseProgramPlayback);
+    window.addEventListener("focus", refreshCurrentFrame);
+    window.addEventListener("pagehide", pauseProgramPlayback);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
+      cancelled = true;
+      if (unlistenTauriFocus) {
+        unlistenTauriFocus();
+        unlistenTauriFocus = null;
+      }
+      window.removeEventListener("blur", pauseProgramPlayback);
+      window.removeEventListener("focus", refreshCurrentFrame);
+      window.removeEventListener("pagehide", pauseProgramPlayback);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      sessionStorage.removeItem("clypra-auto-paused");
     };
-  }, [clockState.state, transportPause, transportPlay]);
-
-  useLayoutEffect(() => {
-    const session = activeSession;
-    if (!session) return;
-    try {
-      session.syncPreviewMedia(clips, mediaAssets, tracks, {
-        time: clock.time,
-        state: clockState.state,
-        speed: clockState.speed,
-        muted: isMuted,
-        volume,
-      });
-    } catch (error) {
-      console.error(`[PreviewPanel ERROR] Exception calling syncPreviewMedia:`, error);
-    }
-  }, [activeSession, clips, mediaAssets, tracks, clockState.state, clockState.speed, isMuted, volume, clock.time, clockState.time]);
+  }, [clock, setActiveContext]);
 
   if (!project) return null;
 

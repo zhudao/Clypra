@@ -21,6 +21,7 @@ import { rasterizeScene } from "../render/rasterizer";
 import { getResourceCache } from "../resources/ResourceCache";
 import { getFontLoader } from "../fonts/FontLoader";
 import { textRenderTrace } from "@/lib/debug/textRenderTrace";
+import { performanceMonitor } from "@/lib/debug/performanceMonitor";
 
 /**
  * Frame job status.
@@ -378,6 +379,11 @@ export class FrameScheduler {
    * Process a single job.
    */
   private async processJob(job: FrameJob): Promise<void> {
+    // performanceMonitor.startMeasure(`frame-${job.id}`, {
+    //   time: job.request.time,
+    //   priority: job.request.priority,
+    // });
+
     this.activeJobs.add(job.id);
     job.startedAt = Date.now();
 
@@ -388,6 +394,7 @@ export class FrameScheduler {
       // Step 1: Resource loading
       job.status = "loading";
       job.progress = 0.1;
+      // performanceMonitor.startMeasure(`resource-load-${job.id}`);
       const resourceStartTime = Date.now();
 
       // Pre-load resources for this frame (tracks acquired handles on the job)
@@ -397,6 +404,9 @@ export class FrameScheduler {
       await this.preloadFonts(job);
 
       job.metrics.resourceLoadTimeMs = Date.now() - resourceStartTime;
+      // performanceMonitor.endMeasure(`resource-load-${job.id}`, {
+      //   duration: job.metrics.resourceLoadTimeMs,
+      // });
 
       // ✅ Check after async operations
       this.throwIfCancelled(job);
@@ -404,6 +414,7 @@ export class FrameScheduler {
       // Step 2: Evaluation
       job.status = "evaluating";
       job.progress = 0.3;
+      // performanceMonitor.startMeasure(`evaluation-${job.id}`);
       const evalStartTime = Date.now();
 
       const scene = evaluateTimelineSceneCached(job.request.time, this.clips, this.tracks, this.assets, this.project, this.epoch, this.transitions);
@@ -434,6 +445,10 @@ export class FrameScheduler {
 
       job.metrics.evaluationTimeMs = Date.now() - evalStartTime;
       this.stats.totalEvaluationTimeMs += job.metrics.evaluationTimeMs;
+      // performanceMonitor.endMeasure(`evaluation-${job.id}`, {
+      //   duration: job.metrics.evaluationTimeMs,
+      //   layerCount: scene.visualLayers.length,
+      // });
 
       // ✅ Check after sync work
       this.throwIfCancelled(job);
@@ -441,6 +456,7 @@ export class FrameScheduler {
       // Step 3: Rasterization
       job.status = "rasterizing";
       job.progress = 0.6;
+      // performanceMonitor.startMeasure(`rasterization-${job.id}`);
       const rasterStartTime = Date.now();
 
       const rasterFrame = await rasterizeScene(scene, {
@@ -454,6 +470,9 @@ export class FrameScheduler {
 
       job.metrics.rasterTimeMs = Date.now() - rasterStartTime;
       this.stats.totalRasterTimeMs += job.metrics.rasterTimeMs;
+      // performanceMonitor.endMeasure(`rasterization-${job.id}`, {
+      //   duration: job.metrics.rasterTimeMs,
+      // });
 
       // ✅ Check after async operations
       this.throwIfCancelled(job);
@@ -523,6 +542,13 @@ export class FrameScheduler {
       job.status = "complete";
       job.progress = 1.0;
       this.stats.completedJobs++;
+
+      // performanceMonitor.endMeasure(`frame-${job.id}`, {
+      //   totalTime: job.metrics.totalTimeMs,
+      //   resourceLoad: job.metrics.resourceLoadTimeMs,
+      //   evaluation: job.metrics.evaluationTimeMs,
+      //   rasterization: job.metrics.rasterTimeMs,
+      // });
     } catch (error) {
       // ✅ Distinguish cancellation from failure
       if (error instanceof Error && error.message === "Job cancelled") {
@@ -536,6 +562,11 @@ export class FrameScheduler {
       if (this.config.debug && job.status === "failed") {
         console.error(`[Scheduler] Job ${job.id} failed:`, error);
       }
+
+      // performanceMonitor.endMeasure(`frame-${job.id}`, {
+      //   error: true,
+      //   status: job.status,
+      // });
     } finally {
       // Release all resource handles acquired during preload
       this.releaseJobResources(job);

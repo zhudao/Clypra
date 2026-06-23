@@ -28,6 +28,8 @@ import { generateId, getCounter } from "@/lib/utils/id";
 import { detectGaps, createGap, insertGapWithRipple, removeGapWithRipple, resizeGap, packTrack, mergeAdjacentGaps, validateGap } from "@/lib/timeline/gapEngine";
 import { resolveTextClipStyleUpdate } from "@/lib/text/textClip";
 import { useUIStore } from "./uiStore";
+import { performanceMonitor } from "@/lib/debug/performanceMonitor";
+import { timelineStart, timelineEnd, timelineLog } from "@/lib/debug/timelinePerformance";
 import { useProjectStore } from "./projectStore";
 import { clampTimelinePixelsPerSecond, clampTimelineZoom, TIMELINE_PPS_PER_ZOOM, TIMELINE_ZOOM_DEFAULT } from "../lib/timeline/timelineZoom";
 import { getTimelineContentEnd, normalizeClipTiming } from "@/lib/timeline/timelineClip";
@@ -253,17 +255,31 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     hydrateFromProject: (payload) => {
+      timelineStart("hydrateFromProject", {
+        trackCount: payload?.tracks?.length || 0,
+        clipCount: payload?.clips?.length || 0,
+      });
+      performanceMonitor.startMeasure("timeline-hydrate", {
+        trackCount: payload?.tracks?.length || 0,
+        clipCount: payload?.clips?.length || 0,
+        transitionCount: payload?.transitions?.length || 0,
+      });
+
       const finalTracks = payload?.tracks ?? [];
       const finalClipsRaw = payload?.clips ?? [];
       const finalTransitions = payload?.transitions ?? [];
       const finalGaps = (payload as any)?.gaps ?? []; // Load gaps from project
 
       // Normalize clip timing with media asset data
+      performanceMonitor.startMeasure("timeline-normalize-clips");
       const mediaAssets = useProjectStore.getState().mediaAssets;
 
       const normalizedClips = finalClipsRaw.map((clip: Clip) => {
         const asset = mediaAssets.find((a) => a.id === clip.mediaId);
         return normalizeClipTiming(clip, asset);
+      });
+      performanceMonitor.endMeasure("timeline-normalize-clips", {
+        clipCount: normalizedClips.length,
       });
 
       // Atomic state update - all or nothing
@@ -276,6 +292,12 @@ export const useTimelineStore = create<TimelineStore>(
         zoomLevel: TIMELINE_ZOOM_DEFAULT,
         pixelsPerSecond: TIMELINE_ZOOM_DEFAULT * TIMELINE_PPS_PER_ZOOM,
         epoch: 0, // Reset epoch on project load
+      });
+
+      performanceMonitor.endMeasure("timeline-hydrate");
+      timelineEnd("hydrateFromProject", {
+        totalClips: normalizedClips.length,
+        totalTracks: finalTracks.length,
       });
 
       // If no gaps in project file (legacy), detect them once after state is loaded
@@ -357,11 +379,13 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     addClip: (clip) => {
+      timelineStart("addClip", { clipId: clip.id, trackId: clip.trackId });
+      performanceMonitor.startMeasure("timeline-addClip", { clipId: clip.id, trackId: clip.trackId });
+
       set((state) => {
         // Prevent adding duplicate clips with the same ID
         const existingClip = state.clips.find((c) => c.id === clip.id);
         if (existingClip) {
-          console.warn(`[TimelineStore] Clip with ID "${clip.id}" already exists. Skipping duplicate.`);
           return state; // Return unchanged state
         }
 
@@ -418,13 +442,16 @@ export const useTimelineStore = create<TimelineStore>(
         };
       });
 
+      performanceMonitor.endMeasure("timeline-addClip");
+      timelineEnd("addClip");
+
       // Trigger background preload if the added clip has a templateId
       if (clip.templateId) {
-        import("@/features/text-templates/templateStore").then(({ useTemplateStore }) => {
-          useTemplateStore.getState().preloadTemplatesAndFontsForClips([clip]);
-        }).catch((err) => {
-          console.warn("[TimelineStore] Failed to trigger template preloading:", err);
-        });
+        import("@/features/text-templates/templateStore")
+          .then(({ useTemplateStore }) => {
+            useTemplateStore.getState().preloadTemplatesAndFontsForClips([clip]);
+          })
+          .catch(() => {});
       }
 
       // Detect and sync gaps on the affected track after clip addition
@@ -435,6 +462,8 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     removeClip: (clipId) => {
+      timelineLog("removeClip", { clipId });
+
       const state = get();
       const clipToRemove = state.clips.find((c) => c.id === clipId);
       const removedTrackId = clipToRemove?.trackId;
@@ -556,7 +585,7 @@ export const useTimelineStore = create<TimelineStore>(
         fromItemId: left.id,
         toItemId: right.id,
         alignment: "center",
-        easing: "easeInOut",
+        easing: "ease-in-out",
         placement: {
           trackId: left.trackId,
           startTime: transitionStart,
@@ -575,6 +604,11 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     updateClip: (clipId, updates) => {
+      const hasSubstantiveChanges = updates.startTime !== undefined || updates.duration !== undefined || updates.trimIn !== undefined || updates.trimOut !== undefined;
+      if (hasSubstantiveChanges) {
+        timelineLog("updateClip", { clipId, updates });
+      }
+
       set((state) => {
         const next: Partial<TimelineStore> = {
           clips: state.clips.map((c) => {
@@ -588,7 +622,6 @@ export const useTimelineStore = create<TimelineStore>(
                 const canvasHeight = project?.canvasHeight ?? 1080;
                 return { ...c, ...resolveTextClipStyleUpdate(c as TextClip, updates as Partial<TextClip>, canvasWidth, canvasHeight) };
               } catch (e) {
-                console.warn("[updateClip] Bounds recalculation failed, applying raw updates", e);
                 return { ...c, ...updates };
               }
             }
@@ -599,8 +632,15 @@ export const useTimelineStore = create<TimelineStore>(
         // Skip epoch increment during transform preview (high-frequency updates)
         // The final mouseup will commit to history which will increment epoch properly
         const isTransformPreview = "_skipEpochIncrement" in updates && (updates as any)._skipEpochIncrement;
-        if (isTransformPreview) {
-          // Don't increment epoch for preview updates
+
+        // EXCEPTION: For text templates, always increment epoch even during transform preview
+        // because templates need to re-render at different scales in real-time
+        const clip = state.clips.find((c) => c.id === clipId);
+        const isTextTemplate = clip && "templateId" in clip && (clip as TextClip).templateId;
+        const isResizing = updates.width !== undefined || updates.height !== undefined;
+
+        if (isTransformPreview && !(isTextTemplate && isResizing)) {
+          // Don't increment epoch for preview updates (except template resizing)
           return next;
         }
         if (state._batchDepth > 0) {
@@ -613,13 +653,17 @@ export const useTimelineStore = create<TimelineStore>(
 
       // Trigger preload if templateId is updated
       if (updates.templateId) {
-        import("@/features/text-templates/templateStore").then(({ useTemplateStore }) => {
-          useTemplateStore.getState().preloadTemplatesAndFontsForClips([{ templateId: updates.templateId }]);
-        }).catch((err) => console.warn("[TimelineStore] Failed to trigger template preloading on update:", err));
+        import("@/features/text-templates/templateStore")
+          .then(({ useTemplateStore }) => {
+            useTemplateStore.getState().preloadTemplatesAndFontsForClips([{ templateId: updates.templateId }]);
+          })
+          .catch(() => {});
       }
     },
 
     moveClip: (clipId, startTime) => {
+      timelineLog("moveClip", { clipId, startTime });
+
       set((state) => {
         const next: Partial<TimelineStore> = {
           clips: state.clips.map((c) => (c.id === clipId ? { ...c, startTime } : c)),
@@ -979,7 +1023,7 @@ export const useTimelineStore = create<TimelineStore>(
     // ═══════════════════════════════════════════════════════════
 
     insertGap: (trackId, startTime, duration) => {
-      console.warn("[DEPRECATED] timelineStore.insertGap() - Use GapManager.insertGap() for undo/redo support");
+      // DEPRECATED: Use GapManager.insertGap() for undo/redo support
 
       const state = get();
       const track = state.tracks.find((t) => t.id === trackId);
@@ -1014,7 +1058,7 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     removeGap: (gapId) => {
-      console.warn("[DEPRECATED] timelineStore.removeGap() - Use GapManager.removeGap() for undo/redo support");
+      // DEPRECATED: Use GapManager.removeGap() for undo/redo support
 
       const state = get();
       const gap = state.gaps.find((g) => g.id === gapId);
@@ -1046,7 +1090,7 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     resizeGapDuration: (gapId, newDuration) => {
-      console.warn("[DEPRECATED] timelineStore.resizeGapDuration() - Use GapManager.resizeGap() for undo/redo support");
+      // DEPRECATED: Use GapManager.resizeGap() for undo/redo support
 
       const state = get();
       const gap = state.gaps.find((g) => g.id === gapId);
@@ -1080,7 +1124,7 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     toggleGapProtection: (gapId) => {
-      console.warn("[DEPRECATED] timelineStore.toggleGapProtection() - Use GapManager.toggleProtection() for undo/redo support");
+      // DEPRECATED: Use GapManager.toggleProtection() for undo/redo support
 
       set((state) => {
         const next: Partial<TimelineStore> = {
@@ -1169,15 +1213,7 @@ export const useTimelineStore = create<TimelineStore>(
         for (let i = 0; i < a.length; i++) {
           const ga = a[i];
           const gb = b[i];
-          if (
-            ga.id !== gb.id ||
-            ga.trackId !== gb.trackId ||
-            Math.abs(ga.startTime - gb.startTime) > 0.001 ||
-            Math.abs(ga.duration - gb.duration) > 0.001 ||
-            ga.type !== gb.type ||
-            ga.source !== gb.source ||
-            ga.protected !== gb.protected
-          ) {
+          if (ga.id !== gb.id || ga.trackId !== gb.trackId || Math.abs(ga.startTime - gb.startTime) > 0.001 || Math.abs(ga.duration - gb.duration) > 0.001 || ga.type !== gb.type || ga.source !== gb.source || ga.protected !== gb.protected) {
             return false;
           }
         }
@@ -1190,7 +1226,7 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     packTrackGaps: (trackId) => {
-      console.warn("[DEPRECATED] timelineStore.packTrackGaps() - Use GapManager.packTrack() for undo/redo support");
+      // DEPRECATED: Use GapManager.packTrack() for undo/redo support
 
       const state = get();
       const track = state.tracks.find((t) => t.id === trackId);

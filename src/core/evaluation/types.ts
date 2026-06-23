@@ -63,8 +63,8 @@ interface BaseVisualLayer {
   /** Whether this layer is currently in a transition */
   readonly inTransition: boolean;
 
-  /** Transition type (if in transition) */
-  readonly transitionType?: "fade" | "dissolve" | "wipe" | "custom";
+  /** Transition type (if in transition) - supports all TransitionRenderer types */
+  readonly transitionType?: EvaluatedTransition["type"];
 
   /** Transition progress (0.0 - 1.0, if in transition) */
   readonly transitionProgress?: number;
@@ -112,7 +112,7 @@ export interface EvaluatedMediaLayer extends BaseVisualLayer {
 
   /** Source media rotation from container metadata (0, 90, 180, 270) */
   readonly sourceRotation?: number;
-  
+
   /** Sticker-specific settings */
   readonly stickerSettings?: { speed: number; loop: boolean };
   readonly stickerFormat?: "static" | "gif" | "lottie";
@@ -248,8 +248,8 @@ export interface EvaluatedTransition {
   /** Transition ID */
   readonly transitionId: string;
 
-  /** Transition type */
-  readonly type: "fade" | "dissolve" | "wipe" | "custom";
+  /** Transition type - uses TransitionRenderer from @clypra/engine for single source of truth */
+  readonly type: import("@clypra/engine").TransitionRendererType;
 
   /** Progress (0.0 - 1.0) */
   readonly progress: number;
@@ -265,6 +265,9 @@ export interface EvaluatedTransition {
 
   /** Blend mode */
   readonly blendMode: BlendMode;
+
+  /** Optional transition parameters from @clypra/engine */
+  readonly params?: import("@clypra/engine").TransitionParameters;
 }
 
 /**

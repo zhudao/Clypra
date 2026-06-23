@@ -3,8 +3,8 @@
  * Displays available transitions that can be applied between clips on timeline
  */
 
-import React, { useState, useEffect, useMemo } from "react";
-import { Wand2, Search, Plus, AlertCircle } from "lucide-react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Wand2, Plus, AlertCircle } from "lucide-react";
 import type { TabProps } from "./types";
 import { useProjectStore } from "@/store/projectStore";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/Tooltip";
@@ -14,17 +14,16 @@ import type { TransitionAsset } from "@/features/transitions/types";
 // Hardcoded transition categories for instant UI rendering
 const TRANSITION_CATEGORIES = [
   { id: "fade", label: "Fade" },
-  { id: "dissolve", label: "Dissolve" },
   { id: "slide", label: "Slide" },
   { id: "wipe", label: "Wipe" },
   { id: "zoom", label: "Zoom" },
+  { id: "dissolve", label: "Dissolve" },
   { id: "creative", label: "Creative" },
 ] as const;
 
 type TransitionCategory = (typeof TRANSITION_CATEGORIES)[number]["id"];
 
 export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
-  const [searchQuery, setSearchQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState<TransitionCategory>("fade");
   const [transitions, setTransitions] = useState<TransitionAsset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -50,38 +49,19 @@ export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
     fetchTransitions();
   }, [activeCategory]);
 
-  // Filter transitions based on search query
-  const filteredTransitions = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    return transitions.filter((transition) => {
-      const matchesSearch = !query || transition.name.toLowerCase().includes(query) || transition.description.toLowerCase().includes(query) || transition.category.includes(query);
-      return matchesSearch;
-    });
-  }, [transitions, searchQuery]);
+  // Filter transitions based on category
+  const filteredTransitions = useMemo(() => transitions, [transitions]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-surface/5 select-none">
       {/* Header with category tabs */}
       <div className="flex items-center gap-2.5 p-1 border-b border-border/50 shrink-0 bg-surface/10">
-        <div className="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-sm bg-accent/10 border border-accent/20 text-accent-soft">
-          <Wand2 className="w-3.5 h-3.5" />
-          <span className="text-[12px] font-semibold">Transitions</span>
-        </div>
-        <div className="w-px h-5 bg-border/80 shrink-0" />
         <div className="grow overflow-x-auto flex items-center gap-2 pb-0.5 whitespace-nowrap" style={{ scrollbarWidth: "none" }}>
           {TRANSITION_CATEGORIES.map((category) => (
-            <button key={category.id} onClick={() => setActiveCategory(category.id)} className={`px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer shrink-0 ${activeCategory === category.id ? "bg-accent text-white shadow-sm" : "text-text-muted hover:text-text-primary hover:bg-surface-raised/60"}`}>
+            <button key={category.id} onClick={() => setActiveCategory(category.id)} className={`px-2 py-1 rounded text-xs font-semibold transition-all cursor-pointer shrink-0 hover:bg-accent/10 hover:text-accent ${activeCategory === category.id ? "bg-accent/10 text-accent" : "text-text-muted"}`}>
               {category.label}
             </button>
           ))}
-        </div>
-      </div>
-
-      {/* Search bar */}
-      <div className="p-1 border-b border-border/50 bg-surface/5">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
-          <input type="text" placeholder="Search transitions..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-surface-raised/70 border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent" />
         </div>
       </div>
 
@@ -98,7 +78,9 @@ export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
         )}
 
         {loading && filteredTransitions.length === 0 ? (
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-1.5">
+            <SkeletonCard />
+            <SkeletonCard />
             <SkeletonCard />
             <SkeletonCard />
             <SkeletonCard />
@@ -111,7 +93,7 @@ export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
             <p className="opacity-60">Try another category or search</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {filteredTransitions.map((transition) => (
               <TransitionCard key={transition.id} transition={transition} onAddToTimeline={() => onAddToTimeline?.(transition as any, "transitions")} />
             ))}
@@ -123,26 +105,42 @@ export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
 };
 
 const SkeletonCard = () => (
-  <div className="animate-pulse rounded-lg border border-border/30 bg-surface-raised/40 overflow-hidden flex flex-col justify-between">
-    <div className="h-28 bg-white/5 relative overflow-hidden">
-      <div className="absolute right-2 top-2 h-5 w-12 rounded bg-white/10" />
+  <div className="w-full aspect-square animate-pulse rounded-xl border border-border/30 bg-surface-raised/40 overflow-hidden flex flex-col justify-between p-1">
+    <div className="flex-1 bg-white/5 relative overflow-hidden rounded-lg">
+      <div className="absolute right-1 top-1 h-4 w-4 rounded-full bg-white/10" />
     </div>
-    <div className="p-2.5 space-y-2 flex-1 flex flex-col justify-between">
-      <div className="space-y-2">
-        <div className="h-3.5 bg-white/10 rounded w-3/4" />
-        <div className="h-3 bg-white/5 rounded w-full" />
-        <div className="h-3 bg-white/5 rounded w-5/6" />
-      </div>
-      <div className="flex justify-between items-center mt-2 pt-2 border-t border-white/5">
-        <div className="h-2.5 bg-white/5 rounded w-1/3" />
-        <div className="h-2.5 bg-white/5 rounded w-1/4" />
-      </div>
+    <div className="flex items-center justify-between w-full mt-0.5">
+      <div className="h-2.5 bg-white/10 rounded w-16" />
+      <div className="h-4 w-4 rounded-full bg-white/10" />
     </div>
   </div>
 );
 
 const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: () => void }> = ({ transition, onAddToTimeline }) => {
-  const previewSrc = transition.thumbnail || "/transition-previews/sample.jpg";
+  const [isHovered, setIsHovered] = useState(false);
+  const [imageError, setImageError] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Handle video playback on hover
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (isHovered) {
+      // Reset to start and play
+      video.currentTime = 0;
+      const playPromise = video.play();
+
+      if (playPromise !== undefined) {
+        playPromise.catch((error) => {
+          console.error("Video play failed:", error);
+        });
+      }
+    } else {
+      video.pause();
+      video.currentTime = 0;
+    }
+  }, [isHovered]);
 
   const handleAddToTimeline = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -151,57 +149,36 @@ const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: (
   };
 
   return (
-    <div className="group text-left rounded-xl border bg-surface-raised/40 transition-all overflow-hidden flex flex-col h-[200px] shadow-[0_4px_16px_rgba(0,0,0,0.3)] hover:bg-surface-raised/80 hover:border-accent/40 cursor-pointer border-border/40">
-      {/* Preview Area */}
-      <div className="h-28 w-full relative overflow-hidden bg-surface/60 shrink-0">
-        {/* Preview Image */}
-        <img
-          src={previewSrc}
-          alt={`${transition.name} preview`}
-          className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-[1.05]"
-          loading="lazy"
-          onError={(e) => {
-            const img = e.target as HTMLImageElement;
-            img.style.display = "none";
-          }}
-        />
+    <div onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)} className="w-full aspect-square bg-surface-raised/40 hover:bg-surface-raised/80 border border-border/40 hover:border-accent/40 rounded-xl relative overflow-hidden flex flex-col justify-between p-1 transition-all duration-300 group cursor-pointer shadow-[0_4px_16px_rgba(0,0,0,0.3)]">
+      {/* Premium Badge - top-left, appears on hover */}
+      {transition.isPremium && (
+        <button className={`absolute top-1 left-1 p-1 rounded-full bg-surface/40 hover:bg-surface/60 border border-border/50 transition-all duration-200 z-10 ${isHovered ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"}`}>
+          <Wand2 className="w-3 h-3 text-purple-400" />
+        </button>
+      )}
 
-        {/* Gradient Overlay */}
-        <div className="absolute inset-0 bg-linear-to-t from-black/60 via-transparent to-transparent" />
+      {/* Preview area - with hover scale animation */}
+      <div className="flex-1 flex items-center justify-center w-full select-none relative overflow-hidden transition-transform duration-500 ease-out group-hover:scale-[1.05]">
+        {/* WebM Video Preview (shown on hover) */}
+        {transition.preview && <video ref={videoRef} src={transition.preview} loop muted playsInline preload="auto" controls={false} disablePictureInPicture style={{ pointerEvents: "none" }} className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-100 z-10" : "opacity-0 z-0"}`} />}
 
-        {/* Transition Type Badge */}
-        <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-sm border bg-purple-600/80 border-white/20">
-          <span className="text-[9px] font-semibold text-white uppercase tracking-wide">{transition.renderer}</span>
-        </div>
+        {/* Static Thumbnail */}
+        {!imageError ? (
+          <img src={transition.thumbnail} alt={transition.name} className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-0 z-0" : "opacity-100 z-10"}`} onError={() => setImageError(true)} />
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-1 text-text-muted">
+            <Wand2 className="w-6 h-6" />
+            <span className="text-[9px] font-medium">{transition.name}</span>
+          </div>
+        )}
       </div>
 
-      {/* Content Area */}
-      <div className="p-2 flex-1 flex flex-col justify-between">
-        <div>
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-[13px] font-semibold text-text-primary leading-tight truncate">{transition.name}</p>
-
-            {/* Add to Timeline Button */}
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button onClick={handleAddToTimeline} className="w-7 h-7 rounded-full flex items-center justify-center transition-all bg-accent/20 hover:bg-accent border border-accent text-accent hover:text-white cursor-pointer">
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  <p>Add to Timeline</p>
-                </TooltipContent>
-              </Tooltip>
-            </div>
-          </div>
-          <p className="mt-1 text-[11px] leading-snug text-text-muted line-clamp-2">{transition.description}</p>
-        </div>
-
-        <div className="mt-2 flex items-center justify-between border-t border-border/40 pt-1.5">
-          <span className="text-[10px] capitalize text-text-muted group-hover:text-text-primary transition-colors truncate mr-1">{transition.category}</span>
-          {transition.duration && <span className="text-[10px] text-text-muted shrink-0">{transition.duration.default}s</span>}
-        </div>
+      {/* Footer - name + apply button, always visible */}
+      <div className="flex items-center justify-between w-full mt-0.5 z-10">
+        <span className="text-[9px] text-text-muted font-medium group-hover:text-text-primary transition-colors truncate max-w-[65px]">{transition.name}</span>
+        <button onClick={handleAddToTimeline} title="Add transition to timeline" aria-label="Add transition to timeline" className="w-4 h-4 rounded-full flex items-center justify-center transition-all bg-accent hover:bg-accent/85 border border-accent text-white cursor-pointer">
+          <Plus className="w-3 h-3 group-hover:scale-110 transition-transform" />
+        </button>
       </div>
     </div>
   );

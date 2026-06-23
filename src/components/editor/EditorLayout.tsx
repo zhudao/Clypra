@@ -153,7 +153,6 @@ export const EditorLayout: React.FC = () => {
             effectDefinition = useEffectsStore.getState().definitions[item.styleId];
           }
         } catch (error) {
-          console.warn("[EditorLayout] Failed to fetch effect definition for", item.styleId, error);
           // Continue without definition - will use fallback sizing
         }
       }
@@ -189,7 +188,6 @@ export const EditorLayout: React.FC = () => {
       const cachedFile = getCachedFile(item.id);
 
       if (!cachedFile) {
-        console.error("[EditorLayout] Audio not downloaded yet:", item.id);
         return;
       }
 
@@ -245,12 +243,11 @@ export const EditorLayout: React.FC = () => {
           }) as any,
         );
       })().catch((error) => {
-        console.error("[EditorLayout] Failed to add audio to timeline:", error);
+        // Audio add failed silently
       });
     } else if (type === "stickers") {
       const cachedSticker = useStickersStore.getState().getCachedSticker(item.id);
       if (!cachedSticker) {
-        console.error("[EditorLayout] Sticker not downloaded yet:", item.id);
         return;
       }
 
@@ -261,7 +258,6 @@ export const EditorLayout: React.FC = () => {
         // Stickers are Lottie-only now
         const relativePath = cachedSticker.localImagePath || "";
         if (!relativePath) {
-          console.error("[EditorLayout] Missing thumbnail path for sticker:", item.id);
           return;
         }
 
@@ -310,7 +306,7 @@ export const EditorLayout: React.FC = () => {
         });
         execute(new AddClipCommand(stickerClip));
       })().catch((error) => {
-        console.error("[EditorLayout] Failed to add sticker to timeline:", error);
+        // Sticker add failed silently
       });
     } else if (type === "transitions") {
       const selectedPair = selectedClipIds.length === 2 ? ([selectedClipIds[0], selectedClipIds[1]] as const) : null;
@@ -319,12 +315,16 @@ export const EditorLayout: React.FC = () => {
         useProjectStore.getState().showToast("Select two adjacent clips or place the playhead at a cut", "warning");
         return;
       }
-      const transitionType = item?.preview === "dissolve" || item?.name?.toLowerCase?.() === "dissolve" ? "dissolve" : "fade";
-      const result = createTransitionBetweenClips(pair[0], pair[1], transitionType, Number(item?.duration) || 0.5);
+
+      // Use the transition renderer from the API instead of hardcoding
+      const transitionType = item?.renderer || item?.category || "fade";
+      const transitionDuration = item?.duration?.default || Number(item?.duration) || 0.5;
+
+      const result = createTransitionBetweenClips(pair[0], pair[1], transitionType, transitionDuration);
       if (result.error) {
         useProjectStore.getState().showToast(result.error, "warning");
       } else {
-        useProjectStore.getState().showToast(`${item?.name || "Transition"} added`);
+        useProjectStore.getState().showToast(`${item?.name || "Transition"} added between clips`);
       }
     } else if (type === "effects") {
       const selectedClipId = selectedClipIds[0] ?? null;
@@ -381,7 +381,6 @@ export const EditorLayout: React.FC = () => {
       const cachedFilter = filterCacheManager.getCached(item.id);
 
       if (!cachedFilter) {
-        console.error("[EditorLayout] Filter not downloaded yet:", item.id);
         useProjectStore.getState().showToast("Filter not downloaded yet", "warning");
         return;
       }
@@ -431,12 +430,8 @@ export const EditorLayout: React.FC = () => {
       addClip(filterClip as any);
       useProjectStore.getState().showToast(`Added ${cachedFilter.filter.name} filter`);
     } else if (type === "video-effects" || type === "body-effects") {
-      console.log("[EditorLayout] Handling video/body effect:", { type, itemId: item.id, itemName: item.name });
-
       // Effects are now created directly on timeline without downloading
       // The effect data comes from the engine's effectsRegistry
-
-      console.log("[EditorLayout] Creating effect clip for:", item.name);
 
       // Create effect clip on timeline (same pattern as filter clips)
       const effectTrackType: TrackType = type === "body-effects" ? "body-effect" : "video-effect";
@@ -458,7 +453,6 @@ export const EditorLayout: React.FC = () => {
       }
 
       if (!targetTrackId) {
-        console.error("[EditorLayout] Failed to create track for effect");
         return;
       }
 
@@ -486,12 +480,8 @@ export const EditorLayout: React.FC = () => {
         ...(type === "body-effects" && item.requirements ? { requirements: item.requirements } : {}),
       };
 
-      console.log("[EditorLayout] Creating effect clip:", effectClip);
-
       addClip(effectClip as any);
       useProjectStore.getState().showToast(`Added ${item.name} effect`);
-
-      console.log("[EditorLayout] Effect clip added successfully");
     }
   };
 

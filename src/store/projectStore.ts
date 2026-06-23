@@ -117,14 +117,9 @@ async function preloadTextEffectDefinitionsFromClips(clips: any[] | undefined): 
     const missingStyleIds = styleIds.filter((id) => !useEffectsStore.getState().definitions[id]);
     if (missingStyleIds.length === 0) return;
 
-    const results = await Promise.allSettled(missingStyleIds.map((id) => store.fetchDefinitionOnlyById(id)));
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        console.warn(`[LoadProject] Failed to preload text effect definition ${missingStyleIds[index]}:`, result.reason);
-      }
-    });
+    await Promise.allSettled(missingStyleIds.map((id) => store.fetchDefinitionOnlyById(id)));
   } catch (err) {
-    console.warn("[LoadProject] Text effect definition preload failed:", err);
+    // Preload failed silently
   }
 }
 
@@ -214,6 +209,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       duration: 0,
       timelineSchemaVersion: 1,
     };
+
     set({ project, mediaAssets: [] });
 
     // Let timelineStore reset its own state
@@ -221,7 +217,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const { useTimelineStore } = await import("./timelineStore");
       useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [] });
     } catch (err) {
-      console.error("[CreateProject] Failed to hydrate timeline:", err);
+      // Timeline hydration failed silently
     }
 
     // Initialize runtime session
@@ -229,7 +225,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const { createProjectSession } = await import("@/core/runtime/ProjectSession");
       await createProjectSession(project.id);
     } catch (err) {
-      console.error("[CreateProject] Runtime initialization failed:", err);
+      // Runtime initialization failed silently
     }
 
     get().scheduleAutoSave();
@@ -241,7 +237,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const { disposeActiveSession } = await import("@/core/runtime/ProjectSession");
       await disposeActiveSession();
     } catch (err) {
-      console.error("[LoadProject] Runtime disposal failed:", err);
+      // Runtime disposal failed silently
     }
 
     // Apply project and mediaAssets (projectStore owns these)
@@ -249,12 +245,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
     await preloadTextEffectDefinitionsFromClips(payload?.clips);
 
-    // Preload text templates and their fonts
+    // Preload text templates and their fonts with persistent caching
     try {
       const { useTemplateStore } = await import("@/features/text-templates/templateStore");
       await useTemplateStore.getState().preloadTemplatesAndFontsForClips(payload?.clips ?? []);
     } catch (err) {
-      console.warn("[LoadProject] Failed to preload text templates and fonts:", err);
+      // Preload failed silently
     }
 
     // Let timelineStore hydrate its own state (respects ownership boundary)
@@ -269,7 +265,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
     } catch (err) {
       // On error, reset timeline to empty state
-      import("./timelineStore").then(({ useTimelineStore }) => useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [], gaps: [] })).catch((resetErr) => console.error("[LoadProject] Failed to reset timeline:", resetErr));
+      import("./timelineStore").then(({ useTimelineStore }) => useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [], gaps: [] })).catch(() => {});
     }
 
     // Initialize runtime LAST — stores are now fully populated
@@ -277,7 +273,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const { createProjectSession } = await import("@/core/runtime/ProjectSession");
       await createProjectSession(project.id);
     } catch (err) {
-      console.error("[LoadProject] Runtime initialization failed:", err);
+      // Runtime initialization failed silently
     }
   },
 
@@ -398,7 +394,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const { disposeActiveSession } = await import("@/core/runtime/ProjectSession");
       await disposeActiveSession();
     } catch (err) {
-      console.error("[CloseProject] Error disposing runtime:", err);
+      // Runtime disposal failed silently
     }
 
     // Now clear project and media assets
@@ -409,9 +405,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       .then(({ useTimelineStore }) => {
         useTimelineStore.getState().hydrateFromProject({ tracks: [], clips: [], transitions: [] });
       })
-      .catch((err) => {
-        console.error("[CloseProject] Failed to reset timeline:", err);
-      });
+      .catch(() => {});
   },
 
   scheduleAutoSave: () => {
@@ -442,8 +436,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         });
         get().showToast("Project saved");
       } catch (error) {
-        console.error("[AutoSave] Failed to save project:", error);
-        // Background operation — log only, don't show error toast
+        // Background operation — silent fail
       }
     }, AUTO_SAVE_DELAY);
   },

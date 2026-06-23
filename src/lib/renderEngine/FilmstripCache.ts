@@ -50,6 +50,10 @@ interface PendingArtifact {
   artifact: TransportArtifact;
 }
 
+function isValidArtifact(artifact: TransportArtifact): boolean {
+  return !!artifact.bitmap && artifact.bitmap.width > 0 && artifact.bitmap.height > 0;
+}
+
 interface ViewportFilmstripOptions {
   trimIn: number;
   trimOut: number;
@@ -282,7 +286,7 @@ export class FilmstripCache {
 
     for (const addr of addresses) {
       const exact = this.tileCache.getTile(addr);
-      if (exact) {
+      if (exact && isValidArtifact(exact.artifact)) {
         artifacts.push(exact.artifact);
         usedKeys.add(getTileKey(addr));
         continue;
@@ -296,7 +300,7 @@ export class FilmstripCache {
         0.5, // 500ms tolerance — "good enough" for scroll
         videoPath,
       );
-      if (nearest) {
+      if (nearest && isValidArtifact(nearest.artifact)) {
         artifacts.push(nearest.artifact);
       }
     }
@@ -471,6 +475,12 @@ export class FilmstripCache {
           artifact.bitmap.close();
           return;
         }
+        if (!isValidArtifact(artifact)) {
+          try {
+            artifact.bitmap.close();
+          } catch {}
+          return;
+        }
 
         // Find the tile address this artifact belongs to
         const matchingAddr = currentEntry.tileAddresses.find((a) => Math.abs(a.timestamp * 1000 - artifact.timestampMs) < 1);
@@ -546,7 +556,9 @@ export class FilmstripCache {
 
     // Close any pending artifacts
     for (const { artifact } of this.pendingArtifacts) {
-      artifact.bitmap.close();
+      if (isValidArtifact(artifact)) {
+        artifact.bitmap.close();
+      }
     }
     this.pendingArtifacts = [];
 
@@ -564,6 +576,9 @@ export class FilmstripCache {
 
   private _disposeArtifacts(artifacts: TransportArtifact[]): void {
     for (const artifact of artifacts) {
+      if (!isValidArtifact(artifact)) {
+        continue;
+      }
       if (this.tileCache.isArtifactCached(artifact)) {
         continue;
       }

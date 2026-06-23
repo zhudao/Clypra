@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Sparkles } from "lucide-react";
 import { useUIStore } from "@/store/uiStore";
 import { useTimelineStore } from "@/store/timelineStore";
-import { usePlaybackClock, useTransportControls } from "@/hooks/usePlaybackClock";
+import { getPlaybackClock, useTransportControls } from "@/hooks/usePlaybackClock";
 import type { Clip as ClipType, MediaAsset } from "@/types";
 import { ClipFilmstrip } from "./ClipFilmstrip";
 import { TimelineWaveform } from "./TimelineWaveform";
@@ -17,7 +17,8 @@ const resolveMediaSrc = (path: string) => {
 
 /** Movement past this (px) starts a clip drag; below it, release is still a click (selection set on pointerDown). */
 const DRAG_THRESHOLD_PX = 6;
-const RESIZE_TRACE = true;
+/** Set to true to enable resize operation tracing in console */
+const RESIZE_TRACE = false;
 const MAX_STILL_CLIP_DURATION_SEC = 60 * 60; // 1 hour guardrail for stills
 const MIN_TRIM_DURATION_SEC = 1;
 const SNAP_THRESHOLD_SECONDS = 0.1; // Snap when within 100ms
@@ -45,19 +46,17 @@ interface ClipProps {
 }
 
 const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, selected, locked = false, onDragStart, onDragMove, onDragEnd, isBeingShifted = false, dragState }) => {
-  const { selectClip, toggleClipSelection } = useUIStore();
+  const selectClip = useUIStore((s) => s.selectClip);
+  const toggleClipSelection = useUIStore((s) => s.toggleClipSelection);
   // PERF-4 fix: granular selectors prevent all clips re-rendering on every scroll/clip change
   const updateClip = useTimelineStore((s) => s.updateClip);
   const rippleEditEnabled = useTimelineStore((s) => s.rippleEditEnabled);
   const rippleTrimClip = useTimelineStore((s) => s.rippleTrimClip);
-  const scrollLeft = useTimelineStore((s) => s.scrollLeft);
-  const viewportWidth = useTimelineStore((s) => s.viewportWidth);
   const snapEnabled = useTimelineStore((s) => s.snapEnabled);
   const setSnapGuides = useTimelineStore((s) => s.setSnapGuides);
   const clearSnapGuides = useTimelineStore((s) => s.clearSnapGuides);
-  const clockState = usePlaybackClock();
-  const currentTime = clockState.time;
   const { pause } = useTransportControls();
+
   const [isResizing, setIsResizing] = useState<"left" | "right" | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const resizeStartRef = useRef<{ x: number; startTime: number; duration: number; trimIn: number; trimOut: number; isRipple: boolean } | null>(null);
@@ -350,10 +349,13 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
         // Build snap candidates
         const snapCandidates: Array<{ time: number; type: "clip-start" | "clip-end" | "playhead" }> = [];
 
-        // Add playhead position
-        if (currentTime !== undefined) {
-          snapCandidates.push({ time: currentTime, type: "playhead" });
-        }
+        // Read playhead time imperatively (no subscription - only read when actually needed during resize)
+        // This avoids re-rendering all clips on every playback frame
+        const playbackClock = getPlaybackClock();
+        const currentTime = playbackClock.time;
+
+        // Add playhead position as snap candidate
+        snapCandidates.push({ time: currentTime, type: "playhead" });
 
         // Add all other clip edges (across all tracks for professional alignment)
         for (const c of allClips) {
@@ -566,7 +568,7 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
       document.removeEventListener("pointerup", handlePointerUp);
       document.removeEventListener("pointercancel", handlePointerCancel);
     };
-  }, [isResizing, pixelsPerSecond, mediaAsset, updateClip, rippleEditEnabled, rippleTrimClip, snapEnabled, setSnapGuides, clearSnapGuides, currentTime]);
+  }, [isResizing, pixelsPerSecond, mediaAsset, updateClip, rippleEditEnabled, rippleTrimClip, snapEnabled, setSnapGuides, clearSnapGuides]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -720,7 +722,7 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
           </div>
           {mediaAsset && (mediaAsset.type === "video" || mediaAsset.type === "image") ? (
             <div className="flex min-h-0 w-full flex-1 items-center">
-              <ClipFilmstrip className="w-full shrink-0" clip={clip} mediaAsset={mediaAsset} clipWidthPx={width} pixelsPerSecond={pixelsPerSecond} stripHeightPx={40} viewportScrollLeft={scrollLeft} viewportWidth={viewportWidth} />
+              <ClipFilmstrip className="w-full shrink-0" clip={clip} mediaAsset={mediaAsset} clipWidthPx={width} pixelsPerSecond={pixelsPerSecond} stripHeightPx={40} />
             </div>
           ) : mediaAsset?.type === "audio" || (clip as any).audioPath ? (
             <div className="flex min-h-0 w-full flex-1 items-center">
@@ -762,4 +764,33 @@ const ClipInner: React.FC<ClipProps> = ({ clip, mediaAsset, pixelsPerSecond, sel
   );
 };
 
-export const Clip = React.memo(ClipInner);
+// Custom comparison function to prevent unnecessary re-renders
+// Only re-render if actual clip data or relevant props change
+const arePropsEqual = (prevProps: ClipProps, nextProps: ClipProps) => {
+  // Check if critical clip properties changed
+  if (prevProps.clip.id !== nextProps.clip.id || prevProps.clip.startTime !== nextProps.clip.startTime || prevProps.clip.duration !== nextProps.clip.duration || prevProps.clip.trimIn !== nextProps.clip.trimIn || prevProps.clip.trimOut !== nextProps.clip.trimOut || prevProps.clip.trackId !== nextProps.clip.trackId) {
+    return false;
+  }
+
+  // Check other props
+  if (prevProps.pixelsPerSecond !== nextProps.pixelsPerSecond || prevProps.selected !== nextProps.selected || prevProps.locked !== nextProps.locked || prevProps.isBeingShifted !== nextProps.isBeingShifted) {
+    return false;
+  }
+
+  // Check mediaAsset reference (it's ok if both are undefined)
+  if (prevProps.mediaAsset?.id !== nextProps.mediaAsset?.id) {
+    return false;
+  }
+
+  // Check dragState (deep comparison of relevant fields)
+  const prevDrag = prevProps.dragState;
+  const nextDrag = nextProps.dragState;
+  if (prevDrag?.isDragging !== nextDrag?.isDragging || prevDrag?.offsetX !== nextDrag?.offsetX || prevDrag?.offsetY !== nextDrag?.offsetY || prevDrag?.isInvalidPosition !== nextDrag?.isInvalidPosition) {
+    return false;
+  }
+
+  // Props are equal - skip re-render
+  return true;
+};
+
+export const Clip = React.memo(ClipInner, arePropsEqual);

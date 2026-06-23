@@ -288,11 +288,11 @@ export async function rasterizeScene(scene: EvaluatedScene, target: RasterTarget
         // Since the frames are already rendered with offsetX/offsetY, reset transform to draw them full-screen
         ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-        // Import TransitionRenderer from features/video-effects
-        const { TransitionRenderer } = await import("@/features/transitions/TransitionRenderer");
+        // Import TransitionRenderer from @clypra/engine (single source of truth)
+        const { TransitionRenderer } = await import("@clypra/engine/transitions");
 
-        // Render transition
-        TransitionRenderer.render(ctx as any, frames.fromCanvas as any, frames.toCanvas as any, tInfo.transition.type, {}, tInfo.transition.progress);
+        // Render transition with params
+        TransitionRenderer.render(ctx as any, frames.fromCanvas as any, frames.toCanvas as any, tInfo.transition.type, tInfo.transition.params || {}, tInfo.transition.progress);
         ctx.restore();
       } else {
         // Fallback to normal rendering if frames failed to prepare

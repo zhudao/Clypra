@@ -130,7 +130,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       const textClip = clip as unknown as TextClip;
       const transitionState = evaluateTransitionState(clip, transitionWindows);
 
-      const styleDefinition = textClip.styleId ? useEffectsStore.getState().definitions[textClip.styleId] ?? textClip.styleDefinition : textClip.styleDefinition;
+      const styleDefinition = textClip.styleId ? (useEffectsStore.getState().definitions[textClip.styleId] ?? textClip.styleDefinition) : textClip.styleDefinition;
       textRenderTrace("text-evaluate-layer", {
         clipId: clip.id,
         evalTime,
@@ -409,13 +409,23 @@ function resolveActiveTransitionWindows(transitions: TransitionTimelineItem[], c
       if (!fromClip || !toClip) return null;
 
       const rawProgress = Math.max(0, Math.min(1, (time - start) / duration));
-      const progress = transition.easing === "easeInOut" ? rawProgress * rawProgress * (3 - 2 * rawProgress) : rawProgress;
+      // Map legacy "easeInOut" to "ease-in-out" for compatibility
+      const easing = (transition.easing as string) === "easeInOut" ? "ease-in-out" : transition.easing;
+      const progress = easing === "ease-in-out" ? rawProgress * rawProgress * (3 - 2 * rawProgress) : rawProgress;
       return { transition, fromClip, toClip, progress };
     })
     .filter((transition): transition is ActiveTransitionWindow => transition !== null);
 }
 
-function evaluateTransitionState(clip: Clip, transitionWindows: ActiveTransitionWindow[]): { inTransition: boolean; type?: "fade" | "dissolve"; progress?: number; opacity?: number } {
+function evaluateTransitionState(
+  clip: Clip,
+  transitionWindows: ActiveTransitionWindow[],
+): {
+  inTransition: boolean;
+  type?: EvaluatedTransition["type"];
+  progress?: number;
+  opacity?: number;
+} {
   const transition = transitionWindows.find((candidate) => candidate.fromClip.id === clip.id || candidate.toClip.id === clip.id);
   if (!transition) return { inTransition: false, opacity: 1.0 };
 

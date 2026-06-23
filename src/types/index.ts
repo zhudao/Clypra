@@ -424,9 +424,12 @@ export interface TextTimelineItem extends BaseTimelineItem {
   text: Omit<TextClip, keyof Clip>;
 }
 
-export type TransitionType = "fade" | "dissolve";
+// Legacy transition type for timeline compatibility - maps to TransitionRenderer
+export type TransitionType = "fade" | "dissolve" | "canvas";
 export type TransitionAlignment = "center" | "start" | "end";
-export type TransitionEasing = "linear" | "easeInOut";
+
+// Extended easing functions matching TransitionRenderer
+export type TransitionEasing = import("@clypra/engine").EasingFunction;
 
 export interface TransitionTimelineItem extends BaseTimelineItem {
   kind: "transition";

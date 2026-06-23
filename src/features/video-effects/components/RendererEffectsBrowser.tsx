@@ -4,8 +4,8 @@
  * Browse and apply renderer-based effects from @clypra/engine
  */
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Download, Play, Plus, Search, Loader2, AlertCircle, Smile, Star } from "lucide-react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { Download, Plus, Loader2, Smile, Star } from "lucide-react";
 import { VideoEffectsApi } from "../api/videoEffectsApi";
 import { type EffectMetadata } from "@clypra/engine";
 import type { EffectRenderer as EffectRendererType } from "@clypra/engine";
@@ -16,19 +16,10 @@ interface RendererEffectsBrowserProps {
   onEffectSelect?: (effectId: EffectRendererType) => void;
   onAddToTimeline?: (item: any, type: TabType) => void;
   showApplyButton?: boolean;
+  selectedCategory?: string;
 }
 
-const VIDEO_EFFECT_CATEGORIES = [
-  { id: "essentials", name: "Essentials" },
-  { id: "glitch", name: "Glitch" },
-  { id: "retro", name: "Retro" },
-  { id: "light", name: "Light" },
-  { id: "motion", name: "Motion" },
-  { id: "color", name: "Color" },
-];
-
-export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showApplyButton = true }: RendererEffectsBrowserProps) {
-  const [selectedCategory, setSelectedCategory] = useState<string>("essentials");
+export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showApplyButton = true, selectedCategory = "essentials" }: RendererEffectsBrowserProps) {
   const [effects, setEffects] = useState<EffectMetadata[]>([]);
   const [loading, setLoading] = useState(false);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
@@ -39,9 +30,7 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
 
   // Load effects when category changes
   useEffect(() => {
-    if (selectedCategory) {
-      loadEffects();
-    }
+    loadEffects();
   }, [selectedCategory]);
 
   const loadEffects = async () => {
@@ -100,7 +89,7 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
   };
 
   const handleApplyEffect = (effectId: EffectRendererType) => {
-    const effect = effects.find((e) => e.id === effectId);
+    const effect = effects.find((e: EffectMetadata) => e.id === effectId);
     if (onAddToTimeline && effect) {
       onAddToTimeline(
         {
@@ -137,28 +126,11 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
   const filteredEffects = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return effects;
-    return effects.filter((effect) => effect.name.toLowerCase().includes(query) || (effect.description && effect.description.toLowerCase().includes(query)) || (effect.tags && effect.tags.some((tag) => tag.toLowerCase().includes(query))));
+    return effects.filter((effect: EffectMetadata) => effect.name.toLowerCase().includes(query) || (effect.description && effect.description.toLowerCase().includes(query)) || (effect.tags && effect.tags.some((tag: string) => tag.toLowerCase().includes(query))));
   }, [effects, searchQuery]);
 
   return (
     <div className="flex flex-col h-full bg-transparent">
-      {/* Category Pills */}
-      <div className="flex gap-1 overflow-x-auto scrollbar-none border-b border-border p-1 shrink-0" style={{ scrollbarWidth: "none" }}>
-        {VIDEO_EFFECT_CATEGORIES.map((cat) => (
-          <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} className={`shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-semibold transition-colors flex items-center ${selectedCategory === cat.id ? "bg-accent text-white" : "text-text-muted hover:bg-surface-raised hover:text-text-primary"}`}>
-            <span>{cat.name}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Search Bar */}
-      {/* <div className="p-1 border-b border-border shrink-0">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
-          <input type="text" placeholder="Search video effects..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-surface-raised border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent" />
-        </div>
-      </div> */}
-
       {/* Effects Grid */}
       <div className="flex-1 overflow-y-auto p-1.5 scrollbar-thin">
         {loading ? (
@@ -174,7 +146,7 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
           </div>
         ) : (
           <div className="grid grid-cols-3 gap-1.5">
-            {filteredEffects.map((effect) => (
+            {filteredEffects.map((effect: EffectMetadata) => (
               <EffectCard
                 key={effect.id}
                 effect={effect}
@@ -182,12 +154,12 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
                 isFavorite={favorites.includes(effect.id)}
                 isDownloaded={downloadedEffects.includes(effect.id)}
                 isDownloading={downloadingIds.includes(effect.id)}
-                onFavorite={(e) => {
+                onFavorite={(e: React.MouseEvent) => {
                   e.stopPropagation();
                   toggleFavorite(effect.id);
                 }}
                 onDownloadPreview={() => handleDownloadPreview(effect.id)}
-                onApply={(e) => {
+                onApply={(e: React.MouseEvent) => {
                   e.stopPropagation();
                   handleDownloadAndApply(effect);
                 }}
