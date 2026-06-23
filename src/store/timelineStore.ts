@@ -419,21 +419,25 @@ export const useTimelineStore = create<TimelineStore>(
 
         // If timeline was empty, switch to program preview and seek to first clip's start time
         if (wasEmpty) {
-          // Import dynamically to avoid circular dependency
-          import("@/core/runtime/ProjectSession").then(({ getActiveSessionOrNull }) => {
-            const session = getActiveSessionOrNull();
-            if (session?.transportAuthority) {
-              session.transportAuthority.setActiveContext("program");
-              // Seek to the new clip's start time for immediate visual feedback
-              const firstClipStartTime = safeClip.startTime;
-              session.transportAuthority.seek(firstClipStartTime);
-            }
-          });
-
-          // Exit source mode in UI
-          import("./uiStore").then(({ useUIStore }) => {
+          // 1) Update UI first so preview panel closes before transport switch
+          try {
             useUIStore.getState().exitSourceMode();
-          });
+          } catch (e) {
+            // swallow - defensive in case store is not ready
+          }
+
+          // 2) Then switch transport context and seek (dynamic import to avoid heavier cycles)
+          import("@/core/runtime/ProjectSession")
+            .then(({ getActiveSessionOrNull }) => {
+              const session = getActiveSessionOrNull();
+              if (session?.transportAuthority) {
+                session.transportAuthority.setActiveContext("program");
+                // Seek to the new clip's start time for immediate visual feedback
+                const firstClipStartTime = safeClip.startTime;
+                session.transportAuthority.seek(firstClipStartTime);
+              }
+            })
+            .catch(() => {});
         }
 
         return {

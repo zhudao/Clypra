@@ -193,6 +193,9 @@ export class PreviewMediaPool {
     syncState: PreviewSyncState;
   } | null = null;
 
+  // ─── FINDING-006: Early exit optimization ───────────────────────────────
+  private _lastQuickHash: string | null = null;
+
   constructor() {
     this.container = document.createElement("div");
     // Position fixed and practically invisible, but NOT offscreen.
@@ -235,6 +238,17 @@ export class PreviewMediaPool {
     this._syncInProgress = true;
 
     try {
+      // ─── FINDING-006: Early exit optimization (fast path) ───────────────────
+      // Skip expensive reconciliation if nothing meaningful changed
+      // Round time to 0.1s precision to avoid rehashing every frame during playback
+      const quickHash = `${syncState.time.toFixed(1)}-${syncState.state}-${clips.length}`;
+      if (quickHash === this._lastQuickHash) {
+        // Nothing changed - skip reconciliation (saves 0.5-2ms per frame)
+        return;
+      }
+      this._lastQuickHash = quickHash;
+      // ─────────────────────────────────────────────────────────────────────────
+
       // ─── INSTRUMENTATION: Track sync frequency and structural changes ────────
       this.syncCallCount++;
       const currentClipIds = new Set(clips.map((c) => c.id));

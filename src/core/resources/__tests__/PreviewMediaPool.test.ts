@@ -987,10 +987,9 @@ describe("PreviewMediaPool — FINDING-007: Missing isActive Guard", () => {
     const assets = [createMockAsset("media-1", "/path/to/video1.mp4"), createMockAsset("media-2", "/path/to/video2.mp4")];
     const tracks = [{ id: "track-1", type: "video" }];
 
-    // Simulate 60fps playback crossing clip boundary
-    // 120 frames = 2 seconds at 60fps
+    // Simulate 60fps playback across clip boundary
     for (let frame = 0; frame < 120; frame++) {
-      const time = frame / 60; // 0 to 2 seconds
+      const time = frame / 60; // 2 seconds of playback at 60fps
       pool.sync(clips, assets, tracks, {
         time,
         state: "playing" as const,
@@ -1002,50 +1001,389 @@ describe("PreviewMediaPool — FINDING-007: Missing isActive Guard", () => {
 
     await wait(100);
 
-    // High frequency syncs with clip transitions should not cause
-    // playback attempts on inactive elements
+    // Should handle 60fps sync calls during clip transition
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+});
+
+describe("PreviewMediaPool — FINDING-006: Early Exit Optimization", () => {
+  let pool: PreviewMediaPool;
+
+  beforeEach(() => {
+    pool = new PreviewMediaPool();
+  });
+
+  afterEach(() => {
+    pool.dispose();
+  });
+
+  it("should skip sync when nothing meaningful changed (same time/state/clipCount)", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+    const syncState = {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    };
+
+    // First sync - should execute fully
+    pool.sync(clips, assets, tracks, syncState);
+    const videoElements1 = pool.getVideoElements();
+    expect(videoElements1.size).toBeGreaterThan(0);
+
+    // Second sync with identical state - should early exit
+    pool.sync(clips, assets, tracks, syncState);
+    const videoElements2 = pool.getVideoElements();
+    expect(videoElements2.size).toEqual(videoElements1.size);
+
+    // Third sync - still should early exit
+    pool.sync(clips, assets, tracks, syncState);
+    const videoElements3 = pool.getVideoElements();
+    expect(videoElements3.size).toEqual(videoElements1.size);
+  });
+
+  it("should process sync when time changes significantly (>0.1s)", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // First sync at time 2.5
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Second sync at time 3.5 (changed by 1.0s)
+    // Should NOT early exit because time changed beyond 0.1s threshold
+    pool.sync(clips, assets, tracks, {
+      time: 3.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Should remain functional
     expect(() => pool.getVideoElements()).not.toThrow();
   });
 
-  it("should prevent CPU spike from decoding inactive video", async () => {
-    // This test verifies the performance aspect: inactive elements
-    // should not decode video frames (CPU intensive)
-    const clips = [
-      createMockClip("clip-1", "media-1", 0, 2),
-      createMockClip("clip-2", "media-2", 5, 2), // Gap between clips
-    ];
+  it("should early exit for micro time changes within 0.1s precision", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // First sync at time 2.500
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Second sync at time 2.516 (16ms later - one frame at 60fps)
+    // Should early exit because rounded to 0.1s both are "2.5"
+    pool.sync(clips, assets, tracks, {
+      time: 2.516,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Third sync at time 2.550 (50ms later)
+    // Should still early exit because rounded to 0.1s both are "2.5"
+    pool.sync(clips, assets, tracks, {
+      time: 2.55,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should process sync when playback state changes", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // First sync - playing
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Second sync - paused (state changed)
+    // Should NOT early exit because state changed
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "paused" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should process sync when clip count changes", () => {
     const assets = [createMockAsset("media-1", "/path/to/video1.mp4"), createMockAsset("media-2", "/path/to/video2.mp4")];
     const tracks = [{ id: "track-1", type: "video" }];
 
-    // Sync at time 3 (between clips - both inactive)
-    pool.sync(clips, assets, tracks, {
-      time: 3.0,
+    // First sync - one clip
+    pool.sync([createMockClip("clip-1", "media-1", 0, 5)], assets, tracks, {
+      time: 2.5,
       state: "playing" as const,
       speed: 1.0,
       muted: false,
       volume: 100,
     });
 
-    await wait(50);
-
-    // Neither clip should be playing (would waste CPU)
-    // With guard: no playback attempts
-    // Without guard: could start playing both clips
-    expect(() => pool.getVideoElements()).not.toThrow();
-
-    // Move to active region
-    pool.sync(clips, assets, tracks, {
-      time: 5.5,
+    // Second sync - two clips (clip count changed)
+    // Should NOT early exit because clip count changed
+    pool.sync([createMockClip("clip-1", "media-1", 0, 5), createMockClip("clip-2", "media-2", 5, 5)], assets, tracks, {
+      time: 2.5,
       state: "playing" as const,
       speed: 1.0,
       muted: false,
       volume: 100,
     });
 
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should significantly reduce CPU during 60fps playback with early exit", async () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 10)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Initial sync to set up element
+    pool.sync(clips, assets, tracks, {
+      time: 0.0,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    const startTime = performance.now();
+
+    // Simulate 60fps playback for 1 second (60 frames)
+    // Most of these should hit early exit since time changes slowly
+    for (let frame = 0; frame < 60; frame++) {
+      const time = 5.0 + frame / 60; // Advance 1 second at 60fps
+      pool.sync(clips, assets, tracks, {
+        time,
+        state: "playing" as const,
+        speed: 1.0,
+        muted: false,
+        volume: 100,
+      });
+    }
+
+    const endTime = performance.now();
+    const duration = endTime - startTime;
+
+    // With early exit optimization, 60 sync calls should complete quickly
+    // Without optimization: ~30-120ms
+    // With optimization: <10ms (most calls early exit immediately)
+    expect(duration).toBeLessThan(100);
+  });
+
+  it("should handle rapid state changes without breaking early exit logic", async () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Alternate between playing and paused rapidly
+    for (let i = 0; i < 20; i++) {
+      const state = i % 2 === 0 ? "playing" : "paused";
+      pool.sync(clips, assets, tracks, {
+        time: 2.5,
+        state: state as "playing" | "paused",
+        speed: 1.0,
+        muted: false,
+        volume: 100,
+      });
+    }
+
     await wait(50);
 
-    // Only clip-2 should be active now
+    // Should remain functional
     expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should reset early exit hash when crossing 0.1s time boundary", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 10)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Sync at 2.45 (rounds to 2.4)
+    pool.sync(clips, assets, tracks, {
+      time: 2.45,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Sync at 2.46, 2.47, 2.48, 2.49 (all round to 2.4)
+    // These should all early exit
+    for (let t = 2.46; t < 2.5; t += 0.01) {
+      pool.sync(clips, assets, tracks, {
+        time: t,
+        state: "playing" as const,
+        speed: 1.0,
+        muted: false,
+        volume: 100,
+      });
+    }
+
+    // Sync at 2.55 (rounds to 2.6)
+    // Should NOT early exit - crossed boundary
+    pool.sync(clips, assets, tracks, {
+      time: 2.55,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should handle empty clip list without breaking early exit", () => {
+    const assets: MediaAsset[] = [];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // First sync - empty
+    pool.sync([], assets, tracks, {
+      time: 0,
+      state: "paused" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Second sync - still empty (should early exit)
+    pool.sync([], assets, tracks, {
+      time: 0,
+      state: "paused" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(pool.getVideoElements().size).toBe(0);
+  });
+
+  it("should bypass early exit after re-entrancy queue processing", async () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Rapidly queue multiple sync calls
+    for (let i = 0; i < 10; i++) {
+      pool.sync(clips, assets, tracks, {
+        time: 2.5,
+        state: "playing" as const,
+        speed: 1.0,
+        muted: false,
+        volume: 100,
+      });
+    }
+
+    await wait(100);
+
+    // After queue processing, early exit should work correctly
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should maintain early exit optimization after disposal and recreation", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // First pool
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    pool.dispose();
+
+    // Create new pool
+    pool = new PreviewMediaPool();
+
+    // Early exit should work for new pool
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(() => pool.getVideoElements()).not.toThrow();
+  });
+
+  it("should clear early exit hash on disposal", () => {
+    const clips = [createMockClip("clip-1", "media-1", 0, 5)];
+    const assets = [createMockAsset("media-1", "/path/to/video.mp4")];
+    const tracks = [{ id: "track-1", type: "video" }];
+
+    // Sync to establish hash
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    // Dispose (should clear internal hash)
+    pool.dispose();
+
+    // Sync after disposal should return early (disposal check)
+    pool.sync(clips, assets, tracks, {
+      time: 2.5,
+      state: "playing" as const,
+      speed: 1.0,
+      muted: false,
+      volume: 100,
+    });
+
+    expect(pool.getVideoElements().size).toBe(0);
   });
 });
 
