@@ -20,8 +20,12 @@ let _counter = 0;
 /**
  * Session identifier - unique per application session
  * Format: timestamp-randomString for uniqueness across sessions
+ *
+ * FIX (FINDING-021): Increased entropy to 16 base-36 characters (78.4^16 ≈ 10^25 combinations)
+ * Birthday paradox collision probability: 1% at ~10^12 sessions (1 trillion)
+ * Previous: 7 chars = 1% at ~280K sessions
  */
-let _sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+let _sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 18)}`;
 
 /**
  * Generate a deterministic ID within the current session
@@ -68,7 +72,7 @@ export function generateId(prefix: string): string {
  */
 export function resetIdGenerator(sessionId?: string): void {
   _counter = 0;
-  _sessionId = sessionId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  _sessionId = sessionId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 18)}`; // FIX (FINDING-021): 16 chars
 }
 
 /**

@@ -451,6 +451,7 @@ export const ProgramPreview: React.FC = () => {
     let lastJobId: string | null = null;
     let lastRenderedTime: number = -1;
     let lastRenderedEpoch: number = -1;
+    let lastRenderedPlaybackState: "playing" | "paused" | "stopped" = "stopped";
     const GPU_MEMORY_LIMIT_MB = 128;
     let forceRenderNeeded = false;
     const renderLoop = () => {
@@ -461,10 +462,18 @@ export const ProgramPreview: React.FC = () => {
       // This is the single source of truth for playback time
       // clockState.time is throttled to 10fps for UI updates and lags behind
       const timeToRender = state.clock.time;
+
+      // FINDING-023: Round time to codec precision to prevent unnecessary seeks
+      // Video codecs use keyframes at intervals (e.g., 30fps = ~33ms precision)
+      // High-precision time values cause decoder resets every frame
+      // Round to 30fps precision (33.33ms) to match typical codec granularity
+      const codecPrecisionFps = 30;
+      const timeToRenderRounded = Math.round(timeToRender * codecPrecisionFps) / codecPrecisionFps;
+
       const playbackState = state.clock.state;
       const playbackSpeed = state.clock.speed;
       const isPlaying = playbackState === "playing";
-      const timeChanged = timeToRender !== lastRenderedTime;
+      const timeChanged = timeToRenderRounded !== lastRenderedTime;
       const epochChanged = state.epoch !== lastRenderedEpoch;
       // Always render the first frame (lastRenderedTime === -1)
       const isFirstFrame = lastRenderedTime === -1;
@@ -493,6 +502,25 @@ export const ProgramPreview: React.FC = () => {
         return undefined;
       };
 
+      // ─── FINDING-009: Separate needsSync from needsRender ─────────────────────────
+      // sync() is about ELEMENT LIFECYCLE (create/dispose/bind clips to elements)
+      // It should only run when:
+      // - Playback state changes (play/pause/stop)
+      // - Epoch changes (clips added/removed/modified)
+      // - Time crosses clip boundary (clip becomes active/inactive)
+      //
+      // render() is about FRAME SCHEDULING (rasterize current frame)
+      // It should run when:
+      // - Playing (every frame)
+      // - Time changed (seek)
+      // - Epoch changed (visual update needed)
+      // - First frame
+      //
+      // During steady playback, needsRender=true every frame but needsSync=false
+      // This reduces sync() calls from 60fps to ~1-10fps (only on actual state changes)
+      const playbackStateChanged = lastRenderedPlaybackState !== playbackState;
+      const needsSync = epochChanged || playbackStateChanged || isFirstFrame;
+
       // Only render if something changed or we're playing
       // This prevents infinite RAF loops when idle
       if (!needsRender) {
@@ -501,27 +529,38 @@ export const ProgramPreview: React.FC = () => {
       }
 
       rafId = requestAnimationFrame(renderLoop);
+
+      // Get session once for both sync and render operations
       const session = getActiveSessionOrNull();
-      if (session) {
-        try {
-          session.syncPreviewMedia(getPreviewMediaSyncClips(state.clips, timeToRender), state.mediaAssets, state.tracks, {
-            time: timeToRender,
-            state: playbackState,
-            speed: playbackSpeed,
-            muted: isMuted,
-            volume,
-          });
-        } catch (error) {
-          console.error(`[PreviewPanel ERROR] Exception calling syncPreviewMedia:`, error);
+
+      // Sync media elements ONLY when lifecycle changes (not every frame)
+      if (needsSync) {
+        if (session && session.state === "active") {
+          try {
+            session.syncPreviewMedia(getPreviewMediaSyncClips(state.clips, timeToRenderRounded), state.mediaAssets, state.tracks, {
+              time: timeToRenderRounded,
+              state: playbackState,
+              speed: playbackSpeed,
+              muted: isMuted,
+              volume,
+              frameRate: state.project?.frameRate ?? 30,
+            });
+          } catch (error) {
+            console.error(`[PreviewPanel ERROR] Exception calling syncPreviewMedia:`, error);
+          }
         }
       }
+
+      // Check isRendering AFTER sync to prevent render race conditions
       if (isRendering) {
         droppedFramesRef.current++;
         return;
       }
+
       isRendering = true;
-      lastRenderedTime = timeToRender;
+      lastRenderedTime = timeToRenderRounded;
       lastRenderedEpoch = state.epoch;
+      lastRenderedPlaybackState = playbackState;
       scheduler.updateTimeline(state.clips, state.tracks, state.mediaAssets, state.project, state.epoch, state.transitions);
       const qm = qualityManagerRef.current;
       const qualityTier = qm ? qm.selectTierForInteraction(isPlaying, false, false, state.previewQuality) : PreviewQualityTier.Idle;
@@ -529,10 +568,10 @@ export const ProgramPreview: React.FC = () => {
       if (gpuCache) {
         const renderW = profile.maxWidth;
         const renderH = profile.maxHeight;
-        const cacheKey = `preview:${state.project?.id}:${state.epoch}:${timeToRender.toFixed(3)}:${renderW}x${renderH}:${state.dpr}`;
+        const cacheKey = `preview:${state.project?.id}:${state.epoch}:${timeToRenderRounded.toFixed(3)}:${renderW}x${renderH}:${state.dpr}`;
         if (gpuCache.hasTexture(cacheKey)) {
           gpuCache.clear();
-          const filterIR = getActiveFilterIR(timeToRender);
+          const filterIR = getActiveFilterIR(timeToRenderRounded);
           gpuCache.renderTexture(cacheKey, 0, 0, state.displayWidth * state.dpr, state.displayHeight * state.dpr, filterIR);
           isRendering = false;
           return;
@@ -541,7 +580,7 @@ export const ProgramPreview: React.FC = () => {
       if (lastJobId) scheduler.cancel(lastJobId);
       const activeVideoElements = session?.getPreviewVideoElements() ?? new Map<string, HTMLVideoElement>();
       const jobId = scheduler.schedule({
-        time: timeToRender,
+        time: timeToRenderRounded,
         resolution: { width: profile.maxWidth, height: profile.maxHeight },
         pixelRatio: profile.useDpr ? profile.dprScale : 1.0,
         outputFormat: "imagebitmap",
@@ -561,10 +600,10 @@ export const ProgramPreview: React.FC = () => {
           }
           if (result.data instanceof ImageBitmap) {
             if (gpuCache) {
-              const cacheKey = `preview:${latestState.project?.id}:${latestState.epoch}:${timeToRender.toFixed(3)}:${profile.maxWidth}x${profile.maxHeight}:${latestState.dpr}`;
+              const cacheKey = `preview:${latestState.project?.id}:${latestState.epoch}:${timeToRenderRounded.toFixed(3)}:${profile.maxWidth}x${profile.maxHeight}:${latestState.dpr}`;
               gpuCache.uploadTexture(cacheKey, result.data, result.data.width, result.data.height);
               gpuCache.clear();
-              const filterIR = getActiveFilterIR(timeToRender);
+              const filterIR = getActiveFilterIR(timeToRenderRounded);
               gpuCache.renderTexture(cacheKey, 0, 0, latestState.displayWidth * latestState.dpr, latestState.displayHeight * latestState.dpr, filterIR);
               result.data.close();
               gpuCache.evictLRU(GPU_MEMORY_LIMIT_MB);

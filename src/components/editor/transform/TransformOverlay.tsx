@@ -795,9 +795,9 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       traceSelect("transform mousemove", { clipId: activeTransform.clipId, handle: activeTransform.handle, x: newTransform.x, y: newTransform.y, width: newTransform.width, height: newTransform.height });
 
       // Optimistic preview: update clip for visual feedback during drag
-      // Skip epoch increment to avoid cache thrashing
+      // Skip epoch increment to avoid cache thrashing during high-frequency updates
       // The overlay reads from selectedClip (timeline store) for handle positioning
-      updateClip(activeTransform.clipId, { ...newTransform, _skipEpochIncrement: false } as any);
+      updateClip(activeTransform.clipId, { ...newTransform, _skipEpochIncrement: true } as any);
     },
     [isDragging, activeTransform, selectedClip, scale, viewport, canvasWidth, canvasHeight, updateClip, transformController, clips, currentTime],
   );

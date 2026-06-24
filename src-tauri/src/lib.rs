@@ -13,6 +13,9 @@ mod thumbnail_engine_tests;
 #[cfg(test)]
 mod thumbnail_engine_proptest;
 
+#[cfg(test)]
+mod decoder_pool_stress_test;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -61,11 +64,13 @@ pub fn run() {
             decode_frame_gpu,
             decode_frames_streaming,
             release_video_decoder,
+            prewarm_decoders,
             get_render_artifact,
             get_render_artifacts_batch,
             // Video export commands
             start_video_export,
             write_export_frame,
+            write_export_frames_batch,
             finalize_video_export,
             cancel_video_export,
             check_ffmpeg_available,

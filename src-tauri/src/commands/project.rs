@@ -33,8 +33,23 @@ pub fn save_project(app: tauri::AppHandle, project_data: String) -> Result<(), S
         project.media_assets.len()
     );
 
-    fs::write(&file_path, &project_data)
-        .map_err(|e| format!("Failed to save project: {}", e))?;
+    // CRITICAL FIX (FINDING-019): Implement atomic write to prevent data corruption
+    // Write to temp file first, then atomically rename to target path
+    // This ensures project file is never left in a corrupt state if write fails
+    let temp_path = projects_dir.join(format!("{}.tmp", project.id));
+    
+    // Write to temporary file
+    fs::write(&temp_path, &project_data)
+        .map_err(|e| format!("Failed to write temporary project file: {}", e))?;
+    
+    // Atomically rename temp file to final path
+    // On POSIX and Windows, rename is atomic - either succeeds completely or fails with no side effects
+    fs::rename(&temp_path, &file_path)
+        .map_err(|e| {
+            // Clean up temp file on failure
+            let _ = fs::remove_file(&temp_path);
+            format!("Failed to finalize project save: {}", e)
+        })?;
 
     Ok(())
 }

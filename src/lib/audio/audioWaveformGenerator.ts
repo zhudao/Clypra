@@ -12,11 +12,15 @@ export interface WaveformOptions {
   barColor?: string;
   backgroundColor?: string;
   barGap?: number;
+  trimIn?: number; // FIX (FINDING-017): Add trim support
+  trimOut?: number; // FIX (FINDING-017): Add trim support
 }
 
 /**
  * Generate a waveform thumbnail from an audio file
  * Returns a base64 data URL that can be used as an image source
+ *
+ * FIX (FINDING-017): Now respects trimIn/trimOut to only analyze the used region
  */
 export async function generateAudioWaveform(audioPath: string, options: WaveformOptions = {}): Promise<string> {
   const {
@@ -26,6 +30,8 @@ export async function generateAudioWaveform(audioPath: string, options: Waveform
     barColor = "#22d3ee", // cyan-400
     backgroundColor = "#1e293b", // slate-800
     barGap = 0.2,
+    trimIn = 0, // FIX (FINDING-017): Default to full audio
+    trimOut, // FIX (FINDING-017): Default to full audio
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -46,14 +52,20 @@ export async function generateAudioWaveform(audioPath: string, options: Waveform
 
         // Get channel data (use first channel)
         const channelData = audioBuffer.getChannelData(0);
+        const sampleRate = audioBuffer.sampleRate;
 
-        // Calculate samples per bar
-        const samplesPerBar = Math.floor(channelData.length / barCount);
+        // FIX (FINDING-017): Calculate sample range for trimmed region
+        const startSample = Math.floor(trimIn * sampleRate);
+        const endSample = trimOut ? Math.floor(trimOut * sampleRate) : channelData.length;
+        const trimmedLength = Math.min(endSample - startSample, channelData.length - startSample);
 
-        // Calculate bar amplitudes
+        // Calculate samples per bar in the TRIMMED region
+        const samplesPerBar = Math.floor(trimmedLength / barCount);
+
+        // Calculate bar amplitudes from TRIMMED region only
         const barAmplitudes: number[] = [];
         for (let i = 0; i < barCount; i++) {
-          const start = i * samplesPerBar;
+          const start = startSample + i * samplesPerBar;
           const end = start + samplesPerBar;
 
           // Calculate RMS (root mean square) for this segment

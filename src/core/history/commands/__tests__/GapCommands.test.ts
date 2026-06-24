@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { InsertGapCommand, RemoveGapCommand, ResizeGapCommand, ToggleGapProtectionCommand } from "./GapCommands";
+import { InsertGapCommand, RemoveGapCommand, ResizeGapCommand, ToggleGapProtectionCommand } from "../GapCommands";
 import type { Clip } from "@/types";
 import type { Gap } from "@/types/gap";
 

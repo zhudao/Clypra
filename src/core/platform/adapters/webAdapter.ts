@@ -70,7 +70,9 @@ export class WebPlatformAdapter implements PlatformInterface {
   }
 
   async loadProject(path: string): Promise<string> {
-    const projectId = path.split("/").pop()?.replace(".json", "") || "";
+    // FIX (FINDING-023): Use platform-aware path parsing (works with both / and \)
+    const pathParts = path.replace(/\\/g, "/").split("/");
+    const projectId = pathParts.pop()?.replace(".json", "") || "";
     const project = localStorage.getItem(`clypra_project_${projectId}`);
     if (project) return project;
     throw new Error(`Project ${projectId} not found in Web storage`);

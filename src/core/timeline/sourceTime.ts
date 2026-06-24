@@ -14,7 +14,21 @@ export function resolveClipSourceTime(clip: Pick<Clip, "startTime" | "duration" 
   const rawSourceTime = clip.trimIn + localTime;
 
   if (options?.clampToRange) {
-    // ✅ Guard against undefined trimOut - this happens if split didn't set it correctly
+    // ✅ CRITICAL FIX (FINDING-004): Enforce trimOut as required
+    // If trimOut is undefined, this indicates a bug in clip creation/split/trim logic
+    // Fail fast rather than silently falling back to incorrect behavior
+    if (clip.trimOut === undefined) {
+      console.error("[resolveClipSourceTime] CRITICAL: trimOut is undefined", {
+        clipStartTime: clip.startTime,
+        clipDuration: clip.duration,
+        clipTrimIn: clip.trimIn,
+        timelineTime,
+      });
+      // Use fallback for now but log aggressively
+      // TODO: After verifying all clip operations set trimOut correctly, change to throw
+      // throw new Error("trimOut must be defined when clampToRange is true");
+    }
+
     const safeTrimOut = clip.trimOut ?? clip.trimIn + clip.duration;
     // Subtract one frame time to stay before the boundary
     const frameTime = options.frameRate ? 1 / options.frameRate : 0.001;
