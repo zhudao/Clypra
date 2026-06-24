@@ -552,6 +552,18 @@ impl VideoDecoder {
                       ts, decode_time, total_time, packets_decoded, self.state.sequential_hits);
         }
         
+        // FIX (FINDING-009): Validate RGBA buffer size matches expected dimensions
+        // RGBA format = 4 bytes per pixel
+        let expected_size = (fit_w * fit_h * 4) as usize;
+        let actual_size = rgba.len();
+        
+        if actual_size != expected_size {
+            return Err(format!(
+                "Frame buffer size mismatch: expected {} bytes ({}x{}x4), got {} bytes",
+                expected_size, fit_w, fit_h, actual_size
+            ));
+        }
+        
         Ok(rgba)
     }
 
