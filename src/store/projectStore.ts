@@ -32,6 +32,8 @@ import { convertRawConfigToDefinition } from "@/features/text-effects/lib/defini
 import { useEffectsStore } from "@/features/text-effects/store/effectsStore";
 import { calculateTextClipSize } from "@/lib/text/textClip";
 import { useSettingsStore } from "./settingsStore";
+import { saveSnapshot, clearSnapshot } from "@/core/runtime/CrashRecoveryService";
+import { lifecycleMonitor } from "@/lib/monitoring/LifecycleMonitor";
 // import { TIMELINE_PPS_PER_ZOOM, TIMELINE_ZOOM_DEFAULT } from "@/lib/timelineZoom";
 
 interface ProjectStore {
@@ -94,6 +96,15 @@ const getAspectRatioDimensions = (ratio: string): { width: number; height: numbe
 
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const AUTO_SAVE_DELAY = 500; // ms
+
+// Wire up ResourceTracker's active project ID resolver after the module is fully evaluated.
+// queueMicrotask ensures this runs after all static imports are resolved (avoids TDZ issues).
+// The resolver lets findLeaks() classify which tracked resources belong to a stale project.
+queueMicrotask(() => {
+  import("@/lib/monitoring/ResourceTracker").then(({ resourceTracker }) => {
+    resourceTracker.setActiveProjectIdResolver(() => useProjectStore.getState().project?.id ?? null);
+  });
+});
 
 async function preloadTextEffectDefinitionsFromClips(clips: any[] | undefined): Promise<void> {
   if (!clips?.length) return;
@@ -520,6 +531,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         console.error("  ❌ TimelineStore reset failed:", err);
       });
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // PHASE 5: Clear Crash-Recovery Snapshot
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // On a clean close, remove the IndexedDB snapshot so we don't prompt for
+    // recovery the next time the user opens the application.
+    lifecycleMonitor.record("PROJECT_DISPOSE", { projectId: get().project?.id });
+    clearSnapshot().catch((err) => {
+      console.warn("[PROJECT STORE] Failed to clear crash-recovery snapshot:", err);
+    });
+
     console.log("✅ [PROJECT STORE] Project closed successfully");
   },
 
@@ -560,6 +581,27 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           projectData: JSON.stringify(rustProject),
         });
         get().showToast("Project saved");
+
+        // ── Crash recovery snapshot ──────────────────────────────────────
+        // Persist a recovery snapshot so the user can restore their work if
+        // the application crashes or the browser refreshes unexpectedly.
+        try {
+          const { tracks, clips, transitions, gaps } = useTimelineStore.getState();
+          lifecycleMonitor.record("AUTO_SAVE_SNAPSHOT_SAVED", { projectId: project.id });
+          // Fire-and-forget — we never want snapshot writes to block the UI
+          saveSnapshot({
+            savedAt: new Date().toISOString(),
+            project,
+            mediaAssets,
+            tracks,
+            clips,
+            transitions,
+          }).catch((err) => {
+            console.warn("[AUTO-SAVE] Failed to persist crash-recovery snapshot:", err);
+          });
+        } catch (_snapshotError) {
+          // Ignore — snapshot failures are non-fatal
+        }
       } catch (error) {
         // Background operation — silent fail
       }
