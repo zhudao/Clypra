@@ -54,6 +54,8 @@ import { RenderEngine } from "@/lib/renderEngine/renderEngine";
 import { QualityPreset, RendererMode, type SrpConfig } from "@/lib/renderEngine/types";
 import { PreviewMediaPool, type PreviewSyncState } from "../resources/PreviewMediaPool";
 import type { Clip, MediaAsset } from "@/types";
+import { lifecycleMonitor } from "@/lib/monitoring/LifecycleMonitor";
+import { resourceTracker, installDiagnostics } from "@/lib/monitoring/ResourceTracker";
 
 /**
  * Project Session State
@@ -187,6 +189,19 @@ export class ProjectSession {
       await this._initializeStores();
 
       this._state = "active";
+
+      // ── Telemetry: record session creation ──────────────────────────────
+      lifecycleMonitor.record("SESSION_CREATE", {
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+      });
+      resourceTracker.track({
+        id: this.sessionId,
+        kind: "ProjectSession",
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+      });
+
       this._notifyListeners({ type: "initialized", session: this });
     } catch (error) {
       this._state = "disposed";
@@ -259,10 +274,25 @@ export class ProjectSession {
       await this._resetStores();
 
       this._state = "disposed";
+
+      // ── Telemetry: record session disposal ─────────────────────────────
+      lifecycleMonitor.record("SESSION_DISPOSE", {
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+      });
+      resourceTracker.release(this.sessionId);
+
       this._notifyListeners({ type: "disposed", session: this });
     } catch (error) {
       console.error(`[ProjectSession] Disposal error:`, error);
       this._state = "disposed"; // Mark as disposed even on error
+      // Still attempt telemetry on error path
+      lifecycleMonitor.record("SESSION_DISPOSE", {
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+        detail: { error: String(error) },
+      });
+      resourceTracker.release(this.sessionId);
       this._notifyListeners({ type: "error", session: this, error: error as Error });
     }
   }
@@ -475,10 +505,16 @@ class SessionRegistry {
     if (this._activeSession && this._activeSession !== session) {
       const oldSession = this._activeSession;
       this._activeSession = null;
+      if (typeof globalThis !== "undefined") {
+        (globalThis as any).__activeProjectSession = null;
+      }
       this._notifyListeners();
       await oldSession.dispose();
     }
     this._activeSession = session;
+    if (typeof globalThis !== "undefined") {
+      (globalThis as any).__activeProjectSession = session;
+    }
     this._notifyListeners();
   }
 
@@ -545,9 +581,22 @@ export function subscribeToSessionChanges(listener: () => void): () => void {
  * Automatically disposes previous session if exists.
  */
 export async function createProjectSession(projectId: string): Promise<ProjectSession> {
+  // Install diagnostics on first session creation (idempotent)
+  installDiagnostics();
+  // Also attach lifecycle log to the diagnostics surface
+  if (typeof window !== "undefined") {
+    const diag = (window as any).__clypra_diagnostics ?? {};
+    (window as any).__clypra_diagnostics = { ...diag, lifecycle: lifecycleMonitor };
+  }
+
+  lifecycleMonitor.record("PROJECT_LOAD_START", { projectId });
+
   const session = new ProjectSession(projectId);
   await session.initialize();
   await sessionRegistry.setActiveSession(session);
+
+  lifecycleMonitor.record("PROJECT_LOAD_COMPLETE", { projectId, sessionId: session.sessionId });
+
   return session;
 }
 
