@@ -11,6 +11,8 @@ import { platform } from "@/core/platform";
 import { SettingsModal } from "./components/ui/SettingsModal";
 import { ErrorBoundary } from "@/components/ErrorBoundary"; // FIX (FINDING-022): Add root error boundary
 import { initializePerformanceAdapter, shutdownPerformanceAdapter } from "@/lib/platform/performanceAdapter";
+import { hasSnapshot, getSnapshot, clearSnapshot, type RecoverySnapshot } from "@/core/runtime/CrashRecoveryService";
+import { lifecycleMonitor } from "@/lib/monitoring/LifecycleMonitor";
 
 const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
 
@@ -18,6 +20,8 @@ const App = () => {
   const { project, createProject, loadProject, setRecentProjects } = useProjectStore();
   const [isLoading, setIsLoading] = useState(true);
   const { showSettingsModal, toggleSettingsModal } = useUIStore();
+  const [pendingRecovery, setPendingRecovery] = useState<RecoverySnapshot | null>(null);
+  const [isRestoring, setIsRestoring] = useState(false);
 
   useEffect(() => {
     const initializeApp = async () => {
@@ -27,6 +31,21 @@ const App = () => {
 
         const projects = await platform.getRecentProjects();
         setRecentProjects(projects);
+
+        // ── Crash recovery check ─────────────────────────────────────────
+        // If the previous session was not closed cleanly (crash / browser refresh),
+        // an IndexedDB snapshot will exist. Prompt the user to restore it.
+        const recovered = await hasSnapshot();
+        if (recovered) {
+          const snapshot = await getSnapshot();
+          if (snapshot) {
+            lifecycleMonitor.record("CRASH_RECOVERY_FOUND", {
+              projectId: snapshot.project.id,
+              detail: { savedAt: snapshot.savedAt },
+            });
+            setPendingRecovery(snapshot);
+          }
+        }
       } catch (error) {
         console.error("Failed to initialize app:", error);
       } finally {
@@ -155,6 +174,52 @@ const App = () => {
     }
   };
 
+  /**
+   * Restore the project state from a crash-recovery IndexedDB snapshot.
+   * Hydrates projectStore and timelineStore directly from the saved data.
+   */
+  const handleRestoreSession = async () => {
+    if (!pendingRecovery) return;
+    setIsRestoring(true);
+    try {
+      const { useTimelineStore } = await import("./store/timelineStore");
+      const { tracks, clips, transitions, mediaAssets, project } = pendingRecovery;
+
+      // Hydrate project store (sets active project)
+      await loadProject(project, { tracks, clips, transitions, mediaAssets });
+
+      // Hydrate timeline store with the snapshotted timeline data
+      useTimelineStore.getState().hydrateFromProject({ tracks, clips, transitions, gaps: [] });
+
+      lifecycleMonitor.record("CRASH_RECOVERY_RESTORED", {
+        projectId: project.id,
+        detail: { savedAt: pendingRecovery.savedAt },
+      });
+
+      // Clear the snapshot now that we've restored it
+      await clearSnapshot();
+      setPendingRecovery(null);
+    } catch (error) {
+      console.error("[CrashRecovery] Restore failed:", error);
+      useProjectStore.getState().showToast("Failed to restore session", "error");
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
+  /**
+   * Discard the crash-recovery snapshot and start fresh.
+   */
+  const handleDiscardRecovery = async () => {
+    if (!pendingRecovery) return;
+    lifecycleMonitor.record("CRASH_RECOVERY_DISCARDED", {
+      projectId: pendingRecovery.project.id,
+    });
+    await clearSnapshot();
+    setPendingRecovery(null);
+  };
+
+
   if (isLoading) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-bg">
@@ -184,6 +249,74 @@ const App = () => {
     >
       <TooltipProvider delayDuration={0}>{project ? <EditorScreen /> : <LaunchScreen onProjectCreate={handleCreateProject} onProjectOpen={handleOpenProject} />}</TooltipProvider>
       <SettingsModal isOpen={showSettingsModal} onClose={toggleSettingsModal} />
+
+      {/* ── Crash Recovery Dialog ────────────────────────────────────────── */}
+      {pendingRecovery && !project && (
+        <div
+          id="crash-recovery-dialog-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="crash-recovery-title"
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        >
+          <div className="bg-bg border border-border rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+            {/* Icon */}
+            <div className="flex items-center justify-center w-14 h-14 rounded-full bg-accent/10 border border-accent/30 mb-5 mx-auto">
+              <svg className="w-7 h-7 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              </svg>
+            </div>
+
+            <h2 id="crash-recovery-title" className="text-xl font-bold text-text-primary text-center mb-2">
+              Restore Unsaved Session?
+            </h2>
+
+            <p className="text-sm text-text-muted text-center mb-1">
+              An unsaved session for{" "}
+              <span className="font-semibold text-text-primary">"{pendingRecovery.project.name}"</span>{" "}
+              was detected.
+            </p>
+            <p className="text-xs text-text-muted text-center mb-6">
+              Last saved:{" "}
+              {new Date(pendingRecovery.savedAt).toLocaleString(undefined, {
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                id="crash-recovery-discard-btn"
+                onClick={handleDiscardRecovery}
+                disabled={isRestoring}
+                className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-strong transition-colors disabled:opacity-50"
+              >
+                Discard
+              </button>
+              <button
+                id="crash-recovery-restore-btn"
+                onClick={handleRestoreSession}
+                disabled={isRestoring}
+                className="flex-1 px-4 py-2.5 text-sm font-semibold rounded-lg bg-accent text-white hover:bg-accent-soft transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isRestoring ? (
+                  <>
+                    <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
+                    </svg>
+                    Restoring…
+                  </>
+                ) : (
+                  "Restore Session"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </ErrorBoundary>
   );
 };
