@@ -5,3 +5,5 @@
 export { toCompositorClip, toCompositorClips, fromCompositorClip, inferRoleFromTrackPosition } from "./adapter";
 export { legacyClipToTimelineItem, legacyClipsToTimelineItems, timelineItemToLegacyClip } from "./items";
 export { resolveClipSourceTime, resolveTimelineItemSourceTime } from "./sourceTime";
+export { getActiveAudioClips } from "./audioClips";
+export type { ExportAudioClipConfig } from "./audioClips";

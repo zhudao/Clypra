@@ -61,14 +61,16 @@ export class PlaybackClock {
   private _playStartAudioTime: number = 0;
   private _playStartClockTime: number = 0;
 
+  // FINDING-017: Generation counter to prevent stale RAF ticks
+  private _generation: number = 0;
+
   // Listeners (for UI snapshots only, not every frame)
   private _listeners = new Set<PlaybackClockListener>();
   private _lastNotifyTime: number = 0;
   private _notifyThrottleMs: number = 100; // Notify UI max 10fps
 
   constructor() {
-    // Bind methods for stable references
-    this._tick = this._tick.bind(this);
+    // Constructor initialization
   }
 
   // ─── Getters (Imperative reads) ────────────────────────────────────────────
@@ -208,8 +210,12 @@ export class PlaybackClock {
     this._state = "playing";
     this._notifyListeners();
 
-    // Start RAF loop
-    this._rafId = requestAnimationFrame(this._tick);
+    // FINDING-017: Increment generation to invalidate stale RAF ticks
+    this._generation++;
+    const currentGeneration = this._generation;
+
+    // Start RAF loop with generation check
+    this._rafId = requestAnimationFrame(() => this._tickWithGeneration(currentGeneration));
   }
 
   /**
@@ -279,10 +285,24 @@ export class PlaybackClock {
   // ─── RAF Loop (Private) ────────────────────────────────────────────────────
 
   /**
+   * RAF tick wrapper with generation check.
+   * FINDING-017: Prevents stale RAF ticks from executing after seek/pause/play cycle.
+   */
+  private _tickWithGeneration(generation: number): void {
+    // FINDING-017: Ignore this tick if generation doesn't match
+    // This happens when seek() does pause→play cycle and old RAF tick executes
+    if (generation !== this._generation) {
+      return; // Stale tick, ignore
+    }
+
+    this._tick(generation);
+  }
+
+  /**
    * RAF tick - updates time continuously.
    * This is NOT a React render. This is a continuous signal.
    */
-  private _tick(): void {
+  private _tick(generation: number): void {
     // Safety check: if RAF was cancelled, don't continue
     if (this._rafId === null) return;
 
@@ -295,7 +315,7 @@ export class PlaybackClock {
         this._notifyListeners();
         this._lastNotifyTime = now;
       }
-      this._rafId = requestAnimationFrame(this._tick);
+      this._rafId = requestAnimationFrame(() => this._tickWithGeneration(generation));
       return;
     }
 
@@ -323,8 +343,8 @@ export class PlaybackClock {
       this._lastNotifyTime = now;
     }
 
-    // Continue loop
-    this._rafId = requestAnimationFrame(this._tick);
+    // Continue loop with generation check
+    this._rafId = requestAnimationFrame(() => this._tickWithGeneration(generation));
   }
 
   // ─── Subscription (For UI snapshots only) ──────────────────────────────────

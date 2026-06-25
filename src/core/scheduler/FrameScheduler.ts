@@ -633,7 +633,6 @@ export class FrameScheduler {
             if (video.seeking || video.readyState < 2) {
               const waitPromise = new Promise<void>((resolve) => {
                 let isResolved = false;
-
                 const onReady = () => {
                   if (isResolved) return;
                   isResolved = true;
@@ -649,7 +648,9 @@ export class FrameScheduler {
                   }
                 };
 
+                let timeoutId: ReturnType<typeof setTimeout> | null = null;
                 const cleanup = () => {
+                  if (timeoutId !== null) clearTimeout(timeoutId);
                   video.removeEventListener("seeked", onSeeked);
                   video.removeEventListener("canplay", onReady);
                   video.removeEventListener("error", onReady);
@@ -661,8 +662,11 @@ export class FrameScheduler {
                 video.addEventListener("error", onReady, { once: true });
                 job.abortController.signal.addEventListener("abort", onReady, { once: true });
 
-                // Safety timeout: don't wait forever, let rasterizer handle fallback if it takes too long
-                // setTimeout(onReady, 500);
+                // Safety timeout: don't wait forever. If media events don't fire within 500ms,
+                // resolve so rasterizer can proceed with available frames (prevents blank frames).
+                timeoutId = setTimeout(() => {
+                  onReady();
+                }, 500);
               });
               loadPromises.push(waitPromise);
             }

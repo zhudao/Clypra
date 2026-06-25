@@ -133,8 +133,9 @@ export class CapacitorPlatformAdapter implements PlatformInterface {
       }
       return readResult.data;
     } catch (err) {
-      // LocalStorage fallback for debug
-      const projectId = path.split("/").pop()?.replace(".json", "") || "";
+      // FIX (FINDING-023): LocalStorage fallback with platform-aware path parsing
+      const pathParts = path.replace(/\\/g, "/").split("/");
+      const projectId = pathParts.pop()?.replace(".json", "") || "";
       const project = localStorage.getItem(`clypra_project_${projectId}`);
       if (project) return project;
       throw err;

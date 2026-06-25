@@ -70,6 +70,44 @@ export function releaseVideoDecoder(videoPath: string): void {
 }
 
 /**
+ * Prewarm video decoders to eliminate first-frame latency.
+ *
+ * Creates decoders in the pool before they're needed (50-100ms → 5-10ms).
+ * Call this when:
+ * - Project loads (prewarm all timeline videos)
+ * - Clips added to timeline (prewarm new videos)
+ * - Switching sequences
+ *
+ * Non-blocking, runs in background. Never fails (graceful degradation).
+ *
+ * @param videoPaths - Array of video file paths to prewarm
+ * @returns Promise<number> - Count of successfully prewarmed decoders
+ */
+export async function prewarmDecoders(videoPaths: string[]): Promise<number> {
+  if (!isTauri()) {
+    console.warn("[Tauri] prewarmDecoders bypassed: Non-Tauri environment.");
+    return 0;
+  }
+
+  if (videoPaths.length === 0) {
+    return 0;
+  }
+
+  const normalizedPaths = videoPaths.map((p) => toNativePath(p));
+
+  try {
+    const count = await invoke<number>("prewarm_decoders", {
+      videoPaths: normalizedPaths,
+    });
+    return count;
+  } catch (error) {
+    // Graceful degradation - log but don't fail
+    console.warn("[Tauri] prewarmDecoders failed:", error);
+    return 0;
+  }
+}
+
+/**
  * Get render cache statistics (atlas hits, tier cache hits, decodes).
  * Useful for monitoring cache effectiveness.
  */

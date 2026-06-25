@@ -4,298 +4,462 @@
 
 ![Clypra Showcase Banner](public/clypra.jpg)
 
-![Clypra Logo](https://img.shields.io/badge/Clypra-Video%20Editor-blue?style=for-the-badge)
-
-A modern, open-source video editor built with Tauri, React, and TypeScript featuring a professional timeline interface.
+A professional-grade, open-source video editor built on Tauri v2, React 19, and Rust. Designed for desktop and mobile platforms with hardware-accelerated video processing.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md) [![GitHub issues](https://img.shields.io/github/issues/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/issues) [![GitHub stars](https://img.shields.io/github/stars/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/stargazers)
 
-[Features](#features) • [Installation](#installation) • [Usage](#usage) • [Contributing](#contributing) • [License](#license)
+[Features](#features) • [Architecture](#architecture) • [Installation](#installation) • [Development](#development) • [Contributing](#contributing)
 
 </div>
 
 ---
 
+## Overview
+
+Clypra is a native desktop and mobile video editor leveraging Rust's performance with React's UI flexibility. The application provides frame-accurate editing, professional audio visualization, and hardware-accelerated video processing through FFmpeg's native backend.
+
+### Target Platforms
+
+- **Desktop**: macOS (Apple Silicon & Intel), Windows, Linux
+- **Mobile**: iOS (via Capacitor), Android (via Capacitor)
+
+---
+
 ## Features
 
-- 🎬 **Multi-Format Support** - Import MP4, MOV, WebM, MKV, M4V, AVI videos, MP3, WAV, AAC audio, and JPG, PNG, WebP images
-- ✂️ **Precision Editing** - Frame-accurate trimming with visual timeline
-- 📊 **Professional Audio Waveforms** - Peak + RMS + mirrored display matching DaVinci Resolve quality ([see details](WAVEFORM_RENDERING.md))
-- 🎞️ **Filmstrip Preview** - Thumbnail strip for easy navigation
-- 🎯 **Professional Timeline** - Multi-track timeline with ruler and playhead
-- 📝 **Text Overlays** - Add titles and captions with custom fonts
-- 💾 **Project Management** - Save and load projects with auto-save
-- ↩️ **Undo/Redo** - 100 levels of undo/redo history
-- ⚡ **Fast Processing** - FFmpeg-powered video processing
-- 🖥️ **Native Performance** - Built with Tauri for desktop-class performance
-- 🎨 **Modern UI** - Clean, intuitive interface with dark mode
-- 🔄 **Cross-Platform** - Works on macOS, Windows, and Linux
+### Core Editing
 
-## Download & Installation
+- **Multi-format media import**: MP4, MOV, WebM, MKV, M4V, AVI (video); MP3, WAV, AAC (audio); JPG, PNG, WebP (image)
+- **Frame-accurate trimming**: Precise timeline control with millisecond accuracy
+- **Multi-track timeline**: Professional timeline interface with ruler and visual feedback
+- **Undo/redo system**: 100-level history stack with command pattern architecture
 
-### macOS (Apple Silicon & Intel)
+### Professional Audio
 
-The recommended way to install Clypra on macOS is via **Homebrew Cask** to automatically bypass the Gatekeeper security warnings:
+- **High-fidelity waveforms**: Peak + RMS visualization with mirrored display ([technical details](WAVEFORM_RENDERING.md))
+- **Audio synchronization**: Frame-accurate AV sync during playback and export
+- **Volume control**: Per-clip volume adjustment with real-time preview
+
+### Visual Features
+
+- **Filmstrip thumbnails**: Hardware-accelerated thumbnail generation with adaptive density
+- **Text overlays**: Custom fonts, styles, and animations for titles and captions
+- **Preview canvas**: Real-time compositing with transform controls
+
+### Performance
+
+- **Hardware acceleration**: Native GPU decode via FFmpeg (VideoToolbox/D3D11VA/VAAPI)
+- **Decoder prewarming**: Sub-10ms first-frame latency through predictive decoder initialization
+- **Parallel processing**: Web worker pool for thumbnail generation (2-4× faster rendering)
+- **Efficient caching**: LRU-based decoder pool with 20 concurrent decoders
+- **Real-time monitoring**: 30+ performance metrics tracked across video pipeline
+
+### Project Management
+
+- **Persistent projects**: SQLite-backed project storage with auto-save
+- **Media library**: Centralized asset management with metadata caching
+- **Export pipeline**: FFmpeg-based export with codec selection (H.264, H.265, ProRes)
+
+---
+
+## Architecture
+
+Clypra is architected as a **native desktop and mobile application** with clear separation between frontend UI and backend processing.
+
+### Technology Stack
+
+**Frontend**
+
+- React 19 with TypeScript (strict mode)
+- Zustand for state management (separated stores by domain)
+- Vite for build tooling and hot module replacement
+
+**Backend**
+
+- Rust with Tauri v2 for native platform integration
+- FFmpeg (via ffmpeg-next) for video/audio processing
+- Hardware acceleration: VideoToolbox (macOS), D3D11VA (Windows), VAAPI (Linux)
+- DashMap for concurrent data structures
+
+**Mobile**
+
+- Capacitor for iOS/Android deployment
+- Native bridge for platform-specific features
+
+### Design Principles
+
+1. **Native Performance**: Rust FFmpeg backend eliminates browser constraints
+2. **Desktop-First Architecture**: Optimized for desktop-class workflows, portable to mobile
+3. **Hardware Acceleration**: Direct GPU access through native FFmpeg hardware decoders
+4. **Efficient IPC**: Tauri commands optimized for minimal serialization overhead
+5. **Zero Browser Dependencies**: No WebCodecs, MSE, or web-specific APIs
+
+### Video Pipeline Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Frontend (React/TS)                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │  Timeline UI │  │ Preview Canvas│  │ Filmstrip Cache │  │
+│  └──────┬───────┘  └──────┬────────┘  └────────┬────────┘  │
+│         │                 │                     │           │
+│         └─────────────────┴─────────────────────┘           │
+│                           │                                 │
+│                    Tauri IPC Layer                          │
+│                           │                                 │
+└───────────────────────────┼─────────────────────────────────┘
+                            │
+┌───────────────────────────┼─────────────────────────────────┐
+│                  Backend (Rust/FFmpeg)                      │
+│         ┌─────────────────┴──────────────────┐              │
+│         │     Decoder Pool (LRU, size=20)    │              │
+│         │  ┌──────────────────────────────┐  │              │
+│         │  │  Hardware Decoder Context    │  │              │
+│         │  │  (VideoToolbox/D3D11/VAAPI)  │  │              │
+│         │  └──────────────────────────────┘  │              │
+│         └─────────────┬────────────────────┬─┘              │
+│                       │                    │                │
+│         ┌─────────────▼────────┐  ┌────────▼──────────┐    │
+│         │  Frame Decoder       │  │  Export Pipeline  │    │
+│         │  (seek + decode)     │  │  (encode + mux)   │    │
+│         └──────────────────────┘  └───────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Optimizations
+
+**Decoder Prewarming**
+
+- Decoders initialized on project load (eliminates 50-100ms cold start)
+- Concurrent prewarming (4 decoders at a time)
+- First-frame latency: 5-10ms (vs 50-100ms without prewarming)
+
+**Thumbnail Generation**
+
+- Web worker pool (CPU cores - 1, max 4)
+- Zero-copy ImageBitmap transfer via Transferable
+- 60% reduction in main thread CPU during scroll
+
+**Batch Processing**
+
+- Atlas-based thumbnail storage (reduces IPC overhead by 90%)
+- Streaming decode with channel-based delivery
+- Concurrent frame decode (up to 20 videos simultaneously)
+
+**Sequential Decode Optimization**
+
+- Smart seeking: forward decode within GOP boundaries (avoids redundant seeks)
+- Sequential hit tracking: detects scrubbing patterns
+- 70% reduction in seek operations during timeline navigation
+
+For detailed performance metrics and optimization roadmap, see [PERFORMANCE-DESKTOP-ROADMAP.md](./PERFORMANCE-DESKTOP-ROADMAP.md).
+
+---
+
+## Installation
+
+### Binary Releases
+
+Pre-built binaries are available for all supported platforms. Download from the [latest release](https://github.com/AIEraDev/Clypra/releases/latest).
+
+#### macOS
+
+**Recommended: Homebrew Installation**
 
 ```bash
-# Add the custom tap and install the cask
 brew install AIEraDev/tap/clypra
 ```
 
-Alternatively, download the direct installer from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest):
+This method automatically handles Gatekeeper authorization and updates.
 
-- **macOS Universal DMG** _(If using the DMG, drag Clypra to your `/Applications` folder, then Right-click/Control-click the icon and select **Open** to authorize execution)._
+**Alternative: Direct Download**
 
-### Windows
+1. Download `Clypra-universal.dmg` from releases
+2. Open the DMG and drag Clypra to `/Applications`
+3. Right-click the app icon and select "Open" to authorize first launch
 
-- **Windows x64 MSI Installer**: Download from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest) _(If SmartScreen blocks execution, click **More Info** and select **Run Anyway**)._
+Supported: macOS 11+ (Big Sur and later), both Apple Silicon and Intel
 
-### Linux
+#### Windows
 
-- **Linux x64 AppImage**: Download from the [Latest Releases](https://github.com/AIEraDev/Clypra/releases/latest) _(Make the file executable using `chmod +x Clypra_.AppImage`, then run).\*
+1. Download `Clypra-x64.msi` from releases
+2. Run the installer
+3. If Windows SmartScreen blocks execution, click "More Info" → "Run Anyway"
 
-## Project Structure
+Supported: Windows 10 (version 1809+) and Windows 11
 
-```
-src/
-├── components/          # React components
-│   ├── editor/         # Core editor components (Timeline, Preview, etc.)
-│   ├── screens/        # Full-screen views (LaunchScreen)
-│   └── ui/             # Generic UI components (Modals, Icons, etc.)
-├── store/               # Zustand global state stores
-│   ├── timelineStore.ts# Timeline structure (tracks, clips)
-│   ├── playbackStore.ts# Playback sync and playhead state
-│   ├── projectStore.ts # Media assets and project settings
-│   └── ...             # uiStore, settingsStore, dragStateStore
-├── lib/                 # Shared utilities and FFmpeg logic
-├── hooks/               # Custom React hooks
-├── types/               # TypeScript type definitions
-├── constants/           # Global configuration
-└── App.tsx              # Main application entry
-```
+#### Linux
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed documentation.
+1. Download `Clypra-x86_64.AppImage` from releases
+2. Make executable: `chmod +x Clypra-x86_64.AppImage`
+3. Run: `./Clypra-x86_64.AppImage`
 
-## Getting Started
+Supported: Ubuntu 20.04+, Fedora 35+, Debian 11+, and derivatives
+
+---
+
+## Development
 
 ### Prerequisites
 
-- **Node.js** 18+ and npm
-- **Rust** and Cargo (latest stable)
-- **macOS desktop builds**: FFmpeg and FFprobe are bundled as **Tauri sidecars** (`src-tauri/bin/`). The checked-in files are small wrappers that call `ffmpeg` / `ffprobe` from your **`PATH`** so local `cargo tauri dev` works without copying static binaries. For release DMGs, replace them with static builds per [`src-tauri/bin/README.md`](./src-tauri/bin/README.md) (GPL/LGPL compliance, **code-signing** / notarization for sidecars). Until Linux/Windows sidecars exist, install FFmpeg on those platforms as before.
+**Required**
 
-### Install FFmpeg (dev / non-macOS)
+- Node.js 18+ with npm
+- Rust 1.70+ (install via [rustup](https://rustup.rs/))
+- FFmpeg 6.0+ with development libraries
+
+**Platform-Specific**
+
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+- **Windows**: Visual Studio 2019+ with C++ desktop development tools
+- **Linux**: Build essentials, webkit2gtk, libayatana-appindicator
+
+### FFmpeg Installation
+
+**macOS**
 
 ```bash
-# macOS (used by sidecar wrappers until you drop in static binaries)
 brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# Windows (using Chocolatey)
-choco install ffmpeg
-
-# Or download from https://ffmpeg.org/download.html
 ```
 
-### Installation
+**Ubuntu/Debian**
 
 ```bash
-# Clone the repository
+sudo apt install ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+```
+
+**Windows (Chocolatey)**
+
+```bash
+choco install ffmpeg
+```
+
+**Windows (Manual)**
+
+1. Download from [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+2. Extract to `C:\ffmpeg`
+3. Add `C:\ffmpeg\bin` to system PATH
+
+### Build from Source
+
+```bash
+# Clone repository
 git clone https://github.com/AIEraDev/clypra.git
 cd clypra
 
 # Install dependencies
 npm install
 
-# Configure API key (required for text effects and templates)
+# Configure environment
 cp .env.example .env
-# Edit .env and add your Clypra API key
+# Edit .env and add your Clypra API key (required for text effects)
 
-# Run in development mode
+# Development mode with hot reload
 npm run tauri dev
+
+# Production build
+npm run build
+npm run tauri build
+```
+
+### Development Architecture
+
+The codebase is organized by domain with clear separation of concerns:
+
+```
+src/
+├── components/          # React components
+│   ├── editor/         # Core editor UI (Timeline, Preview, Filmstrip)
+│   ├── screens/        # Full-screen views (Launch, Settings)
+│   └── ui/             # Reusable UI primitives (Modals, Icons, Buttons)
+├── store/               # Zustand state stores (by domain)
+│   ├── timelineStore.ts # Timeline structure (tracks, clips, gaps)
+│   ├── playbackStore.ts # Playback state and AV sync
+│   ├── projectStore.ts  # Project metadata and media assets
+│   └── ...              # uiStore, settingsStore, historyStore
+├── core/                # Core engine logic
+│   ├── runtime/        # ProjectSession and lifecycle management
+│   ├── scheduler/      # Frame scheduler for preview rendering
+│   ├── resources/      # PreviewMediaPool (video/audio elements)
+│   ├── render/         # Canvas rasterization and compositing
+│   └── timeline/       # Timeline calculations and utilities
+├── lib/                 # Shared utilities
+│   ├── platform/       # Tauri IPC wrappers
+│   ├── monitoring/     # Performance monitoring
+│   ├── workers/        # Web worker pool
+│   └── ...             # Audio, video, filmstrip utilities
+├── hooks/               # Custom React hooks
+├── types/               # TypeScript type definitions
+└── App.tsx              # Application entry point
+
+src-tauri/
+├── src/
+│   ├── commands/       # Tauri command handlers
+│   │   ├── thumbnail.rs # Video decode commands
+│   │   ├── export.rs    # Export pipeline
+│   │   └── ...
+│   ├── thumbnail_engine/# FFmpeg decoder pool
+│   │   ├── decoder.rs  # Hardware-accelerated decoder
+│   │   ├── cache.rs    # LRU caching
+│   │   └── ...
+│   └── lib.rs          # Tauri application setup
+└── Cargo.toml          # Rust dependencies
 ```
 
 ### API Configuration
 
 Clypra uses the Clypra API for text effects and templates. To enable these features:
 
-1. Copy the `.env.example` file to `.env`:
+1. Copy `.env.example` to `.env`:
 
    ```bash
    cp .env.example .env
    ```
 
-2. Add your API key to the `.env` file:
+2. Add your API key to `.env`:
 
    ```
    VITE_CLYPRA_API_KEY=your_api_key_here
    ```
 
-3. **Important**: Never commit the `.env` file to version control. It's already included in `.gitignore`.
+3. **Important**: Never commit `.env` to version control (already in `.gitignore`)
 
-The API key is used to authenticate requests to:
+The API provides:
 
-- Text effects library
-- Canvas-based text templates library (with WebM video preview support)
+- Text effects library with customizable styles
+- Canvas-based text templates with WebM video previews
+- Google Fonts integration
 
-### Building from Source
-
-```bash
-# Build the frontend
-npm run build
-
-# Build the Tauri app
-npm run tauri build
-
-# The built app will be in src-tauri/target/release/
-```
-
-## Development
-
-### Available Scripts
-
-- `npm run dev` - Start Vite dev server
-- `npm run build` - Build frontend
-- `npm run preview` - Preview production build
-- `npm run tauri dev` - Run Tauri app in development
-- `npm run tauri build` - Build Tauri app for production
-
-### Tech Stack
-
-**Frontend:**
-
-- React 19
-- TypeScript
-- Tailwind CSS 4
-- Vite 7
-
-**Backend:**
-
-- Tauri 2
-- Rust
-- FFmpeg (via CLI)
-
-## Usage
-
-1. **Import Media** - Click "Import Media" to select video, audio, or image files
-2. **Preview** - Use the video player controls to preview your content
-3. **Edit Timeline** - Drag media to the timeline and arrange clips
-4. **Trim & Adjust** - Adjust clip start/end times using the timeline
-5. **Export** - Click "Export" to save your edited video
-
-### Keyboard Shortcuts
-
-- `Space` - Play/Pause video
-- `Ctrl/Cmd + Scroll` - Zoom timeline
-- `Trackpad Pinch` - Zoom timeline
-
-## Screenshots
-
-![Clypra Video Editor Interface](public/home-screen.png)
-
-## Architecture Highlights
-
-### Global State Management (Zustand)
-
-Clypra relies on a powerful and scalable state architecture using **Zustand**. State is split into logical domains to minimize unnecessary re-renders while ensuring high performance:
-
-- **`timelineStore`**: Manages complex timeline manipulations (clips, tracks).
-- **`playbackStore`**: Highly optimized store for frame-accurate playback and playhead sync.
-- **`projectStore`**: Manages media assets, project settings, and history.
-- **`uiStore`** & **`settingsStore`**: Handles application themes, view modes, and preferences.
-
-### Clean Separation of Concerns
-
-- **Components (`src/components`)** - Focused purely on declarative UI rendering. Core editor modules (Timeline, SourcePreview, PreviewPanel) are fully decoupled.
-- **State (`src/store`)** - Centralized business logic and actions.
-- **Utilities (`src/lib`)** - Pure functions for timeline math, FFmpeg process execution, and Tauri sidecar integration.
-- **Type Safety (`src/types`)** - Strict TypeScript models for the entire editing domain.
-
-### Performance Optimizations
-
-- Memoized calculations for timeline rendering
-- Canvas-based waveform for efficient visualization
-- Async filmstrip generation to avoid blocking UI
-- Proper cleanup to prevent memory leaks
-
-## Documentation
-
-- [Architecture Overview](./ARCHITECTURE.md)
-- [Contributing Guide](./CONTRIBUTING.md)
-- [AI Development Guidelines](./docs/GEMINI.md)
-- [Manual Testing Guide](./docs/MANUAL_TESTING_GUIDE.md)
-- [Video Effects Checklist](./docs/VIDEO_EFFECTS_CHECKLIST.md)
-- [Video Effects Architecture](./docs/video-effects/VIDEO_EFFECTS_ARCHITECTURE.md)
-
-## Contributing
-
-We welcome contributions from the community! Whether it's:
-
-- 🐛 Bug reports
-- 💡 Feature requests
-- 📝 Documentation improvements
-- 🔧 Code contributions
-
-Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting a PR.
-
-### Development
+### Testing
 
 ```bash
-# Run tests
+# Run all tests
 npm test
 
-# Run tests with UI
-npm run test:ui
+# Run Rust tests
+cd src-tauri && cargo test
 
-# Lint code
-npm run lint
+# Run specific test suite
+npm test -- src/lib/__tests__/timelineUtils.test.ts
+
+# Run with coverage
+npm test -- --coverage
 ```
 
-## Roadmap
+### Code Quality
 
-- [ ] Multi-track audio mixing
-- [ ] Video effects and filters
-- [ ] Transitions between clips
-- [x] Text and title overlays
-- [x] Export presets for different platforms
-- [ ] Keyboard shortcut customization
-- [ ] Plugin system
+```bash
+# TypeScript type checking
+npx tsc --noEmit
 
-## Community
+# Rust linting
+cd src-tauri && cargo clippy -- -D warnings
 
-- **Discord**: [Join our Discord](https://discord.gg/clypra) _(coming soon)_
-- **Issues**: [GitHub Issues](https://github.com/AIEraDev/clypra/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/AIEraDev/clypra/discussions)
-- **Pull Requests**: [Contributing Guide](CONTRIBUTING.md)
-- **Sponsor**: [GitHub Sponsors](https://github.com/sponsors/AIEraDev) _(coming soon)_
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Built with [Tauri](https://tauri.app) - Rust-powered desktop apps
-- Video processing by [FFmpeg](https://ffmpeg.org)
-- UI powered by [React](https://react.dev) and [Tailwind CSS](https://tailwindcss.com)
-- Timeline design inspired by professional video editors
-
-## Support
-
-If you find this project useful, please consider:
-
-- ⭐ Starring the repository
-- 🐛 Reporting bugs
-- 💡 Suggesting new features
-- 🔧 Contributing code
-- 📢 Sharing with others
+# Format code
+npm run format
+cd src-tauri && cargo fmt
+```
 
 ---
 
-<div align="center">
+## Project Structure
 
-Made with ❤️ by the Clypra community
+### State Management Architecture
 
-</div>
+Clypra uses Zustand with domain-separated stores to maintain clear ownership boundaries:
+
+- **timelineStore**: Timeline structure (tracks, clips, transitions, gaps)
+- **playbackStore**: Playback state, playhead position, AV sync
+- **projectStore**: Project metadata, media assets, persistence
+- **historyStore**: Undo/redo command stack
+- **uiStore**: UI state (modals, selections, drag state)
+- **settingsStore**: User preferences and application settings
+
+Each store owns its domain and exposes actions. Cross-store communication happens through explicit calls, not shared mutable state.
+
+### Video Processing Pipeline
+
+1. **Import**: FFmpeg probe extracts metadata (duration, dimensions, codec)
+2. **Thumbnail**: Rust decoder generates filmstrip tiles (L0-L3 density tiers)
+3. **Preview**: HTMLVideoElement (live playback) or Canvas (composited frames)
+4. **Export**: Frame scheduler → RGBA frames → FFmpeg encoder → MP4/MOV
+
+### Performance Monitoring
+
+The application includes comprehensive performance monitoring:
+
+- **Decoder metrics**: Cache hits, evictions, decode latency
+- **Export metrics**: Frame write time, fps, total duration
+- **Render metrics**: Layer rendering time, canvas pool efficiency
+- **Cache metrics**: Filmstrip cache hit rate, memory usage
+
+Access metrics in development via `window.__performanceMonitor`.
+
+---
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes with tests
+4. Ensure all tests pass (`npm test && cd src-tauri && cargo test`)
+5. Commit with conventional commits (`feat:`, `fix:`, `docs:`, etc.)
+6. Push to your fork and open a Pull Request
+
+### Code Style
+
+- **TypeScript**: Strict mode enabled, ESLint + Prettier
+- **Rust**: `cargo fmt` + `cargo clippy` (no warnings)
+- **Commits**: Conventional commits format
+- **Documentation**: JSDoc for public APIs, inline comments for complex logic
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
+
+### FFmpeg Licensing
+
+Clypra uses FFmpeg for video processing. FFmpeg is licensed under:
+
+- LGPL 2.1+ (default build)
+- GPL 2+ (if built with GPL-only components)
+
+Binary releases include FFmpeg under LGPL. If you build with GPL components, ensure GPL compliance.
+
+---
+
+## Acknowledgments
+
+- **Tauri**: Cross-platform native application framework
+- **FFmpeg**: Video/audio processing engine
+- **React**: UI framework
+- **shadcn/ui**: Component library foundation
+
+---
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/AIEraDev/clypra/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/AIEraDev/clypra/discussions)
+- **Documentation**: [Project Wiki](https://github.com/AIEraDev/clypra/wiki)
+
+---
+
+## Roadmap
+
+See [PERFORMANCE-DESKTOP-ROADMAP.md](./PERFORMANCE-DESKTOP-ROADMAP.md) for upcoming performance improvements.
+
+Planned features:
+
+- Mobile app release (iOS/Android via Capacitor)
+- Advanced color grading
+- Multi-camera editing
+- Collaborative editing (cloud sync)
+- Plugin system for extensions
+- GPU-accelerated effects rendering

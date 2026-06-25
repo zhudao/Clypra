@@ -43,7 +43,9 @@ export function useTimelineTauriDrop(containerRef: RefObject<HTMLDivElement | nu
 
       for (const filePath of paths) {
         try {
-          const filename = filePath.split("/").pop() || filePath.split("\\").pop() || "Unknown";
+          // FIX (FINDING-023): Platform-aware filename extraction
+          const pathParts = filePath.replace(/\\/g, "/").split("/");
+          const filename = pathParts.pop() || "Unknown";
           const type = getMediaType(filename);
 
           // Check if asset already exists
@@ -121,8 +123,11 @@ export function useTimelineTauriDrop(containerRef: RefObject<HTMLDivElement | nu
             addClip(newClip);
           }
         } catch (error) {
+          // FIX (FINDING-023): Platform-aware filename extraction in error message
+          const pathParts = filePath.replace(/\\/g, "/").split("/");
+          const filename = pathParts.pop() || "file";
           console.error(`[Timeline] Failed to import ${filePath}:`, error);
-          useProjectStore.getState().showToast(`Failed to import ${filePath.split("/").pop() || "file"}`, "error");
+          useProjectStore.getState().showToast(`Failed to import ${filename}`, "error");
         }
       }
     },

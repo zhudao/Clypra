@@ -137,10 +137,16 @@ export function generateViewportTileAddresses(options: {
 
 /**
  * Get the tile key for a given address. Used for Map-based cache lookups.
+ *
+ * FIX (FINDING-013): Use integer milliseconds for timestamp to avoid floating-point rounding
+ * issues that cause cache key mismatches. toFixed(3) can produce different strings for
+ * mathematically equal values due to IEEE 754 rounding.
  */
 export function getTileKey(address: FilmstripTileAddress): string {
   if (address.videoPath) {
-    return `${address.videoPath}:${address.zoomTier}:${address.timestamp.toFixed(3)}`;
+    // Convert to integer milliseconds to avoid floating-point precision issues
+    const timestampMs = Math.round(address.timestamp * 1000);
+    return `${address.videoPath}:${address.zoomTier}:${timestampMs}`;
   }
   return `${address.clipId}:${address.zoomTier}:${address.tileIndex}`;
 }
