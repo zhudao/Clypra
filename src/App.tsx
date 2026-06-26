@@ -270,42 +270,47 @@ const App = () => {
     setProjectNameBeforeClose(currentProject.name);
     setIsClosingProject(true);
 
-    const updateStep = (window as any).__updateClosingStep;
-
     try {
-      // Step 1: Save project
-      updateStep?.("save", "in-progress");
+      // Wait for next tick to ensure modal is rendered and __updateClosingStep is registered
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const updateStep = (window as any).__updateClosingStep;
+      if (!updateStep) {
+        console.error("[App] Modal step updater not available");
+        setIsClosingProject(false);
+        return;
+      }
+
+      // Step 1: Save project and cleanup
+      updateStep("save", "in-progress");
+      updateStep("session", "in-progress");
+
       const { closeProject } = useProjectStore.getState();
-      // closeProject handles saving internally
-      updateStep?.("save", "completed");
+      await closeProject(); // closeProject handles saving internally
 
-      // Call the actual closeProject function which handles all cleanup
-      await closeProject();
+      updateStep("save", "completed");
+      updateStep("session", "completed");
 
-      // Mark all remaining steps as completed
-      updateStep?.("session", "completed");
-      updateStep?.("cleanup", "completed");
-      updateStep?.("reset", "completed");
+      // Step 2: Cleanup and reset
+      updateStep("cleanup", "in-progress");
+      updateStep("cleanup", "completed");
+
+      updateStep("reset", "in-progress");
+      updateStep("reset", "completed");
+
+      // Wait a moment for visual feedback, then close modal
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      setIsClosingProject(false);
+      setProjectNameBeforeClose("");
     } catch (error) {
       console.error("[App] Error closing project:", error);
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-      // Mark current or first pending step as error
-      const steps = ["save", "session", "cleanup", "reset"];
-      for (const stepId of steps) {
-        const step = steps.indexOf(stepId);
-        updateStep?.(stepId, "error", errorMessage);
-        break;
-      }
-    }
-  };
+      const updateStep = (window as any).__updateClosingStep;
+      updateStep?.("save", "error", errorMessage);
 
-  /**
-   * Called when closing modal completes (all steps done or force closed).
-   */
-  const handleClosingComplete = () => {
-    setIsClosingProject(false);
-    setProjectNameBeforeClose("");
+      // Allow force close on error (modal will show force close button)
+    }
   };
 
   if (isLoading) {
@@ -339,7 +344,14 @@ const App = () => {
       <SettingsModal isOpen={showSettingsModal} onClose={toggleSettingsModal} />
 
       {/* ── Closing Project Modal ────────────────────────────────────────── */}
-      <ClosingProjectModal isOpen={isClosingProject} projectName={projectNameBeforeClose} onComplete={handleClosingComplete} />
+      <ClosingProjectModal
+        isOpen={isClosingProject}
+        projectName={projectNameBeforeClose}
+        onComplete={() => {
+          setIsClosingProject(false);
+          setProjectNameBeforeClose("");
+        }}
+      />
 
       {/* ── Crash Recovery Dialog ────────────────────────────────────────── */}
       <CrashRecoveryDialog isOpen={!!pendingRecovery && !project} snapshot={pendingRecovery} isRestoring={isRestoring} onRestore={handleRestoreSession} onDiscard={handleDiscardRecovery} />

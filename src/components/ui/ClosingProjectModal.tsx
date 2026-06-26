@@ -32,21 +32,24 @@ export const ClosingProjectModal: React.FC<ClosingProjectModalProps> = ({ isOpen
 
   // External control: parent can update step status by calling exposed functions
   const updateStepStatus = (stepId: string, status: CloseStep["status"], error?: string) => {
-    setSteps((prev) => prev.map((s) => (s.id === stepId ? { ...s, status, error } : s)));
+    setSteps((prev) => {
+      const updated = prev.map((s) => (s.id === stepId ? { ...s, status, error } : s));
 
-    if (status === "in-progress") {
-      const index = steps.findIndex((s) => s.id === stepId);
-      setCurrentStepIndex(index);
-    }
+      // Check completion with the UPDATED array, not stale closure
+      const allCompleted = updated.every((s) => s.status === "completed");
+      if (allCompleted && onComplete) {
+        // Don't call onComplete here - parent handles modal close timing
+      }
 
-    // If all steps completed, call onComplete
-    const allCompleted = steps.every((s) => {
-      if (s.id === stepId) return status === "completed";
-      return s.status === "completed";
+      return updated;
     });
 
-    if (allCompleted && onComplete) {
-      setTimeout(onComplete, 500); // Small delay for visual feedback
+    if (status === "in-progress") {
+      setSteps((prev) => {
+        const index = prev.findIndex((s) => s.id === stepId);
+        setCurrentStepIndex(index);
+        return prev;
+      });
     }
   };
 
@@ -58,7 +61,7 @@ export const ClosingProjectModal: React.FC<ClosingProjectModalProps> = ({ isOpen
     return () => {
       delete (window as any).__updateClosingStep;
     };
-  }, [isOpen, steps]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
