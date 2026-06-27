@@ -8,28 +8,54 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resetAllProjectState, detectStaleState, type ResetOptions } from "../ProjectStateReset";
 
 // Mock implementations
+const mockClearDragging = vi.fn();
 vi.mock("@/store/dragStateStore", () => ({
   useDragStateStore: {
     getState: () => ({
-      clearDragging: vi.fn(),
+      clearDragging: mockClearDragging,
     }),
     setState: vi.fn(),
   },
 }));
 
+const mockUiSetState = vi.fn();
 vi.mock("@/store/uiStore", () => ({
   useUIStore: {
     getState: () => ({}),
-    setState: vi.fn(),
+    setState: mockUiSetState,
   },
 }));
 
+const mockHistoryClear = vi.fn();
 vi.mock("@/store/historyStore", () => ({
   useHistoryStore: {
     getState: () => ({
-      clear: vi.fn(),
+      clear: mockHistoryClear,
       state: { size: 0, canUndo: false },
     }),
+  },
+}));
+
+const mockTemplateReset = vi.fn();
+vi.mock("@/features/text-templates/templateStore", () => ({
+  useTemplateStore: {
+    getState: () => ({
+      reset: mockTemplateReset,
+    }),
+  },
+}));
+
+const mockFavoritesSetState = vi.fn();
+vi.mock("@/store/favoritesStore", () => ({
+  useFavoritesStore: {
+    setState: mockFavoritesSetState,
+  },
+}));
+
+const mockBodyMaskClear = vi.fn();
+vi.mock("@/features/body-effects/segmentation/maskCache", () => ({
+  bodyMaskCache: {
+    clear: mockBodyMaskClear,
   },
 }));
 
@@ -87,6 +113,13 @@ describe("ProjectStateReset", () => {
       expect(result.resetSubsystems).toContain("ViewportController");
       expect(result.resetSubsystems).toContain("HistoryStore");
       expect(result.resetSubsystems).toContain("PerformanceMonitor");
+      expect(result.resetSubsystems).toContain("TemplateStore");
+      expect(result.resetSubsystems).toContain("FavoritesStore");
+      expect(result.resetSubsystems).toContain("BodyMaskCache");
+
+      expect(mockTemplateReset).toHaveBeenCalled();
+      expect(mockFavoritesSetState).toHaveBeenCalledWith({ downloadingIds: [] });
+      expect(mockBodyMaskClear).toHaveBeenCalled();
     });
 
     it("should support selective reset", async () => {
