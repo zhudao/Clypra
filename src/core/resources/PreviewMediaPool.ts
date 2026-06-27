@@ -572,9 +572,7 @@ export class PreviewMediaPool {
 
         const rawPath = asset ? asset.path : directAudioPath!;
         const sourcePath = rawPath.startsWith("asset://") ? rawPath : convertFileSrc(rawPath);
-        const trimIn = clip.trimIn || 0;
-        const normalizedTrimIn = Math.round(trimIn * 1000) / 1000;
-        const key = `${clip.mediaId}-${sourcePath}-trim${normalizedTrimIn.toFixed(3)}`;
+        const key = clip.id;
 
         let managed = this.audios.get(key);
         if (!managed) {
