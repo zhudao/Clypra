@@ -100,11 +100,6 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
         const hasCam = videoDevs.length > 0;
         setHasCameraHardware(hasCam);
 
-        // Auto-disable camera option if no camera device hardware is present
-        if (!hasCam) {
-          setRecordOptions((prev) => ({ ...prev, webcam: false }));
-        }
-
         if (audioDevs.length > 0) {
           setSelectedAudioDeviceId((prev) => {
             if (prev && audioDevs.some((d) => d.deviceId === prev)) return prev;
@@ -790,10 +785,10 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
             {/* Options */}
             <div className="grid grid-cols-3 gap-3">
               {([
-                { key: "screen" as const, label: "Capture Screen", icon: "🖥️", disabled: false },
-                { key: "webcam" as const, label: hasCameraHardware ? "Camera" : "No Camera", icon: "📷", disabled: !hasCameraHardware },
-                { key: "audio" as const, label: "Microphone", icon: "🎙️", disabled: false },
-              ] as const).map(({ key, label, icon, disabled }) => (
+                { key: "screen" as const, label: "Capture Screen", icon: "🖥️" },
+                { key: "webcam" as const, label: "Camera", icon: "📷" },
+                { key: "audio" as const, label: "Microphone", icon: "🎙️" },
+              ] as const).map(({ key, label, icon }) => (
                 <label
                   key={key}
                   className={`flex flex-col items-center gap-2 p-3 rounded-xl border select-none transition-all ${
@@ -801,18 +796,17 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
                       ? "bg-accent/10 border-accent/40 text-white"
                       : "bg-white/4 border-white/8 text-slate-400 opacity-60"
                   } ${
-                    isRecording || disabled
+                    isRecording
                       ? "opacity-40 cursor-not-allowed pointer-events-none"
                       : "cursor-pointer hover:bg-white/8"
                   }`}
-                  title={disabled ? "No camera hardware detected" : undefined}
                 >
                   <input
                     type="checkbox"
                     className="sr-only"
                     checked={recordOptions[key]}
                     onChange={(e) => setRecordOptions({ ...recordOptions, [key]: e.target.checked })}
-                    disabled={isRecording || disabled}
+                    disabled={isRecording}
                   />
                   <span className="text-xl">{icon}</span>
                   <span className="text-xs font-semibold">{label}</span>
