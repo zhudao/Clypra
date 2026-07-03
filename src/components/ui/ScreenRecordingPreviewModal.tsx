@@ -12,11 +12,7 @@ interface ScreenRecordingPreviewModalProps {
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalProps> = ({
-  isOpen,
-  onClose,
-  onProjectCreate,
-}) => {
+export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalProps> = ({ isOpen, onClose, onProjectCreate }) => {
   const { previewRecording, setPreviewRecording } = useRecordingStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
@@ -101,9 +97,17 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
       }
     };
 
-    const onPlay = () => { camVideo.play().catch(() => {}); syncTime(); };
-    const onPause = () => { camVideo.pause(); syncTime(); };
-    const onSeeked = () => { syncTime(); };
+    const onPlay = () => {
+      camVideo.play().catch(() => {});
+      syncTime();
+    };
+    const onPause = () => {
+      camVideo.pause();
+      syncTime();
+    };
+    const onSeeked = () => {
+      syncTime();
+    };
 
     mainVideo.addEventListener("play", onPlay);
     mainVideo.addEventListener("pause", onPause);
@@ -126,24 +130,27 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
   trimEndRef.current = trimEnd;
   durationRef.current = duration;
 
-  const handleGlobalMouseMove = useCallback((e: MouseEvent) => {
-    if (!isDragging || !containerRef.current || durationRef.current === 0) return;
+  const handleGlobalMouseMove = useCallback(
+    (e: MouseEvent) => {
+      if (!isDragging || !containerRef.current || durationRef.current === 0) return;
 
-    const rect = containerRef.current.getBoundingClientRect();
-    const clientX = e.clientX;
-    const relativeX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const percent = relativeX * 100;
+      const rect = containerRef.current.getBoundingClientRect();
+      const clientX = e.clientX;
+      const relativeX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const percent = relativeX * 100;
 
-    if (isDragging === "start") {
-      setTrimStart(Math.min(percent, trimEndRef.current - 5));
-    } else if (isDragging === "end") {
-      setTrimEnd(Math.max(percent, trimStartRef.current + 5));
-    } else if (isDragging === "playhead") {
-      if (videoRef.current) {
-        videoRef.current.currentTime = relativeX * durationRef.current;
+      if (isDragging === "start") {
+        setTrimStart(Math.min(percent, trimEndRef.current - 5));
+      } else if (isDragging === "end") {
+        setTrimEnd(Math.max(percent, trimStartRef.current + 5));
+      } else if (isDragging === "playhead") {
+        if (videoRef.current) {
+          videoRef.current.currentTime = relativeX * durationRef.current;
+        }
       }
-    }
-  }, [isDragging]);
+    },
+    [isDragging],
+  );
 
   const handleGlobalMouseUp = useCallback(() => {
     setIsDragging(null);
@@ -185,6 +192,10 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
     if (videoRef.current) {
       setDuration(videoRef.current.duration);
     }
+  };
+
+  const handleEnded = () => {
+    setIsPlaying(false);
   };
 
   // Drag handlers for custom trimmer and timeline scrubber
@@ -267,6 +278,8 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
   };
 
   const formatTimecode = (seconds: number, fps = 30) => {
+    // Guard against NaN/Infinity (video not yet loaded)
+    if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
     const hrs = Math.floor(seconds / 3600).toString().padStart(2, "0");
     const mins = Math.floor((seconds % 3600) / 60).toString().padStart(2, "0");
     const secs = Math.floor(seconds % 60).toString().padStart(2, "0");
@@ -274,17 +287,68 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
     return `${hrs}:${mins}:${secs}:${frames}`;
   };
 
+  // ── Filmstrip ────────────────────────────────────────────────────────────────
+  const filmstripCanvasRef = useRef<HTMLCanvasElement>(null);
+  const filmstripDrawnRef = useRef(false);
+
+  // Draw thumbnail frames onto the filmstrip canvas once the video is loaded
+  const drawFilmstrip = useCallback(async () => {
+    const video = videoRef.current;
+    const canvas = filmstripCanvasRef.current;
+    if (!video || !canvas || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    if (filmstripDrawnRef.current) return;
+    filmstripDrawnRef.current = true;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const totalDur = video.duration;
+    const frameCount = Math.max(4, Math.min(16, Math.floor(canvas.offsetWidth / 48)));
+    const frameW = canvas.width / frameCount;
+    const frameH = canvas.height;
+
+    // Preserve original time so playback isn't disrupted
+    const originalTime = video.currentTime;
+    const wasPaused = video.paused;
+    if (!wasPaused) video.pause();
+
+    for (let i = 0; i < frameCount; i++) {
+      const t = (i / frameCount) * totalDur;
+      await new Promise<void>((resolve) => {
+        const onSeeked = () => {
+          video.removeEventListener("seeked", onSeeked);
+          ctx.drawImage(video, i * frameW, 0, frameW, frameH);
+          resolve();
+        };
+        video.addEventListener("seeked", onSeeked, { once: true });
+        video.currentTime = t;
+      });
+    }
+
+    // Restore original position
+    video.currentTime = originalTime;
+    if (!wasPaused) video.play().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    filmstripDrawnRef.current = false;
+  }, [videoSrc]);
+
+  // Trigger filmstrip draw once video metadata is ready AND duration is known
+  useEffect(() => {
+    if (duration > 0) {
+      drawFilmstrip();
+    }
+  }, [duration, drawFilmstrip]);
+
   const playheadPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+    <div className="fixed inset-0 z-1000 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
       <div className="w-[600px] rounded-2xl bg-[#14141e]/95 border border-white/8 overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
         {/* Title bar */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/5 bg-[#1a1a26]/50">
-          <button
-            onClick={handleClose}
-            className="w-3.5 h-3.5 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center text-[8px] text-red-950 font-bold"
-          >
+          <button onClick={handleClose} className="w-3.5 h-3.5 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center text-[8px] text-red-950 font-bold">
             ✕
           </button>
           <span className="text-sm font-semibold text-slate-300">Screen recording</span>
@@ -296,14 +360,14 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
           <div className="flex items-center justify-between px-5 py-2.5 bg-amber-500/10 border-b border-amber-500/20">
             <span className="text-xs text-amber-300">Discard preview? Files remain on disk.</span>
             <div className="flex items-center gap-2">
-              <button
-                onClick={handleCancelClose}
-                className="px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:text-white rounded-md hover:bg-white/5 transition-colors"
-              >
+              <button onClick={handleCancelClose} className="px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:text-white rounded-md hover:bg-white/5 transition-colors">
                 Cancel
               </button>
               <button
-                onClick={() => { setShowCloseConfirm(false); onClose(); }}
+                onClick={() => {
+                  setShowCloseConfirm(false);
+                  onClose();
+                }}
                 className="px-2.5 py-1 text-[11px] font-semibold text-amber-400 hover:text-amber-300 rounded-md hover:bg-amber-500/10 transition-colors"
               >
                 Discard
@@ -314,39 +378,18 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
 
         {/* Video Preview */}
         <div className="relative aspect-video bg-[#0a0a0f] border-b border-white/5 flex items-center justify-center overflow-hidden">
-          {videoSrc ? (
-            <video
-              ref={videoRef}
-              src={videoSrc}
-              onTimeUpdate={handleTimeUpdate}
-              onLoadedMetadata={handleLoadedMetadata}
-              onClick={togglePlay}
-              className="max-w-full max-h-full object-contain cursor-pointer"
-            />
-          ) : (
-            <div className="text-slate-500 text-xs">Loading preview...</div>
-          )}
+          {videoSrc ? <video ref={videoRef} src={videoSrc} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMetadata} onEnded={handleEnded} onClick={togglePlay} className="max-w-full max-h-full object-contain cursor-pointer" /> : <div className="text-slate-500 text-xs">Loading preview...</div>}
 
           {/* Camera PiP overlay */}
           {hasDualRecording && cameraSrc && showCameraPip && (
             <div className="absolute bottom-3 right-3 w-28 aspect-video rounded-lg overflow-hidden border border-white/20 shadow-2xl bg-black z-10">
-              <video
-                ref={cameraVideoRef}
-                src={cameraSrc}
-                muted
-                playsInline
-                className="w-full h-full object-cover scale-x-[-1]"
-              />
+              <video ref={cameraVideoRef} src={cameraSrc} muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
             </div>
           )}
 
           {/* Camera PiP toggle */}
           {hasDualRecording && (
-            <button
-              onClick={() => setShowCameraPip((v) => !v)}
-              className="absolute top-3 right-3 z-10 p-1.5 rounded-lg bg-black/50 backdrop-blur-sm border border-white/10 hover:bg-black/70 transition-colors text-white/70 hover:text-white"
-              title={showCameraPip ? "Hide camera" : "Show camera"}
-            >
+            <button onClick={() => setShowCameraPip((v) => !v)} className="absolute top-3 right-3 z-10 p-1.5 rounded-lg bg-black/50 backdrop-blur-sm border border-white/10 hover:bg-black/70 transition-colors text-white/70 hover:text-white" title={showCameraPip ? "Hide camera" : "Show camera"}>
               {showCameraPip ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             </button>
           )}
@@ -356,13 +399,26 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
         <div className="p-5 flex flex-col gap-4 bg-[#14141e]">
           {/* Trimmer Timeline Slider */}
           <div className="flex flex-col gap-1.5">
-            <div className="relative h-6 bg-white/4 rounded-md border border-white/5 overflow-hidden" ref={containerRef}>
-              {/* Visual Trim Region overlay */}
+            <div className="relative h-10 bg-[#08080f] rounded-md border border-white/8 overflow-hidden" ref={containerRef}>
+              {/* Filmstrip canvas — drawn once from video frames */}
+              <canvas
+                ref={filmstripCanvasRef}
+                width={800}
+                height={40}
+                className="absolute inset-0 w-full h-full object-cover opacity-60"
+              />
+
+              {/* Darkened inactive regions outside the trim zone */}
+              <div className="absolute top-0 bottom-0 left-0 bg-black/60" style={{ width: `${trimStart}%` }} />
+              <div className="absolute top-0 bottom-0 right-0 bg-black/60" style={{ width: `${100 - trimEnd}%` }} />
+
+              {/* Visual Trim Region overlay — accent border showing the selected region */}
               <div
-                className="absolute top-0 bottom-0 bg-accent/15 border-y-2 border-accent"
+                className="absolute top-0 bottom-0 border-x-2 border-accent pointer-events-none"
                 style={{
                   left: `${trimStart}%`,
                   right: `${100 - trimEnd}%`,
+                  boxShadow: "inset 0 0 0 1px rgba(108,99,255,0.15)",
                 }}
               />
 
@@ -371,29 +427,17 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
               <div className="absolute top-0 bottom-0 right-0 bg-black/40" style={{ width: `${100 - trimEnd}%` }} />
 
               {/* Start Handle */}
-              <div
-                onMouseDown={(e) => handleTimelineMouseDown(e, "start")}
-                className="absolute top-0 bottom-0 w-3 bg-accent rounded-l-md cursor-ew-resize flex items-center justify-center border-r border-white/20 select-none"
-                style={{ left: `${trimStart}%`, transform: "translateX(-50%)", zIndex: 10 }}
-              >
+              <div onMouseDown={(e) => handleTimelineMouseDown(e, "start")} className="absolute top-0 bottom-0 w-3 bg-accent rounded-l-md cursor-ew-resize flex items-center justify-center border-r border-white/20 select-none" style={{ left: `${trimStart}%`, transform: "translateX(-50%)", zIndex: 10 }}>
                 <div className="w-0.5 h-3 bg-white/60" />
               </div>
 
               {/* End Handle */}
-              <div
-                onMouseDown={(e) => handleTimelineMouseDown(e, "end")}
-                className="absolute top-0 bottom-0 w-3 bg-accent rounded-r-md cursor-ew-resize flex items-center justify-center border-l border-white/20 select-none"
-                style={{ left: `${trimEnd}%`, transform: "translateX(-50%)", zIndex: 10 }}
-              >
+              <div onMouseDown={(e) => handleTimelineMouseDown(e, "end")} className="absolute top-0 bottom-0 w-3 bg-accent rounded-r-md cursor-ew-resize flex items-center justify-center border-l border-white/20 select-none" style={{ left: `${trimEnd}%`, transform: "translateX(-50%)", zIndex: 10 }}>
                 <div className="w-0.5 h-3 bg-white/60" />
               </div>
 
               {/* Playhead Scrubber */}
-              <div
-                onMouseDown={(e) => handleTimelineMouseDown(e, "playhead")}
-                className="absolute top-0 bottom-0 w-0.5 bg-white cursor-ew-resize select-none"
-                style={{ left: `${playheadPercent}%`, zIndex: 20 }}
-              >
+              <div onMouseDown={(e) => handleTimelineMouseDown(e, "playhead")} className="absolute top-0 bottom-0 w-0.5 bg-white cursor-ew-resize select-none" style={{ left: `${playheadPercent}%`, zIndex: 20 }}>
                 <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 rounded-full bg-white shadow-md" />
               </div>
             </div>
@@ -410,7 +454,7 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
             <div className="flex items-center gap-1.5 select-none">
               <span className="text-white">{formatTimecode(currentTime)}</span>
               <span>/</span>
-              <span>{formatTimecode((trimEnd - trimStart) / 100 * duration || duration)}</span>
+              <span>{formatTimecode(Number.isFinite(duration) && duration > 0 ? (trimEnd - trimStart) / 100 * duration : 0)}</span>
             </div>
           </div>
 
@@ -422,7 +466,10 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
                 {formatTimecode((trimStart / 100) * duration)} → {formatTimecode((trimEnd / 100) * duration)}
               </span>
               <button
-                onClick={() => { setTrimStart(0); setTrimEnd(100); }}
+                onClick={() => {
+                  setTrimStart(0);
+                  setTrimEnd(100);
+                }}
                 className="ml-auto text-[10px] text-slate-500 hover:text-white transition-colors"
               >
                 Reset
@@ -432,18 +479,11 @@ export const ScreenRecordingPreviewModal: React.FC<ScreenRecordingPreviewModalPr
 
           {/* Action buttons */}
           <div className="grid grid-cols-2 gap-3 mt-1">
-            <button
-              onClick={handleDownload}
-              disabled={isDownloading}
-              className="flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 hover:bg-white/10 active:bg-white/15 text-white font-semibold text-sm transition-all border border-white/5 cursor-pointer disabled:opacity-50"
-            >
+            <button onClick={handleDownload} disabled={isDownloading} className="flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 hover:bg-white/10 active:bg-white/15 text-white font-semibold text-sm transition-all border border-white/5 cursor-pointer disabled:opacity-50">
               <Download className="w-4 h-4" />
               {isDownloading ? "Processing..." : isTrimmed ? "Download Trimmed" : "Download"}
             </button>
-            <button
-              onClick={handleEditMore}
-              className="flex items-center justify-center gap-2 py-3 rounded-xl bg-[#00b4c8] hover:bg-[#00cdd8] active:bg-[#00a0b0] text-slate-950 font-bold text-sm transition-all shadow-lg shadow-cyan-500/10 cursor-pointer"
-            >
+            <button onClick={handleEditMore} className="flex items-center justify-center gap-2 py-3 rounded-xl bg-[#00b4c8] hover:bg-[#00cdd8] active:bg-[#00a0b0] text-slate-950 font-bold text-sm transition-all shadow-lg shadow-cyan-500/10 cursor-pointer">
               <Edit3 className="w-4 h-4" />
               Edit more
             </button>
