@@ -15,6 +15,11 @@ export interface AudioDevice {
   label: string;
 }
 
+export interface VideoDevice {
+  deviceId: string;
+  label: string;
+}
+
 /**
  * Callback fired when recording is stopped externally (e.g. user clicks
  * OS "Stop Sharing", or a MediaRecorder error occurs).
@@ -97,6 +102,23 @@ export class DualRecordService {
         deviceId: d.deviceId,
         label: d.label || `Microphone ${i + 1}`,
       }));
+  }
+
+  /**
+   * Returns all available video input devices (webcams, capture cards, etc).
+   */
+  async enumerateVideoDevices(): Promise<VideoDevice[]> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices
+        .filter((d) => d.kind === "videoinput")
+        .map((d, i) => ({
+          deviceId: d.deviceId,
+          label: d.label || `Camera ${i + 1}`,
+        }));
+    } catch {
+      return [];
+    }
   }
 
   // ─── Microphone Test ─────────────────────────────────────────────────────────
@@ -182,16 +204,21 @@ export class DualRecordService {
   // ─── Camera Preview ──────────────────────────────────────────────────────────
 
   /**
-   * Start preview of the webcam camera.
+   * Start preview of the webcam camera and microphone.
+   * Gracefully handles missing camera hardware or camera permission rejection by falling back to audio-only if audio is enabled.
    */
   async startPreview(
     options: Pick<DualRecordOptions, "webcam" | "audio">,
     audioDeviceId?: string
-  ): Promise<MediaStream> {
-    if (this.isRecordingActive) return this.webcamStream!;
+  ): Promise<{ stream: MediaStream | null; cameraError?: string }> {
+    if (this.isRecordingActive) return { stream: this.webcamStream };
 
     if (this.webcamStream) {
       this.stopWebcamStream();
+    }
+
+    if (!options.webcam && !options.audio) {
+      return { stream: null };
     }
 
     const audioConstraints = options.audio
@@ -200,19 +227,63 @@ export class DualRecordService {
         : true
       : false;
 
+    let cameraError: string | undefined;
+
+    // Try combined video + audio first if webcam is requested
+    if (options.webcam) {
+      try {
+        this.webcamStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+          audio: audioConstraints,
+        });
+        this.isPreviewActive = true;
+        return { stream: this.webcamStream };
+      } catch (err: any) {
+        console.warn("[DualRecordService] Camera preview failed, attempting audio fallback:", err);
+        const errMessage = err?.message || String(err);
+        const isCameraMissing =
+          err?.name === "NotFoundError" ||
+          err?.name === "DevicesNotFoundError" ||
+          errMessage.includes("No AVVideoCaptureSource") ||
+          errMessage.includes("sandbox extension");
+
+        cameraError = isCameraMissing
+          ? "No camera hardware detected."
+          : "Camera access was denied or unavailable.";
+
+        // If audio was also requested, fall back to audio-only so mic test works
+        if (options.audio) {
+          try {
+            this.webcamStream = await navigator.mediaDevices.getUserMedia({
+              video: false,
+              audio: audioConstraints,
+            });
+            this.isPreviewActive = true;
+            return { stream: this.webcamStream, cameraError };
+          } catch (audioErr) {
+            console.error("[DualRecordService] Audio fallback failed:", audioErr);
+            this.stopWebcamStream();
+            throw new Error("Could not access camera or microphone.");
+          }
+        } else {
+          this.stopWebcamStream();
+          throw new Error(cameraError);
+        }
+      }
+    }
+
+    // Audio-only preview
     try {
       this.webcamStream = await navigator.mediaDevices.getUserMedia({
-        video: options.webcam
-          ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-          : false,
+        video: false,
         audio: audioConstraints,
       });
       this.isPreviewActive = true;
-      return this.webcamStream;
+      return { stream: this.webcamStream };
     } catch (err) {
-      console.error("[DualRecordService] startPreview failed:", err);
+      console.error("[DualRecordService] Audio preview failed:", err);
       this.stopWebcamStream();
-      throw err;
+      throw new Error("Could not access microphone. Check system permissions.");
     }
   }
 
@@ -355,16 +426,37 @@ export class DualRecordService {
 
       // 2. Webcam + mic stream & recorder
       if ((options.webcam || options.audio) && !this.webcamStream) {
-        this.webcamStream = await navigator.mediaDevices.getUserMedia({
-          video: options.webcam
-            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-            : false,
-          audio: options.audio
-            ? options.audioDeviceId
+        if (options.webcam) {
+          try {
+            this.webcamStream = await navigator.mediaDevices.getUserMedia({
+              video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+              audio: options.audio
+                ? options.audioDeviceId
+                  ? { deviceId: { exact: options.audioDeviceId } }
+                  : true
+                : false,
+            });
+          } catch (err) {
+            console.warn("[DualRecordService] Camera request failed during recording start, falling back to audio-only:", err);
+            if (options.audio) {
+              this.webcamStream = await navigator.mediaDevices.getUserMedia({
+                video: false,
+                audio: options.audioDeviceId
+                  ? { deviceId: { exact: options.audioDeviceId } }
+                  : true,
+              });
+            } else {
+              throw err;
+            }
+          }
+        } else if (options.audio) {
+          this.webcamStream = await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: options.audioDeviceId
               ? { deviceId: { exact: options.audioDeviceId } }
-              : true
-            : false,
-        });
+              : true,
+          });
+        }
       }
 
       if (this.webcamStream && (options.webcam || options.audio)) {
