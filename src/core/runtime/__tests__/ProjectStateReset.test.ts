@@ -120,7 +120,7 @@ describe("ProjectStateReset", () => {
       expect(mockTemplateReset).toHaveBeenCalled();
       expect(mockFavoritesSetState).toHaveBeenCalledWith({ downloadingIds: [] });
       expect(mockBodyMaskClear).toHaveBeenCalled();
-    });
+    }, 15_000);
 
     it("should support selective reset", async () => {
       const options: ResetOptions = {

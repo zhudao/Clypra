@@ -175,7 +175,7 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
       </div>
 
       {/* Circular Facecam Bubble */}
-      {hasWebcam ? (
+      {hasWebcam && DualRecordService.getInstance().hasWebcamVideoTrack() ? (
         <div className="relative w-48 h-48 rounded-full overflow-hidden border-2 border-accent/40 shadow-xl bg-black">
           <video
             ref={videoRef}
