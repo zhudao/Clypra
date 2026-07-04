@@ -81,6 +81,8 @@ pub fn run() {
             list_downloaded_models,
             cancel_whisper_download,
             verify_whisper_model_exists,
+            // Screen recording commands
+            trim_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

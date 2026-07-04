@@ -16,6 +16,8 @@ vi.mock("@/core/platform", () => {
 class MockMediaStreamTrack {
   constructor(public kind: string = "video") {}
   stop = vi.fn();
+  addEventListener = vi.fn();
+  removeEventListener = vi.fn();
 }
 
 class MockMediaStream {
@@ -29,11 +31,14 @@ globalThis.MediaStream = MockMediaStream as any;
 
 class MockMediaRecorder {
   mimeType = "video/webm";
+  state = "recording";
   ondataavailable: ((e: any) => void) | null = null;
   onstop: (() => void) | null = null;
+  onerror: ((e: any) => void) | null = null;
 
   start = vi.fn();
   stop = vi.fn(() => {
+    this.state = "inactive";
     setTimeout(() => {
       if (this.ondataavailable) {
         this.ondataavailable({ data: new Blob(["chunk"], { type: "video/webm" }) });
@@ -153,7 +158,6 @@ describe("DualRecordService", () => {
     expect(platform.saveRecording).toHaveBeenCalledTimes(2);
   });
 
-
   it("should enumerate audio devices correctly", async () => {
     const service = DualRecordService.getInstance();
     const devices = await service.enumerateAudioDevices();
@@ -175,5 +179,80 @@ describe("DualRecordService", () => {
     service.stopMicTest();
     expect(service.isMicTesting()).toBe(false);
     expect(service.getMicLevel()).toBe(0);
+  });
+
+  // ─── New tests for audit fixes ───────────────────────────────────────────────
+
+  it("should clear chunk arrays in cleanup() to prevent memory leaks", async () => {
+    const service = DualRecordService.getInstance();
+    await service.startRecording({ screen: true, webcam: true, audio: true });
+    await service.stopRecording();
+
+    // After stopRecording (which calls cleanup), chunks should be empty
+    expect((service as any).screenChunks).toHaveLength(0);
+    expect((service as any).webcamChunks).toHaveLength(0);
+  });
+
+  it("should reject startRecording when all sources are disabled", async () => {
+    const service = DualRecordService.getInstance();
+    await expect(
+      service.startRecording({ screen: false, webcam: false, audio: false })
+    ).rejects.toThrow("At least one recording source must be enabled");
+  });
+
+  it("should attach onerror handler to MediaRecorders", async () => {
+    const service = DualRecordService.getInstance();
+    await service.startRecording({ screen: true, webcam: true, audio: true });
+
+    const screenRecorder = (service as any).screenRecorder as MockMediaRecorder;
+    const webcamRecorder = (service as any).webcamRecorder as MockMediaRecorder;
+
+    expect(screenRecorder.onerror).toBeDefined();
+    expect(webcamRecorder.onerror).toBeDefined();
+  });
+
+  it("should attach onended listener to screen video track", async () => {
+    const service = DualRecordService.getInstance();
+    await service.startRecording({ screen: true, webcam: false, audio: false });
+
+    // getDisplayMedia returns a MockMediaStream with a MockMediaStreamTrack
+    // Verify addEventListener was called with "ended"
+    const screenStream = service.getScreenStream();
+    const videoTrack = screenStream?.getVideoTracks()[0];
+    expect(videoTrack?.addEventListener).toHaveBeenCalledWith("ended", expect.any(Function));
+  });
+
+  it("should fire onRecordingStopped callback when screen track ends", async () => {
+    const service = DualRecordService.getInstance();
+    const onStopped = vi.fn();
+    
+    await service.startRecording(
+      { screen: true, webcam: false, audio: false },
+      onStopped
+    );
+
+    // Simulate screen track ending
+    const screenStream = service.getScreenStream();
+    const videoTrack = screenStream?.getVideoTracks()[0];
+    const endedCall = (videoTrack?.addEventListener as any).mock.calls.find(
+      (call: any[]) => call[0] === "ended"
+    );
+    expect(endedCall).toBeDefined();
+
+    // Fire the ended callback
+    endedCall[1]();
+    expect(onStopped).toHaveBeenCalledWith("track_ended", "Screen sharing was stopped");
+  });
+
+  it("should clear onRecordingStopped callback in cleanup", async () => {
+    const service = DualRecordService.getInstance();
+    const onStopped = vi.fn();
+    await service.startRecording(
+      { screen: true, webcam: false, audio: false },
+      onStopped
+    );
+
+    service.cleanup();
+    expect((service as any).onRecordingStopped).toBeNull();
   });
 });

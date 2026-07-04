@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import { Film, Image as ImageIcon, Plus, Trash2, Pencil, MoreHorizontal, Clock, ChevronRight, Sparkles, Settings, Activity, Video, StopCircle } from "lucide-react";
+import { Film, Image as ImageIcon, Plus, Trash2, Pencil, MoreHorizontal, Clock, ChevronRight, Sparkles, Settings, Activity, Video } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { useProjectStore } from "@/store/projectStore";
@@ -57,7 +57,7 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
   });
   // Recording active state lives in the global store so App.tsx can render the
   // floating widget overlay even after navigating away from LaunchScreen.
-  const { isRecording, setIsRecording, seconds, setSeconds, setHasWebcam, reset: resetRecording } = useRecordingStore();
+  const { isRecording, setIsRecording, seconds, setSeconds, setHasWebcam, setRecordingError, reset: resetRecording } = useRecordingStore();
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const previewScreenVideoRef = useRef<HTMLVideoElement>(null);
@@ -66,6 +66,8 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
   const [audioDevices, setAudioDevices] = useState<{ deviceId: string; label: string }[]>([]);
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string>("");
   const [micLevel, setMicLevel] = useState<number>(0);
+  const [hasCameraHardware, setHasCameraHardware] = useState<boolean>(true);
+  const [cameraNotice, setCameraNotice] = useState<string | null>(null);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -77,24 +79,37 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
     };
   }, []);
 
-  // Enumerate audio input devices when recording modal is opened
+  // Clean up timer when recording stops externally (screen track ended / recorder error)
+  useEffect(() => {
+    if (!isRecording && timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, [isRecording]);
+
+  // Enumerate audio and video input devices when recording modal is opened
   useEffect(() => {
     if (!isRecordOpen) return;
 
     const updateDevices = async () => {
       try {
-        const devices = await DualRecordService.getInstance().enumerateAudioDevices();
-        setAudioDevices(devices);
-        if (devices.length > 0) {
+        const audioDevs = await DualRecordService.getInstance().enumerateAudioDevices();
+        const videoDevs = await DualRecordService.getInstance().enumerateVideoDevices();
+        setAudioDevices(audioDevs);
+
+        const hasCam = videoDevs.length > 0;
+        setHasCameraHardware(hasCam);
+
+        if (audioDevs.length > 0) {
           setSelectedAudioDeviceId((prev) => {
-            if (prev && devices.some((d) => d.deviceId === prev)) return prev;
-            return devices[0].deviceId;
+            if (prev && audioDevs.some((d) => d.deviceId === prev)) return prev;
+            return audioDevs[0].deviceId;
           });
         } else {
           setSelectedAudioDeviceId("");
         }
       } catch (err) {
-        console.error("[LaunchScreen] Enumerate audio devices failed:", err);
+        console.error("[LaunchScreen] Enumerate devices failed:", err);
       }
     };
 
@@ -117,6 +132,7 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
     DualRecordService.getInstance().stopScreenPreview();
     DualRecordService.getInstance().stopMicTest();
     setPreviewError(null);
+    setCameraNotice(null);
     setMicLevel(0);
 
     let animationFrameId: number;
@@ -125,19 +141,24 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
     const setupPreviews = async () => {
       try {
         // 1. Initialize camera/microphone preview stream
-        const stream = await DualRecordService.getInstance().startPreview(
+        const { stream, cameraError } = await DualRecordService.getInstance().startPreview(
           { webcam: recordOptions.webcam, audio: recordOptions.audio },
           selectedAudioDeviceId || undefined
         );
 
         if (!active) return;
 
-        if (previewVideoRef.current) {
+        if (cameraError) {
+          setCameraNotice(cameraError);
+          setRecordOptions((prev) => ({ ...prev, webcam: false }));
+        }
+
+        if (previewVideoRef.current && stream) {
           previewVideoRef.current.srcObject = stream;
         }
 
-        // 2. Coordinated mic testing using the same preview stream (sequential to prevent concurrent getUserMedia hardware lock)
-        if (recordOptions.audio) {
+        // 2. Coordinated mic testing using the preview stream
+        if (recordOptions.audio && stream) {
           await DualRecordService.getInstance().startMicTest(selectedAudioDeviceId);
           if (!active) return;
 
@@ -148,9 +169,9 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
           };
           pollLevel();
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("[LaunchScreen] Camera/microphone setup failed:", err);
-        setPreviewError("Could not access camera or microphone. Check System Preferences → Privacy.");
+        setPreviewError(err?.message || "Could not access camera or microphone. Check System Preferences → Privacy.");
       }
     };
 
@@ -201,11 +222,18 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
       setHasWebcam(recordOptions.webcam);
 
       // 1. Start recording streams first (must be called within the user gesture callback stack)
-      await DualRecordService.getInstance().startRecording({
-        ...recordOptions,
-        screenType: recordOptions.screenType === "any" ? undefined : recordOptions.screenType,
-        audioDeviceId: selectedAudioDeviceId || undefined,
-      });
+      await DualRecordService.getInstance().startRecording(
+        {
+          ...recordOptions,
+          screenType: recordOptions.screenType === "any" ? undefined : recordOptions.screenType,
+          audioDeviceId: selectedAudioDeviceId || undefined,
+        },
+        // Callback when recording is stopped externally (OS "Stop Sharing", recorder error)
+        (reason, error) => {
+          console.warn(`[LaunchScreen] Recording stopped externally: ${reason}`, error);
+          setRecordingError(error || "Recording stopped unexpectedly");
+        }
+      );
 
       // Detach preview stream from modal video element — App-level widget will re-attach it
       if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
@@ -233,34 +261,9 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
     }
   };
 
-  const stopCapture = async () => {
-    try {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-      const { filePaths } = await DualRecordService.getInstance().stopRecording();
-      resetRecording();
-      setIsRecordOpen(false);
-      if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
-
-      if (isTauri) {
-        try {
-          const { getCurrentWindow } = await import("@tauri-apps/api/window");
-          const { LogicalSize } = await import("@tauri-apps/api/dpi");
-          const win = getCurrentWindow();
-          await win.setMinSize(new LogicalSize(1100, 720));
-          await win.setSize(new LogicalSize(1100, 720));
-          await win.setAlwaysOnTop(false);
-        } catch (winErr) {
-          console.error("[LaunchScreen] Failed to restore window size:", winErr);
-        }
-      }
-
-      const { defaultFrameRate } = useSettingsStore.getState();
-      onProjectCreate("Screen Recording Project", "16:9", defaultFrameRate, filePaths);
-    } catch (err: any) {
-      console.error("[LaunchScreen] Stop recording failed:", err);
-      setPreviewError(`Failed to save recording: ${err?.message || err || "Unknown error"}`);
-    }
-  };
+  // stopCapture is handled by FloatingWidget (App.tsx renders FloatingWidget
+  // when isRecording is true, replacing LaunchScreen entirely).
+  // See FloatingWidget.handleStop for the actual stop logic.
 
 
 
@@ -755,6 +758,14 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
                 </div>
               )}
 
+              {/* Camera notice banner */}
+              {cameraNotice && (
+                <div className="absolute top-2 left-2 right-2 z-20 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] px-3 py-1.5 rounded-lg flex items-center justify-between backdrop-blur-sm">
+                  <span>📷 {cameraNotice}</span>
+                  <button onClick={() => setCameraNotice(null)} className="text-amber-400 hover:text-amber-200">✕</button>
+                </div>
+              )}
+
               {/* Error banner */}
               {previewError && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-8 bg-black/80">
@@ -780,11 +791,15 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
               ] as const).map(({ key, label, icon }) => (
                 <label
                   key={key}
-                  className={`flex flex-col items-center gap-2 p-3 rounded-xl border cursor-pointer select-none transition-all ${
+                  className={`flex flex-col items-center gap-2 p-3 rounded-xl border select-none transition-all ${
                     recordOptions[key]
                       ? "bg-accent/10 border-accent/40 text-white"
                       : "bg-white/4 border-white/8 text-slate-400 opacity-60"
-                  } ${isRecording ? "pointer-events-none" : "hover:bg-white/8"}`}
+                  } ${
+                    isRecording
+                      ? "opacity-40 cursor-not-allowed pointer-events-none"
+                      : "cursor-pointer hover:bg-white/8"
+                  }`}
                 >
                   <input
                     type="checkbox"
@@ -811,8 +826,8 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
                   className="w-full bg-[#0d0d15] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-accent/40 cursor-pointer"
                 >
                   <option value="any">Standard System Picker (Let me choose)</option>
-                  <option value="entire">Widescreen Entire Display</option>
-                  <option value="window">Single Application Window</option>
+                  <option value="entire">Prefer Entire Display</option>
+                  <option value="window">Prefer Application Window</option>
                 </select>
               </div>
             )}
@@ -861,26 +876,23 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
 
             {/* CTA */}
             <div className="pt-1">
-              {!isRecording ? (
-                <button
-                  onClick={startCapture}
-                  className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-bold text-sm flex items-center justify-center gap-2.5 transition-colors shadow-lg shadow-red-900/30"
-                >
-                  <span className="w-2.5 h-2.5 rounded-full bg-white" />
-                  Start Capture
-                </button>
+              <button
+                onClick={startCapture}
+                disabled={!recordOptions.screen && !recordOptions.webcam && !recordOptions.audio}
+                className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-bold text-sm flex items-center justify-center gap-2.5 transition-colors shadow-lg shadow-red-900/30 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-600"
+              >
+                <span className="w-2.5 h-2.5 rounded-full bg-white" />
+                Start Capture
+              </button>
+              {!recordOptions.screen && !recordOptions.webcam && !recordOptions.audio ? (
+                <p className="text-center text-xs text-amber-400/80 mt-3">
+                  Enable at least one source to start recording.
+                </p>
               ) : (
-                <button
-                  onClick={stopCapture}
-                  className="w-full py-3.5 rounded-xl bg-slate-100 hover:bg-white text-slate-900 font-bold text-sm flex items-center justify-center gap-2.5 transition-colors"
-                >
-                  <StopCircle className="w-5 h-5 text-red-600" />
-                  Stop & Open in Editor
-                </button>
+                <p className="text-center text-xs text-slate-500 mt-3">
+                  The recording will automatically open as a new project in the editor.
+                </p>
               )}
-              <p className="text-center text-xs text-slate-500 mt-3">
-                The recording will automatically open as a new project in the editor.
-              </p>
             </div>
           </div>
         </div>

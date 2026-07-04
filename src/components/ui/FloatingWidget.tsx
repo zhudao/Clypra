@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { StopCircle } from "lucide-react";
+import { StopCircle, AlertTriangle } from "lucide-react";
 import { useRecordingStore } from "@/store/recordingStore";
 import { DualRecordService } from "@/services/dualRecordService";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -12,7 +12,7 @@ interface FloatingWidgetProps {
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate }) => {
-  const { seconds, setSeconds, hasWebcam, setPreviewRecording, setIsRecording } = useRecordingStore();
+  const { seconds, setSeconds, hasWebcam, setPreviewRecording, setIsRecording, recordingError, setRecordingError } = useRecordingStore();
   const videoRef = useRef<HTMLVideoElement>(null);
 
   // Timer effect
@@ -36,8 +36,11 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
           clonedStream.getTracks().forEach((t) => t.stop());
         }
 
-        // WebKit workaround: Clone the stream to force re-binding the video tracks
-        // to this new element in the Safari/Tauri webview sandbox.
+        // WebKit / WKWebView workaround: Clone the stream to force re-binding
+        // the video tracks to this new <video> element. In Tauri's Safari-based
+        // webview, assigning the same MediaStream to a second element doesn't
+        // reliably start playback. Cloning creates a new internal binding.
+        // TODO: Remove when WebKit fixes MediaStream element re-attachment.
         clonedStream = stream.clone();
         videoRef.current.srcObject = clonedStream;
         videoRef.current.play().catch((err) => {
@@ -60,6 +63,42 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
       }
     };
   }, [hasWebcam]);
+
+  // Auto-recover when recording is externally stopped (screen track ended / recorder error)
+  useEffect(() => {
+    if (!recordingError) return;
+
+    // Give the user a moment to see the error, then auto-stop
+    const timeout = setTimeout(async () => {
+      try {
+        const { filePaths } = await DualRecordService.getInstance().stopRecording();
+        if (isTauri) {
+          try {
+            const { getCurrentWindow } = await import("@tauri-apps/api/window");
+            const { LogicalSize } = await import("@tauri-apps/api/dpi");
+            const win = getCurrentWindow();
+            await win.setMinSize(new LogicalSize(1100, 720));
+            await win.setSize(new LogicalSize(1100, 720));
+            await win.setAlwaysOnTop(false);
+          } catch (winErr) {
+            console.error("[FloatingWidget] Failed to restore window size:", winErr);
+          }
+        }
+        if (filePaths.length > 0) {
+          setPreviewRecording({ filePaths });
+        }
+      } catch {
+        // stopRecording may fail if already cleaned up — that's fine
+        DualRecordService.getInstance().cleanup();
+      } finally {
+        setSeconds(0);
+        setIsRecording(false);
+        setRecordingError(null);
+      }
+    }, 2000);
+
+    return () => clearTimeout(timeout);
+  }, [recordingError, setPreviewRecording, setIsRecording, setSeconds, setRecordingError]);
 
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60).toString().padStart(2, "0");
@@ -85,9 +124,27 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
       }
 
       setPreviewRecording({ filePaths });
+      setSeconds(0);
       setIsRecording(false);
     } catch (err: any) {
       console.error("[FloatingWidget] Stop recording failed:", err);
+      // CRITICAL: Always exit the floating widget — don't trap the user
+      DualRecordService.getInstance().cleanup();
+      setSeconds(0);
+      setIsRecording(false);
+
+      if (isTauri) {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          const { LogicalSize } = await import("@tauri-apps/api/dpi");
+          const win = getCurrentWindow();
+          await win.setMinSize(new LogicalSize(1100, 720));
+          await win.setSize(new LogicalSize(1100, 720));
+          await win.setAlwaysOnTop(false);
+        } catch {
+          // Best effort
+        }
+      }
     }
   };
 
@@ -100,6 +157,15 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
       }}
       data-tauri-drag-region
     >
+      {/* Error Banner */}
+      {recordingError && (
+        <div className="absolute top-0 left-0 right-0 z-30 bg-red-600/95 backdrop-blur-sm text-white text-[11px] font-semibold px-3 py-2 flex items-center gap-2 animate-fade-in">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          <span className="truncate">{recordingError}</span>
+          <span className="text-white/70 ml-auto text-[10px] flex-shrink-0">Auto-saving…</span>
+        </div>
+      )}
+
       {/* Top Drag Indicator Area */}
       <div
         data-tauri-drag-region
@@ -109,7 +175,7 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
       </div>
 
       {/* Circular Facecam Bubble */}
-      {hasWebcam ? (
+      {hasWebcam && DualRecordService.getInstance().hasWebcamVideoTrack() ? (
         <div className="relative w-48 h-48 rounded-full overflow-hidden border-2 border-accent/40 shadow-xl bg-black">
           <video
             ref={videoRef}
@@ -143,7 +209,8 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onProjectCreate 
 
         <button
           onClick={handleStop}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 active:bg-red-700 text-white text-xs font-bold transition-all shadow-md shadow-red-900/30"
+          disabled={!!recordingError}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 active:bg-red-700 text-white text-xs font-bold transition-all shadow-md shadow-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <StopCircle className="w-4 h-4" />
           Stop Capture

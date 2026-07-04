@@ -238,126 +238,99 @@ export async function resetAllProjectState(options: ResetOptions = {}): Promise<
     }
   }
 
-  // Reset TemplateStore (SC-BUG-002 fix)
-  try {
-    const { useTemplateStore } = await import("@/features/text-templates/templateStore");
-    useTemplateStore.getState().reset();
-    resetSubsystems.push("TemplateStore");
-    console.log("  ✅ TemplateStore reset");
-  } catch (error) {
-    errors.push({ subsystem: "TemplateStore", error: error as Error });
-    console.error("  ❌ TemplateStore reset failed:", error);
-  }
-
-  // Reset FavoritesStore (SC-HIDDEN-002 / Q2 fix)
-  try {
-    const { useFavoritesStore } = await import("@/store/favoritesStore");
-    useFavoritesStore.setState({ downloadingIds: [] });
-    resetSubsystems.push("FavoritesStore");
-    console.log("  ✅ FavoritesStore active downloads reset");
-  } catch (error) {
-    errors.push({ subsystem: "FavoritesStore", error: error as Error });
-    console.error("  ❌ FavoritesStore reset failed:", error);
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════════
-  // PHASE 5: Reset Monitoring/Debugging
+  // PHASES 4b–6: Independent store / cache resets — run concurrently.
+  // These modules have no ordering dependency on each other, so we batch all
+  // their dynamic imports into a single Promise.all to avoid paying N × import
+  // latency serially (which caused test timeouts in Vitest's module runner).
   // ═══════════════════════════════════════════════════════════════════════════════
 
-  if (opts.resetMonitoring) {
-    try {
-      // Reset performance monitor (clears aggregated stats)
-      performanceMonitor.reset();
+  await Promise.all([
+    // TemplateStore (SC-BUG-002 fix)
+    import("@/features/text-templates/templateStore").then(({ useTemplateStore }) => {
+      useTemplateStore.getState().reset();
+      resetSubsystems.push("TemplateStore");
+      console.log("  ✅ TemplateStore reset");
+    }).catch((error) => {
+      errors.push({ subsystem: "TemplateStore", error: error as Error });
+      console.error("  ❌ TemplateStore reset failed:", error);
+    }),
 
-      // Clear preview media sync clip filter cache (prevents stale cache across projects)
-      const { clearClipFilterCache } = await import("@/components/editor/preview/previewMediaSync");
-      clearClipFilterCache();
+    // FavoritesStore (SC-HIDDEN-002 / Q2 fix)
+    import("@/store/favoritesStore").then(({ useFavoritesStore }) => {
+      useFavoritesStore.setState({ downloadingIds: [] });
+      resetSubsystems.push("FavoritesStore");
+      console.log("  ✅ FavoritesStore active downloads reset");
+    }).catch((error) => {
+      errors.push({ subsystem: "FavoritesStore", error: error as Error });
+      console.error("  ❌ FavoritesStore reset failed:", error);
+    }),
 
-      resetSubsystems.push("PerformanceMonitor");
-      console.log("  ✅ PerformanceMonitor reset");
-    } catch (error) {
-      errors.push({ subsystem: "PerformanceMonitor", error: error as Error });
-      console.error("  ❌ PerformanceMonitor reset failed:", error);
-    }
-  }
+    // PerformanceMonitor + previewMediaSync filter cache
+    opts.resetMonitoring
+      ? import("@/components/editor/preview/previewMediaSync").then(({ clearClipFilterCache }) => {
+          performanceMonitor.reset();
+          clearClipFilterCache();
+          resetSubsystems.push("PerformanceMonitor");
+          console.log("  ✅ PerformanceMonitor reset");
+        }).catch((error) => {
+          errors.push({ subsystem: "PerformanceMonitor", error: error as Error });
+          console.error("  ❌ PerformanceMonitor reset failed:", error);
+        })
+      : Promise.resolve(),
 
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // PHASE 5b: Reset Resource Cache (BUG-003 fix)
-  // ═══════════════════════════════════════════════════════════════════════════════
+    // ResourceCache (BUG-003 fix)
+    import("../resources/ResourceCache").then(({ resetResourceCache }) => {
+      resetResourceCache();
+      resetSubsystems.push("ResourceCache");
+      console.log("  ✅ ResourceCache reset (ImageBitmaps released)");
+    }).catch((error) => {
+      errors.push({ subsystem: "ResourceCache", error: error as Error });
+      console.error("  ❌ ResourceCache reset failed:", error);
+    }),
 
-  try {
-    const { resetResourceCache } = await import("../resources/ResourceCache");
-    resetResourceCache();
+    // BodyMaskCache (SC-BUG-004 fix)
+    import("@/features/body-effects/segmentation/maskCache").then(({ bodyMaskCache }) => {
+      bodyMaskCache.clear();
+      resetSubsystems.push("BodyMaskCache");
+      console.log("  ✅ BodyMaskCache cleared");
+    }).catch((error) => {
+      errors.push({ subsystem: "BodyMaskCache", error: error as Error });
+      console.error("  ❌ BodyMaskCache clear failed:", error);
+    }),
 
-    resetSubsystems.push("ResourceCache");
-    console.log("  ✅ ResourceCache reset (ImageBitmaps released)");
-  } catch (error) {
-    errors.push({ subsystem: "ResourceCache", error: error as Error });
-    console.error("  ❌ ResourceCache reset failed:", error);
-  }
+    // EvaluationCache (PREV-BUG-002 fix) — prevents cross-project scene contamination
+    import("../evaluation/evaluator").then(({ clearEvaluationCache }) => {
+      clearEvaluationCache();
+      resetSubsystems.push("EvaluationCache");
+      console.log("  ✅ EvaluationCache cleared (prevents cross-project scene contamination)");
+    }).catch((error) => {
+      errors.push({ subsystem: "EvaluationCache", error: error as Error });
+      console.error("  ❌ EvaluationCache clear failed:", error);
+    }),
 
-  // Clear BodyMaskCache (SC-BUG-004 fix)
-  try {
-    const { bodyMaskCache } = await import("@/features/body-effects/segmentation/maskCache");
-    bodyMaskCache.clear();
-    resetSubsystems.push("BodyMaskCache");
-    console.log("  ✅ BodyMaskCache cleared");
-  } catch (error) {
-    errors.push({ subsystem: "BodyMaskCache", error: error as Error });
-    console.error("  ❌ BodyMaskCache clear failed:", error);
-  }
+    // LottieRenderCache (PREV-BUG-003 fix) — hidden DOM containers leak across projects
+    import("../render/rasterizer").then(({ clearLottieRenderCache }) => {
+      clearLottieRenderCache();
+      resetSubsystems.push("LottieRenderCache");
+      console.log("  ✅ LottieRenderCache cleared (DOM nodes released)");
+    }).catch((error) => {
+      errors.push({ subsystem: "LottieRenderCache", error: error as Error });
+      console.error("  ❌ LottieRenderCache clear failed:", error);
+    }),
 
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // PHASE 5c: Clear Evaluation Cache (PREV-BUG-002 fix)
-  // The EvaluationCache is a module-level singleton that caches EvaluatedScene
-  // objects. If not cleared on project switch, stale scenes from Project A can
-  // be served for Project B when cache keys collide (same epoch + time + hash).
-  // ═══════════════════════════════════════════════════════════════════════════════
-
-  try {
-    const { clearEvaluationCache } = await import("../evaluation/evaluator");
-    clearEvaluationCache();
-
-    resetSubsystems.push("EvaluationCache");
-    console.log("  ✅ EvaluationCache cleared (prevents cross-project scene contamination)");
-  } catch (error) {
-    errors.push({ subsystem: "EvaluationCache", error: error as Error });
-    console.error("  ❌ EvaluationCache clear failed:", error);
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // PHASE 5d: Clear Lottie Render Cache (PREV-BUG-003 fix)
-  // The lottieRenderCache holds Lottie animation instances with hidden DOM
-  // containers appended to document.body. Without clearing, they leak across
-  // projects and can display wrong sticker content if clipIds collide.
-  // ═══════════════════════════════════════════════════════════════════════════════
-
-  try {
-    const { clearLottieRenderCache } = await import("../render/rasterizer");
-    clearLottieRenderCache();
-
-    resetSubsystems.push("LottieRenderCache");
-    console.log("  ✅ LottieRenderCache cleared (DOM nodes released)");
-  } catch (error) {
-    errors.push({ subsystem: "LottieRenderCache", error: error as Error });
-    console.error("  ❌ LottieRenderCache clear failed:", error);
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // PHASE 6: Flush GPU Texture Cache (FINDING-009 / CONTAMINATION-004)
-  // ═══════════════════════════════════════════════════════════════════════════════
-
-  if (opts.resetGPUCache) {
-    try {
-      const { globalGPUCache } = await import("@/lib/cache/globalGPUCache");
-      const evicted = globalGPUCache.clearAllTextures();
-      resetSubsystems.push("GlobalGPUCache");
-      console.log(`  ✅ GlobalGPUCache flushed (${evicted} textures evicted)`);
-    } catch (error) {
-      errors.push({ subsystem: "GlobalGPUCache", error: error as Error });
-      console.error("  ❌ GlobalGPUCache flush failed:", error);
-    }
-  }
+    // GlobalGPUCache (FINDING-009 / CONTAMINATION-004)
+    opts.resetGPUCache
+      ? import("@/lib/cache/globalGPUCache").then(({ globalGPUCache }) => {
+          const evicted = globalGPUCache.clearAllTextures();
+          resetSubsystems.push("GlobalGPUCache");
+          console.log(`  ✅ GlobalGPUCache flushed (${evicted} textures evicted)`);
+        }).catch((error) => {
+          errors.push({ subsystem: "GlobalGPUCache", error: error as Error });
+          console.error("  ❌ GlobalGPUCache flush failed:", error);
+        })
+      : Promise.resolve(),
+  ]);
 
   // ═══════════════════════════════════════════════════════════════════════════════
   // Summary
