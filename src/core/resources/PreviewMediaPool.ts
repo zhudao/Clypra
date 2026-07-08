@@ -103,15 +103,15 @@ function findPrimaryVideoClip(videoClips: Clip[], tracks: Array<{ id: string; ty
   if (videoClips.length === 0) return null;
   if (videoClips.length === 1) return videoClips[0];
 
-  // Build track index map (lower index = lower on timeline = primary)
+  // Build track index map (higher index = lower on timeline = primary)
   const trackIndex = new Map<string, number>();
   tracks.forEach((t, i) => trackIndex.set(t.id, i));
 
-  // Sort by track index ascending, then by startTime ascending
+  // Sort by track index descending, then by startTime ascending
   const sorted = [...videoClips].sort((a, b) => {
-    const aIdx = trackIndex.get(a.trackId) ?? Infinity;
-    const bIdx = trackIndex.get(b.trackId) ?? Infinity;
-    if (aIdx !== bIdx) return aIdx - bIdx;
+    const aIdx = trackIndex.get(a.trackId) ?? -1;
+    const bIdx = trackIndex.get(b.trackId) ?? -1;
+    if (aIdx !== bIdx) return bIdx - aIdx;
     return a.startTime - b.startTime;
   });
 
@@ -448,7 +448,10 @@ export class PreviewMediaPool {
           const primaryVideoClip = findPrimaryVideoClip(activeVisibleVideoClips, tracks);
           const isPrimaryAudibleVideo = primaryVideoClip?.id === clip.id;
 
-          this.updateVideoElement(managed, clip, syncState, tracks, isPrimaryAudibleVideo, isTrackMuted);
+          // FINDING-025: Pass active video clip count for multi-clip audio-friendly sync
+          const activeVideoClipCount = activeVisibleVideoClips.length;
+
+          this.updateVideoElement(managed, clip, syncState, tracks, isPrimaryAudibleVideo, isTrackMuted, activeVideoClipCount);
         } else {
           // Inactive element: pause but don't dispose
           // CRITICAL: Also update audio routing so element is ready when it becomes active
@@ -923,14 +926,51 @@ export class PreviewMediaPool {
       // ────────────────────────────────────────────────────────────────────
     };
 
-    // Wait for metadata before marking ready
-    video.addEventListener(
-      "loadedmetadata",
-      () => {
-        managed.ready = true;
-      },
-      { once: true },
-    );
+    // Function to capture dimensions and store on clip
+    const captureDimensions = () => {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (w && h) {
+        import("../../store/timelineStore")
+          .then(({ useTimelineStore }) => {
+            const timelineStore = useTimelineStore.getState();
+            const existingClip = timelineStore.clips.find((c) => c.id === clipId);
+            if (existingClip) {
+              const currentConform = existingClip.conform;
+              if (!currentConform || !currentConform.sourceWidth || !currentConform.sourceHeight) {
+                timelineStore.updateClip(clipId, {
+                  conform: {
+                    mode: currentConform?.mode || "fit",
+                    sourceWidth: w,
+                    sourceHeight: h,
+                    userScale: currentConform?.userScale ?? 1,
+                    userOffsetX: currentConform?.userOffsetX ?? 0,
+                    userOffsetY: currentConform?.userOffsetY ?? 0,
+                  },
+                });
+              }
+            }
+          })
+          .catch((err) => {
+            console.error("[PreviewMediaPool] Failed to update clip conform:", err);
+          });
+      }
+    };
+
+    // Check immediately if already loaded
+    if (video.readyState >= 1 && video.videoWidth && video.videoHeight) {
+      managed.ready = true;
+      captureDimensions();
+    } else {
+      video.addEventListener(
+        "loadedmetadata",
+        () => {
+          managed.ready = true;
+          captureDimensions();
+        },
+        { once: true },
+      );
+    }
 
     video.addEventListener(
       "loadeddata",
@@ -958,20 +998,17 @@ export class PreviewMediaPool {
       { once: true },
     );
 
-    video.addEventListener(
-      "seeked",
-      () => {
-        if (video.paused) {
-          import("../../store/timelineStore")
-            .then(({ useTimelineStore }) => {
-              useTimelineStore.getState().incrementEpoch();
-            })
-            .catch((err) => {
-              console.error("[PreviewMediaPool] Failed to import useTimelineStore on seeked", err);
-            });
-        }
-      },
-    );
+    video.addEventListener("seeked", () => {
+      if (video.paused) {
+        import("../../store/timelineStore")
+          .then(({ useTimelineStore }) => {
+            useTimelineStore.getState().incrementEpoch();
+          })
+          .catch((err) => {
+            console.error("[PreviewMediaPool] Failed to import useTimelineStore on seeked", err);
+          });
+      }
+    });
 
     video.src = sourcePath;
 
@@ -1023,7 +1060,7 @@ export class PreviewMediaPool {
     this.videoCache.delete(key);
   }
 
-  private updateVideoElement(managed: ManagedVideo, clip: Clip, syncState: PreviewSyncState, tracks: Array<{ id: string; type: string }>, isPrimaryAudibleVideo: boolean, isTrackMuted: boolean): void {
+  private updateVideoElement(managed: ManagedVideo, clip: Clip, syncState: PreviewSyncState, tracks: Array<{ id: string; type: string }>, isPrimaryAudibleVideo: boolean, isTrackMuted: boolean, activeVideoClipCount: number = 1): void {
     const video = managed.element;
     const sourceTime = getClipSourceTime(clip, syncState.time, syncState.frameRate);
 
@@ -1031,8 +1068,8 @@ export class PreviewMediaPool {
     const clipVolume = clip.volume ?? 1.0;
     const combinedVolume = (syncState.volume / 100) * clipVolume;
 
-    // Only one primary video clip is audible; others stay muted.
-    const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || !isPrimaryAudibleVideo || clipVolume === 0;
+    // Allow audio from all active visible video tracks unless explicitly muted
+    const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || clipVolume === 0;
     const targetVolume = shouldMute ? 0 : Math.max(0, Math.min(1, combinedVolume));
 
     // ─── FINDING-022: Conditional property updates ─────────────────────────────
@@ -1099,11 +1136,11 @@ export class PreviewMediaPool {
         managed.lastHardSeekAtMs = now;
       } else {
         // Automatic sync: rate-limited seeks to prevent audio glitches
-        // Professional policy:
-        // - Audible stream: avoid frequent seeks (they cause audible glitches)
-        // - Silent decode streams: keep tighter sync for visual fidelity
-        const hardSeekThreshold = isPrimaryAudibleVideo ? 1.0 : 0.5;
-        const minSeekIntervalMs = isPrimaryAudibleVideo ? 1500 : 400;
+        // FINDING-025: Use audio-friendly sync for ALL video clips when multiple are active
+        // This prevents audio dropout caused by aggressive seeking on overlay clips
+        const useAudioFriendlySync = isPrimaryAudibleVideo || activeVideoClipCount > 1;
+        const hardSeekThreshold = useAudioFriendlySync ? 1.0 : 0.5;
+        const minSeekIntervalMs = useAudioFriendlySync ? 1500 : 400;
 
         if (drift > hardSeekThreshold && now - managed.lastHardSeekAtMs > minSeekIntervalMs) {
           video.currentTime = clampedTime;
