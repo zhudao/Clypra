@@ -83,15 +83,112 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ selectedClip
       {/* Transform Section */}
       <PropertySection title="Transform" icon={<Move className="w-3.5 h-3.5" />}>
         <div className="space-y-3">
-          {/* Fit Mode (visual clips only) */}
+          {/* Conform Mode (visual clips only) */}
           {isVisualClip && (
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <PropertySelect label="Fit Mode" value={selectedClip.fitMode ?? "cover"} options={FIT_OPTIONS} onChange={(v) => handleApplyFit(v as ClipFitModeExtended)} />
+            <div className="space-y-3 border-b border-border/40 pb-3 mb-1">
+              <div className="flex items-end gap-2">
+                <div className="flex-1">
+                  <PropertySelect
+                    label="Conform Mode"
+                    value={selectedClip.conform?.mode ?? "fit"}
+                    options={[
+                      { value: "fit", label: "Fit" },
+                      { value: "fill", label: "Fill" },
+                      { value: "none", label: "None" },
+                    ]}
+                    onChange={(v) => {
+                      const existing = selectedClip.conform || {
+                        mode: "fit",
+                        sourceWidth: selectedClip.width || 0,
+                        sourceHeight: selectedClip.height || 0,
+                        userScale: 1,
+                        userOffsetX: 0,
+                        userOffsetY: 0,
+                      };
+                      handleUpdate("conform", { ...existing, mode: v as any });
+                    }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleUpdate("conform", {
+                      mode: "fit",
+                      sourceWidth: selectedClip.conform?.sourceWidth || selectedClip.width || 0,
+                      sourceHeight: selectedClip.conform?.sourceHeight || selectedClip.height || 0,
+                      userScale: 1,
+                      userOffsetX: 0,
+                      userOffsetY: 0,
+                    });
+                  }}
+                  className="px-2.5 py-1.5 text-[10px] font-medium bg-surface-raised border border-border/60 rounded-md text-text-muted hover:text-text-primary hover:bg-white/[0.06] transition-all active:scale-[0.97] cursor-pointer"
+                >
+                  Reset
+                </button>
               </div>
-              <button type="button" onClick={() => handleApplyFit(selectedClip.fitMode ?? "cover")} className="px-2.5 py-1.5 text-[10px] font-medium bg-surface-raised border border-border/60 rounded-md text-text-muted hover:text-text-primary hover:bg-white/[0.06] transition-all active:scale-[0.97] cursor-pointer">
-                Reset
-              </button>
+
+              {/* Conform Scale Slider */}
+              <PropertySlider
+                label="Conform Scale"
+                value={Math.round((selectedClip.conform?.userScale ?? 1) * 100)}
+                min={0}
+                max={400}
+                step={1}
+                suffix="%"
+                onChange={(v) => {
+                  const existing = selectedClip.conform || {
+                    mode: "fit",
+                    sourceWidth: selectedClip.width || 0,
+                    sourceHeight: selectedClip.height || 0,
+                    userScale: 1,
+                    userOffsetX: 0,
+                    userOffsetY: 0,
+                  };
+                  handleUpdate("conform", { ...existing, userScale: v / 100 });
+                }}
+              />
+
+              {/* Conform Offset X Slider */}
+              <PropertySlider
+                label="Conform Offset X"
+                value={Math.round(selectedClip.conform?.userOffsetX ?? 0)}
+                min={-1000}
+                max={1000}
+                step={1}
+                suffix="px"
+                onChange={(v) => {
+                  const existing = selectedClip.conform || {
+                    mode: "fit",
+                    sourceWidth: selectedClip.width || 0,
+                    sourceHeight: selectedClip.height || 0,
+                    userScale: 1,
+                    userOffsetX: 0,
+                    userOffsetY: 0,
+                  };
+                  handleUpdate("conform", { ...existing, userOffsetX: v });
+                }}
+              />
+
+              {/* Conform Offset Y Slider */}
+              <PropertySlider
+                label="Conform Offset Y"
+                value={Math.round(selectedClip.conform?.userOffsetY ?? 0)}
+                min={-1000}
+                max={1000}
+                step={1}
+                suffix="px"
+                onChange={(v) => {
+                  const existing = selectedClip.conform || {
+                    mode: "fit",
+                    sourceWidth: selectedClip.width || 0,
+                    sourceHeight: selectedClip.height || 0,
+                    userScale: 1,
+                    userOffsetX: 0,
+                    userOffsetY: 0,
+                  };
+                  handleUpdate("conform", { ...existing, userOffsetY: v });
+                }}
+              />
             </div>
           )}
 
