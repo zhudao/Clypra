@@ -211,7 +211,6 @@ export class RenderScheduler {
     if (!this._suspended) return;
     this._suspended = false;
     this._armIdleTimer();
-    if (import.meta.env.DEV) console.info("[RenderScheduler] Resumed.");
   }
 
   get isSuspended(): boolean {
