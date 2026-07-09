@@ -27,6 +27,7 @@ import { ContextMenu } from "@/components/ui/ContextMenu";
 import type { ContextMenuItem } from "@/components/ui/ContextMenu";
 import { useProjectStore } from "@/store/projectStore";
 import { Maximize2, Minimize2, RotateCcw } from "lucide-react";
+import { resolveConform } from "@clypra/engine";
 
 const SELECT_TRACE = import.meta.env.DEV;
 const traceSelect = (...args: unknown[]) => {
@@ -172,6 +173,36 @@ function mouseToCanvas(clientX: number, clientY: number, overlayRect: DOMRect, v
   // Step 2: Overlay-local → canvas (the overlay sits at displayOffset=(0,0)
   // relative to itself, so pass zero offset)
   return screenToCanvas(localX, localY, viewport, { width: canvasWidth, height: canvasHeight }, scale, { x: 0, y: 0 });
+}
+
+export function getUpdatedConformForClipBounds(
+  clip: Clip,
+  newX: number,
+  newY: number,
+  newWidth: number,
+  newHeight: number,
+  canvasWidth: number,
+  canvasHeight: number
+): any | undefined {
+  if (clip.conform && clip.conform.sourceWidth && clip.conform.sourceHeight) {
+    const baseConformed = resolveConform(
+      { ...clip.conform, userScale: 1, userOffsetX: 0, userOffsetY: 0 },
+      canvasWidth,
+      canvasHeight
+    );
+    if (baseConformed) {
+      const userScale = newWidth / baseConformed.width;
+      const userOffsetX = (newX + newWidth / 2) - canvasWidth / 2;
+      const userOffsetY = (newY + newHeight / 2) - canvasHeight / 2;
+      return {
+        ...clip.conform,
+        userScale,
+        userOffsetX,
+        userOffsetY,
+      };
+    }
+  }
+  return undefined;
 }
 
 export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth, canvasHeight, scale, viewport, displayOffset, displayWidth, displayHeight, currentTime, visible = true }) => {
@@ -415,6 +446,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
           width: selectedClip.width,
           height: selectedClip.height,
           rotation: selectedClip.rotation,
+          conform: selectedClip.conform ? { ...selectedClip.conform } : undefined,
         },
         startMousePos: canvasCoords,
         aspectRatioLocked: selectedClip.aspectRatioLocked ?? true,
@@ -792,6 +824,21 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
         }
       }
 
+      if (selectedClip.conform && selectedClip.conform.sourceWidth && selectedClip.conform.sourceHeight) {
+        const updatedConform = getUpdatedConformForClipBounds(
+          selectedClip,
+          newTransform.x ?? selectedClip.x,
+          newTransform.y ?? selectedClip.y,
+          newTransform.width ?? selectedClip.width,
+          newTransform.height ?? selectedClip.height,
+          canvasWidth,
+          canvasHeight
+        );
+        if (updatedConform) {
+          (newTransform as any).conform = updatedConform;
+        }
+      }
+
       traceSelect("transform mousemove", { clipId: activeTransform.clipId, handle: activeTransform.handle, x: newTransform.x, y: newTransform.y, width: newTransform.width, height: newTransform.height });
 
       // Optimistic preview: update clip for visual feedback during drag
@@ -850,13 +897,17 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       rotation: finalClip.rotation,
     };
 
+    if (finalClip.conform) {
+      newTransform.conform = { ...finalClip.conform };
+    }
+
     if (startFontSizeRef.current !== undefined) {
       oldTransform.fontSize = startFontSizeRef.current;
       newTransform.fontSize = (finalClip as any).fontSize;
     }
 
     // Only create command if something actually changed
-    const hasChanged = oldTransform.x !== newTransform.x || oldTransform.y !== newTransform.y || oldTransform.width !== newTransform.width || oldTransform.height !== newTransform.height || oldTransform.rotation !== newTransform.rotation || oldTransform.fontSize !== newTransform.fontSize;
+    const hasChanged = oldTransform.x !== newTransform.x || oldTransform.y !== newTransform.y || oldTransform.width !== newTransform.width || oldTransform.height !== newTransform.height || oldTransform.rotation !== newTransform.rotation || oldTransform.fontSize !== newTransform.fontSize || JSON.stringify(oldTransform.conform) !== JSON.stringify(newTransform.conform);
 
     if (hasChanged) {
       execute(new TransformClipCommand(activeTransform.clipId, oldTransform, newTransform));
@@ -883,6 +934,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       width: selectedClip.width,
       height: selectedClip.height,
       ...("fontSize" in selectedClip ? { fontSize: (selectedClip as any).fontSize } : {}),
+      ...(selectedClip.conform ? { conform: { ...selectedClip.conform } } : {}),
     };
 
     const canvasAspect = canvasWidth / canvasHeight;
@@ -911,6 +963,10 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       const sizeScale = newWidth / Math.max(1, selectedClip.width);
       const currentFontSize = (selectedClip as any).fontSize || 48;
       newVal.fontSize = Math.max(10, Math.min(1000, Math.round(currentFontSize * sizeScale)));
+    }
+
+    if (selectedClip.conform) {
+      newVal.conform = getUpdatedConformForClipBounds(selectedClip, newVal.x, newVal.y, newVal.width, newVal.height, canvasWidth, canvasHeight);
     }
 
     execute(new TransformClipCommand(selectedClip.id, oldVal, newVal));
@@ -924,6 +980,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       width: selectedClip.width,
       height: selectedClip.height,
       ...("fontSize" in selectedClip ? { fontSize: (selectedClip as any).fontSize } : {}),
+      ...(selectedClip.conform ? { conform: { ...selectedClip.conform } } : {}),
     };
 
     const canvasAspect = canvasWidth / canvasHeight;
@@ -952,6 +1009,10 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       const sizeScale = newWidth / Math.max(1, selectedClip.width);
       const currentFontSize = (selectedClip as any).fontSize || 48;
       newVal.fontSize = Math.max(10, Math.min(1000, Math.round(currentFontSize * sizeScale)));
+    }
+
+    if (selectedClip.conform) {
+      newVal.conform = getUpdatedConformForClipBounds(selectedClip, newVal.x, newVal.y, newVal.width, newVal.height, canvasWidth, canvasHeight);
     }
 
     execute(new TransformClipCommand(selectedClip.id, oldVal, newVal));
@@ -966,6 +1027,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       height: selectedClip.height,
       rotation: selectedClip.rotation,
       ...("fontSize" in selectedClip ? { fontSize: (selectedClip as any).fontSize } : {}),
+      ...(selectedClip.conform ? { conform: { ...selectedClip.conform } } : {}),
     };
 
     let newVal: Record<string, any> = {
@@ -990,6 +1052,15 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
         newVal.width = canvasWidth;
         newVal.height = canvasHeight;
       }
+    }
+
+    if (selectedClip.conform) {
+      newVal.conform = {
+        ...selectedClip.conform,
+        userScale: 1,
+        userOffsetX: 0,
+        userOffsetY: 0,
+      };
     }
 
     execute(new TransformClipCommand(selectedClip.id, oldVal, newVal));
