@@ -1126,11 +1126,13 @@ export class PreviewMediaPool {
       const isPostThrottling = drift >= 5.0;
 
       if (isPostThrottling) {
+        console.warn(`[PreviewMediaPool] Video post-throttling resync on clip ${clip.id}. Drift: ${drift.toFixed(3)}s. Seeking video to match: ${clampedTime.toFixed(3)}s`);
         // Very large drift - likely browser throttling during window blur
         // Force immediate resync and allow rapid subsequent seeks by setting timer to distant past
         video.currentTime = clampedTime;
         managed.lastHardSeekAtMs = now - 10000; // Set to 10s ago to allow immediate next seek
       } else if (isUserScrubbing) {
+        console.log(`[PreviewMediaPool] Video user scrubbing seek on clip ${clip.id}. Drift: ${drift.toFixed(3)}s. Seeking video to match: ${clampedTime.toFixed(3)}s`);
         // User scrubbing: immediate seek without rate limiting
         video.currentTime = clampedTime;
         managed.lastHardSeekAtMs = now;
@@ -1143,6 +1145,7 @@ export class PreviewMediaPool {
         const minSeekIntervalMs = useAudioFriendlySync ? 1500 : 400;
 
         if (drift > hardSeekThreshold && now - managed.lastHardSeekAtMs > minSeekIntervalMs) {
+          console.warn(`[PreviewMediaPool] Video drift corrected on clip ${clip.id}. Drift: ${drift.toFixed(3)}s (threshold: ${hardSeekThreshold}s). Seeking video to match: ${clampedTime.toFixed(3)}s`);
           video.currentTime = clampedTime;
           managed.lastHardSeekAtMs = now;
         }
@@ -1733,6 +1736,7 @@ export class PreviewMediaPool {
         return;
       }
       if (Math.abs(audio.currentTime - clampedTime) > 0.5) {
+        console.warn(`[PreviewMediaPool] Audio drift corrected on clip ${clip.id}. Drift: ${Math.abs(audio.currentTime - clampedTime).toFixed(3)}s. Seeking audio to match: ${clampedTime.toFixed(3)}s`);
         audio.currentTime = clampedTime;
       }
     } else {
