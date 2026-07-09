@@ -28,8 +28,6 @@ import { generateId, getCounter } from "@/lib/utils/id";
 import { detectGaps, createGap, insertGapWithRipple, removeGapWithRipple, resizeGap, packTrack, mergeAdjacentGaps, validateGap } from "@/lib/timeline/gapEngine";
 import { resolveTextClipStyleUpdate } from "@/lib/text/textClip";
 import { useUIStore } from "./uiStore";
-import { performanceMonitor } from "@/lib/debug/performanceMonitor";
-import { timelineStart, timelineEnd, timelineLog } from "@/lib/debug/timelinePerformance";
 import { useProjectStore } from "./projectStore";
 import { clampTimelinePixelsPerSecond, clampTimelineZoom, TIMELINE_PPS_PER_ZOOM, TIMELINE_ZOOM_DEFAULT } from "../lib/timeline/timelineZoom";
 import { getTimelineContentEnd, normalizeClipTiming } from "@/lib/timeline/timelineClip";
@@ -257,34 +255,20 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     hydrateFromProject: (payload) => {
-      timelineStart("hydrateFromProject", {
-        trackCount: payload?.tracks?.length || 0,
-        clipCount: payload?.clips?.length || 0,
-      });
-      performanceMonitor.startMeasure("timeline-hydrate", {
-        trackCount: payload?.tracks?.length || 0,
-        clipCount: payload?.clips?.length || 0,
-        transitionCount: payload?.transitions?.length || 0,
-      });
-
       const finalTracks = payload?.tracks ?? [];
       const finalClipsRaw = payload?.clips ?? [];
       const finalTransitions = payload?.transitions ?? [];
       const finalGaps = (payload as any)?.gaps ?? []; // Load gaps from project
 
       // Normalize clip timing with media asset data
-      performanceMonitor.startMeasure("timeline-normalize-clips");
       const mediaAssets = useProjectStore.getState().mediaAssets;
 
       const normalizedClips = finalClipsRaw.map((clip: Clip) => {
         const asset = mediaAssets.find((a) => a.id === clip.mediaId);
         return normalizeClipTiming(clip, asset);
       });
-      performanceMonitor.endMeasure("timeline-normalize-clips", {
-        clipCount: normalizedClips.length,
-      });
 
-      // BUG-002 fix: Reset mainVideoTrackId and re-derive from loaded tracks
+      //  fix: Reset mainVideoTrackId and re-derive from loaded tracks
       const newMainVideoTrackId = finalTracks.find((t) => t.type === "video")?.id ?? null;
 
       // Atomic state update - all or nothing
@@ -303,12 +287,6 @@ export const useTimelineStore = create<TimelineStore>(
         snapEnabled: true,
         _batchDepth: 0,
         _pendingEpochIncrement: false,
-      });
-
-      performanceMonitor.endMeasure("timeline-hydrate");
-      timelineEnd("hydrateFromProject", {
-        totalClips: normalizedClips.length,
-        totalTracks: finalTracks.length,
       });
 
       // If no gaps in project file (legacy), detect them once after state is loaded
@@ -364,7 +342,7 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     removeTrack: (trackId) => {
-      // TL-BUG-006 fix: Also cascade-remove gaps for the deleted track
+      // TL- fix: Also cascade-remove gaps for the deleted track
       set((state) => ({
         tracks: state.tracks.filter((t) => t.id !== trackId),
         clips: state.clips.filter((c) => c.trackId !== trackId),
@@ -410,10 +388,6 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     addClip: (clip) => {
-      // console.log(`🎬 [TIMELINE] Adding clip: ${clip.id}, kind: ${clip.kind}, mediaId: ${clip.mediaId}, trackId: ${clip.trackId}`);
-      timelineStart("addClip", { clipId: clip.id, trackId: clip.trackId });
-      performanceMonitor.startMeasure("timeline-addClip", { clipId: clip.id, trackId: clip.trackId });
-
       set((state) => {
         // Prevent adding duplicate clips with the same ID
         const existingClip = state.clips.find((c) => c.id === clip.id);
@@ -478,7 +452,7 @@ export const useTimelineStore = create<TimelineStore>(
             .catch(() => {});
         }
 
-        // TL-BUG-005 fix: Respect batch epoch gating (consistent with all other mutations)
+        // TL- fix: Respect batch epoch gating (consistent with all other mutations)
         const next: Partial<TimelineStore> = {
           clips: [...state.clips, safeClip],
         };
@@ -489,11 +463,6 @@ export const useTimelineStore = create<TimelineStore>(
         }
         return next;
       });
-
-      // console.log(`✅ [TIMELINE] Clip added successfully, epoch incremented to: ${get().epoch}`);
-
-      performanceMonitor.endMeasure("timeline-addClip");
-      timelineEnd("addClip");
 
       // Trigger background preload if the added clip has a templateId
       if (clip.templateId) {
@@ -512,8 +481,6 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     removeClip: (clipId) => {
-      timelineLog("removeClip", { clipId });
-
       const state = get();
       const clipToRemove = state.clips.find((c) => c.id === clipId);
       const removedTrackId = clipToRemove?.trackId;
@@ -545,10 +512,10 @@ export const useTimelineStore = create<TimelineStore>(
           // If no other clips on this track, remove the track
           if (!hasOtherClips) {
             tracksToKeep = state.tracks.filter((t) => t.id !== trackId);
-            // TL-BUG-006 fix: Also cascade-remove gaps for the auto-removed track
+            // TL- fix: Also cascade-remove gaps for the auto-removed track
             gapsToKeep = state.gaps.filter((g) => g.trackId !== trackId);
             removedTrackIdForCleanup = trackId;
-            // TL-BUG-007 fix: Re-derive mainVideoTrackId if the removed track was the main video track
+            // TL- fix: Re-derive mainVideoTrackId if the removed track was the main video track
             if (mainVideoTrackId === trackId) {
               mainVideoTrackId = tracksToKeep.find((t) => t.type === "video")?.id ?? null;
             }
@@ -568,7 +535,7 @@ export const useTimelineStore = create<TimelineStore>(
           next.epoch = state.epoch + 1;
         }
 
-        // TL-BUG-007 fix: Clear selectedTrackId if the auto-removed track was selected
+        // TL- fix: Clear selectedTrackId if the auto-removed track was selected
         if (removedTrackIdForCleanup) {
           try {
             const uiState = useUIStore.getState();
@@ -679,11 +646,6 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     updateClip: (clipId, updates) => {
-      const hasSubstantiveChanges = updates.startTime !== undefined || updates.duration !== undefined || updates.trimIn !== undefined || updates.trimOut !== undefined;
-      if (hasSubstantiveChanges) {
-        timelineLog("updateClip", { clipId, updates });
-      }
-
       set((state) => {
         const next: Partial<TimelineStore> = {
           clips: state.clips.map((c) => {
@@ -737,8 +699,6 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     moveClip: (clipId, startTime) => {
-      timelineLog("moveClip", { clipId, startTime });
-
       set((state) => {
         const next: Partial<TimelineStore> = {
           clips: state.clips.map((c) => (c.id === clipId ? { ...c, startTime } : c)),
@@ -795,7 +755,7 @@ export const useTimelineStore = create<TimelineStore>(
       // Case: different tracks — simple position + track swap
       if (clipA.trackId !== clipB.trackId) {
         set((state) => {
-          // TL-BUG-004 fix: Update transition references when clips swap tracks
+          // TL- fix: Update transition references when clips swap tracks
           const updatedTransitions = state.transitions.map((t) => {
             let updated = t;
             // If transition references clipA, update its track to clipB's track
