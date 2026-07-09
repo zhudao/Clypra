@@ -6,6 +6,8 @@ import { ProgramPreview } from "./ProgramPreview";
 const PreviewPanelComponent: React.FC = () => {
   const { previewMode } = useUIStore();
 
+  console.info("[PreviewLifecycle] PreviewPanel rendering, mode:", previewMode);
+
   // If in source mode, show SourcePreview
   if (previewMode === "source") {
     return <SourcePreview />;
