@@ -1,7 +1,6 @@
 import React, { useRef, useEffect, useState } from "react";
 import { platform } from "@/core/platform";
 import { drawProfessionalWaveform, getThemeAccentRgb } from "@/lib/utils/canvasUtils";
-import { traceStart, traceEnd } from "@/lib/debug/performanceTrace";
 import type { WaveformBucket } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 import { normalizePathForTauriInvoke } from "@/lib/platform/tauri";
@@ -105,19 +104,12 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
 
     const generateWaveform = async () => {
       try {
-        traceStart("waveform-generation", {
-          path: audioPath,
-          sampleCount,
-          duration: sourceDuration,
-        });
-
         setIsLoading(true);
         setHasError(false);
 
         // Try Rust backend first (professional peak + RMS extraction)
         let rustTraceStarted = false;
         try {
-          traceStart("waveform-rust-extract");
           rustTraceStarted = true;
           const filePath = normalizePathForTauriInvoke(audioPath);
 
@@ -128,24 +120,17 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
             duration: sourceDuration || duration,
           });
 
-          traceEnd("waveform-rust-extract", { bucketCount: buckets?.length || 0 });
-
           if (!isCancelled && buckets && buckets.length > 0) {
             waveformCacheSet(cacheKey, buckets);
             setWaveformData(buckets);
             setIsLoading(false);
-            traceEnd("waveform-generation", { backend: "rust", success: true });
             return;
           }
         } catch (rustError) {
-          if (rustTraceStarted) {
-            traceEnd("waveform-rust-extract", { error: true });
-          }
           console.warn("[TimelineWaveform] Rust extraction failed, using Web Audio API fallback:", rustError);
         }
 
         // ✅ FALLBACK: Simple Web Audio API (same as MediaCardWaveform - NO WORKER)
-        traceStart("waveform-webaudio-decode");
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         const audioContext = new AudioContextClass();
 
@@ -159,10 +144,7 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
           const arrayBuffer = await response.arrayBuffer();
           const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-          if (isCancelled) {
-            traceEnd("waveform-webaudio-decode", { cancelled: true });
-            return;
-          }
+          if (isCancelled) return;
 
           // Extract channel data
           const channelData = audioBuffer.getChannelData(0);
@@ -208,15 +190,11 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
             }
           }
 
-          traceEnd("waveform-webaudio-decode", { bucketCount: buckets.length });
-
           if (!isCancelled) {
             waveformCacheSet(cacheKey, buckets);
             setWaveformData(buckets);
             setIsLoading(false);
           }
-
-          traceEnd("waveform-generation", { backend: "webaudio", success: true });
         } finally {
           audioContext.close();
         }
@@ -227,7 +205,6 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
           setHasError(true);
           setIsLoading(false);
         }
-        traceEnd("waveform-generation", { error: true });
       }
     };
 
@@ -268,11 +245,7 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioPath, c
 
   return (
     <div className="relative w-full h-full min-h-[36px] flex items-center">
-      {isLoading && (
-        <div
-          className={`absolute inset-0 rounded-[2px] bg-accent/10 animate-pulse border border-accent/20 ${className}`}
-        />
-      )}
+      {isLoading && <div className={`absolute inset-0 rounded-[2px] bg-accent/10 animate-pulse border border-accent/20 ${className}`} />}
       <canvas
         ref={canvasRef}
         className={`w-full h-full block ${className}`}
