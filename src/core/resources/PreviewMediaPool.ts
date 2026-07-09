@@ -78,7 +78,7 @@ interface ManagedVideo {
   isActive: boolean;
   /** Grace period - don't mark as orphaned if recently created */
   registrationGraceUntil: number;
-  /** FINDING-019: Generation counter to invalidate stale RVFC callbacks */
+  /**  Generation counter to invalidate stale RVFC callbacks */
   rvfcGeneration: number;
 }
 
@@ -125,10 +125,10 @@ function findPrimaryVideoClip(videoClips: Clip[], tracks: Array<{ id: string; ty
  * clips active slightly beyond their boundaries. This prevents stuttering during
  * split transitions by ensuring continuous decode/playback.
  *
- * ✅ CRITICAL FIX (FINDING-001): Now uses canonical resolveClipSourceTime utility
+ * Now uses canonical resolveClipSourceTime utility
  * to ensure consistency with export and other subsystems.
  *
- * FINDING-005: Replaced hardcoded 16ms (60fps) with dynamic calculation based on
+ *  Replaced hardcoded 16ms (60fps) with dynamic calculation based on
  * project frame rate. Examples:
  * - 24fps: 1.5 frames = 62.5ms tolerance
  * - 30fps: 1.5 frames = 50ms tolerance
@@ -137,7 +137,7 @@ function findPrimaryVideoClip(videoClips: Clip[], tracks: Array<{ id: string; ty
 function getClipSourceTime(clip: Clip, clockTime: number, frameRate: number, transitions: TransitionTimelineItem[] = []): number | null {
   const clipLocalTime = clockTime - clip.startTime;
 
-  // FINDING-005: Frame-rate-aware boundary tolerance (1.5 frames)
+  //  Frame-rate-aware boundary tolerance (1.5 frames)
   const BOUNDARY_TOLERANCE = 1.5 / frameRate; // seconds
 
   const isInTransition = transitions.some((t) => {
@@ -180,7 +180,7 @@ export class PreviewMediaPool {
   private timelineClipRegistry = new Map<string, string>(); // clipId -> cacheKey
   // TRANSITION SAFETY: Track recently removed clips to keep their elements available during transitions
   // Format: cacheKey -> { clipIds: all known clipIds that map to this cache, timestamp: when removed }
-  // FINDING-003 + SPLIT FIX: Store ALL clipIds (original + splits) to prevent lookup mismatch
+  // + SPLIT FIX: Store ALL clipIds (original + splits) to prevent lookup mismatch
   // When a clip is split, both new clips share the same media/trim cache key but have different IDs
   private recentlyRemovedClips = new Map<string, { clipIds: string[]; timestamp: number }>();
   private readonly TRANSITION_GRACE_PERIOD_MS = 500; // Keep elements for 500ms after removal
@@ -216,7 +216,7 @@ export class PreviewMediaPool {
   private readonly MAX_CACHED_VIDEOS = 20;
   private readonly CACHE_EVICTION_AGE_MS = 60000; // 60 seconds unused (increased for split workflows)
 
-  // FINDING-008: Memory-aware eviction thresholds
+  //  Memory-aware eviction thresholds
   private readonly ESTIMATED_MB_PER_VIDEO = 50; // Estimated memory per video element (buffer + decode state)
   private readonly MEMORY_SOFT_LIMIT_MB = 500; // Start aggressive eviction at 500MB
   private readonly MEMORY_HARD_LIMIT_MB = 800; // Force eviction at 800MB regardless of protection
@@ -237,7 +237,7 @@ export class PreviewMediaPool {
     syncState: PreviewSyncState;
   } | null = null;
 
-  // ─── FINDING-006: Early exit optimization ───────────────────────────────
+  // ───  Early exit optimization ───────────────────────────────
   private _lastQuickHash: string | null = null;
 
   // ─── RESOURCE TRACKING (LEAK-003 / MED-002) ─────────────────────────────
@@ -306,7 +306,7 @@ export class PreviewMediaPool {
     this._syncInProgress = true;
 
     try {
-      // ─── FINDING-006: Early exit optimization (fast path) ───────────────────
+      // ───  Early exit optimization (fast path) ───────────────────
       // Skip expensive reconciliation if nothing meaningful changed
       // Round time to 0.1s precision to avoid rehashing every frame during playback
       const clipIdsHash = clips.map((c) => `${c.id}:${c.startTime.toFixed(2)}:${c.trimIn.toFixed(2)}`).join(",");
@@ -356,7 +356,7 @@ export class PreviewMediaPool {
         for (const removedClipId of structuralChange.removed) {
           const cacheKey = this.timelineClipRegistry.get(removedClipId);
           if (cacheKey) {
-            // FINDING-003 + SPLIT FIX: Store all known clipIds that map to this cache key
+            // + SPLIT FIX: Store all known clipIds that map to this cache key
             // This handles split clips where multiple clip IDs share the same cache element
             const existingEntry = this.recentlyRemovedClips.get(cacheKey);
             if (existingEntry) {
@@ -452,7 +452,7 @@ export class PreviewMediaPool {
           const primaryVideoClip = findPrimaryVideoClip(activeVisibleVideoClips, tracks);
           const isPrimaryAudibleVideo = primaryVideoClip?.id === clip.id;
 
-          // FINDING-025: Pass active video clip count for multi-clip audio-friendly sync
+          //  Pass active video clip count for multi-clip audio-friendly sync
           const activeVideoClipCount = activeVisibleVideoClips.length;
 
           this.updateVideoElement(managed, clip, syncState, tracks, isPrimaryAudibleVideo, isTrackMuted, activeVideoClipCount, activeTransitions);
@@ -495,7 +495,7 @@ export class PreviewMediaPool {
         const isInTimeline = timelineCacheKeys.has(cacheKey);
 
         // If element is in timeline but NOT currently active, pause it
-        // FINDING-014: Don't pause if element is currently seeking - can corrupt state
+        //  Don't pause if element is currently seeking - can corrupt state
         if (isInTimeline && !isActive && !managed.element.paused && !managed.element.seeking) {
           managed.element.pause();
           if (managed.rvfcHandle !== null && this.hasRVFC) {
@@ -521,7 +521,7 @@ export class PreviewMediaPool {
         const isRecentlyRemoved = recentRemoval !== undefined;
         const isInTransitionGrace = isRecentlyRemoved && recentRemoval && now - recentRemoval.timestamp < this.TRANSITION_GRACE_PERIOD_MS;
 
-        // CRITICAL FIX: Elements in grace period must respect playback state
+        // Elements in grace period must respect playback state
         // If user pauses, grace-period elements must also pause (prevents audio bleed)
         if (isInTransitionGrace && syncState.state !== "playing") {
           if (!managed.element.paused && !managed.element.seeking) {
@@ -529,7 +529,7 @@ export class PreviewMediaPool {
           }
         }
 
-        // CRITICAL FIX: Elements in grace period during PLAYING must also be paused if not active
+        // Elements in grace period during PLAYING must also be paused if not active
         // This prevents audio bleed when seeking backwards during playback
         if (isInTransitionGrace && syncState.state === "playing" && !isActive && !managed.element.paused && !managed.element.seeking) {
           managed.element.pause();
@@ -549,7 +549,7 @@ export class PreviewMediaPool {
             managed.rvfcHandle = null;
           }
         } else if (isInTimeline) {
-          // ─── FINDING-002: Extend grace period when element is in timeline ───────
+          // ───  Extend grace period when element is in timeline ───────
           // Element is in timeline - extend grace period (it's proven to be valid)
           // Also remove from recently removed list since it's back in the timeline
           this.recentlyRemovedClips.delete(cacheKey);
@@ -704,7 +704,7 @@ export class PreviewMediaPool {
       }
     }
 
-    // ─── FINDING-003 + SPLIT FIX: Use all known clipIds for recently removed clips ──
+    // ─── + SPLIT FIX: Use all known clipIds for recently removed clips ──
     // TRANSITION SAFETY: Also include recently removed clips (within grace period)
     // This ensures rasterizer can access outgoing clip frames during transitions
     // SPLIT FIX: Return mappings for ALL clipIds that share this cache element
@@ -823,7 +823,7 @@ export class PreviewMediaPool {
    * MUST be called synchronously inside a user gesture event handler (like click).
    */
   unlockAudio(): void {
-    // FINDING-024: Check if we're in an active user gesture context
+    //  Check if we're in an active user gesture context
     // This is more reliable than timestamp-based checking
     const hasUserActivation = typeof navigator !== "undefined" && navigator.userActivation && navigator.userActivation.isActive;
 
@@ -925,7 +925,7 @@ export class PreviewMediaPool {
       // Grace period: don't mark as orphaned for 5 seconds after creation
       // This allows time for the clip to be seen by sync() and registered
       registrationGraceUntil: performance.now() + 5000,
-      // FINDING-019: Generation counter to invalidate stale RVFC callbacks
+      //  Generation counter to invalidate stale RVFC callbacks
       rvfcGeneration: 0,
       // ────────────────────────────────────────────────────────────────────
     };
@@ -1028,16 +1028,16 @@ export class PreviewMediaPool {
   }
 
   private disposeVideo(key: string, managed: ManagedVideo): void {
-    // FINDING-020: Set disposing flag BEFORE any async operations
+    //  Set disposing flag BEFORE any async operations
     // This prevents play() promise handlers from accessing disposed element
     managed.disposing = true;
 
-    // FINDING-020: Cancel any pending play promise
+    //  Cancel any pending play promise
     if (managed.playPromiseInFlight) {
       managed.playCancelRequested = true;
     }
 
-    // FINDING-019: Increment generation to invalidate pending RVFC callbacks
+    //  Increment generation to invalidate pending RVFC callbacks
     // This prevents memory leaks from closures
     managed.rvfcGeneration++;
 
@@ -1077,7 +1077,7 @@ export class PreviewMediaPool {
     const shouldMute = syncState.muted || syncState.volume === 0 || isTrackMuted || clipVolume === 0;
     const targetVolume = shouldMute ? 0 : Math.max(0, Math.min(1, combinedVolume));
 
-    // ─── FINDING-022: Conditional property updates ─────────────────────────────
+    // ───  Conditional property updates ─────────────────────────────
     // Only set properties when values actually change to avoid unnecessary
     // DOM updates and audio routing recalculations (saves ~0.1-0.3ms per element × 60fps)
     if (video.muted !== shouldMute) {
@@ -1143,7 +1143,7 @@ export class PreviewMediaPool {
         managed.lastHardSeekAtMs = now;
       } else {
         // Automatic sync: rate-limited seeks to prevent audio glitches
-        // FINDING-025: Use audio-friendly sync for ALL video clips when multiple are active
+        //  Use audio-friendly sync for ALL video clips when multiple are active
         // This prevents audio dropout caused by aggressive seeking on overlay clips
         const useAudioFriendlySync = isPrimaryAudibleVideo || activeVideoClipCount > 1;
         const hardSeekThreshold = useAudioFriendlySync ? 1.0 : 0.5;
@@ -1183,7 +1183,7 @@ export class PreviewMediaPool {
       if (!video.paused) {
         video.pause();
       }
-      // FINDING-016 FIX: Cancel any pending play() promise
+      // FIX: Cancel any pending play() promise
       if (managed.playPromiseInFlight) {
         managed.playCancelRequested = true;
       }
@@ -1229,7 +1229,7 @@ export class PreviewMediaPool {
 
     // Guard 4: Element-level autoplay block → latch
     if (managed.autoplayBlocked) {
-      // FINDING-024: Check for active user gesture context instead of time window
+      //  Check for active user gesture context instead of time window
       // This is more reliable and handles cases where user waits >1s after unlocking
       const hasUserActivation = typeof navigator !== "undefined" && navigator.userActivation && navigator.userActivation.isActive;
 
@@ -1262,7 +1262,7 @@ export class PreviewMediaPool {
     managed.playAttempts++;
     managed.lastPlayAttemptMs = now;
     managed.playPromiseInFlight = true;
-    // FINDING-016 FIX: Clear cancel flag when starting new play attempt
+    // FIX: Clear cancel flag when starting new play attempt
     managed.playCancelRequested = false;
 
     const elementAge = now - managed.createdAt;
@@ -1273,12 +1273,12 @@ export class PreviewMediaPool {
         .then(() => {
           managed.playPromiseInFlight = false;
 
-          // FINDING-020: Check if element is being disposed
+          //  Check if element is being disposed
           if (managed.disposing) {
             return; // Element disposed, ignore promise resolution
           }
 
-          // FINDING-016 FIX: Check if play was cancelled while promise was pending
+          // FIX: Check if play was cancelled while promise was pending
           if (managed.playCancelRequested) {
             managed.playCancelRequested = false;
             return; // Don't register RVFC or update state
@@ -1305,7 +1305,7 @@ export class PreviewMediaPool {
         .catch((err: Error) => {
           managed.playPromiseInFlight = false;
 
-          // FINDING-020: Check if element is being disposed
+          //  Check if element is being disposed
           if (managed.disposing) {
             return; // Element disposed, ignore promise rejection
           }
@@ -1351,10 +1351,10 @@ export class PreviewMediaPool {
    * 1. Not referenced by any clip in timeline registry
    * 2. Either too old OR cache is over capacity
    *
-   * FINDING-018 FIX: Enforce hard limit even if all elements protected.
+   * FIX: Enforce hard limit even if all elements protected.
    * Prefer evicting inactive elements but respect MAX_CACHED_VIDEOS limit.
    *
-   * FINDING-008 FIX: Add memory-aware adaptive eviction.
+   * FIX: Add memory-aware adaptive eviction.
    * - Estimates memory usage (elements × 50MB per element)
    * - Soft limit (500MB): Reduce eviction age from 60s to 30s
    * - Hard limit (800MB): Reduce to 10s, ignore timeline protection
@@ -1390,7 +1390,7 @@ export class PreviewMediaPool {
       return (managed.element as any).__renderLockCount > 0;
     };
 
-    // FINDING-008: Estimate current memory usage and adjust eviction aggressiveness
+    //  Estimate current memory usage and adjust eviction aggressiveness
     const estimatedMemoryMB = this.videoCache.size * this.ESTIMATED_MB_PER_VIDEO;
     const isOverSoftLimit = estimatedMemoryMB > this.MEMORY_SOFT_LIMIT_MB;
     const isOverHardLimit = estimatedMemoryMB > this.MEMORY_HARD_LIMIT_MB;
@@ -1434,7 +1434,7 @@ export class PreviewMediaPool {
       }
     }
 
-    // PASS 3 (FINDING-018 FIX): If STILL over limit, evict oldest protected BUT INACTIVE AND NOT UPCOMING elements (not locked)
+    // PASS 3 (FIX): If STILL over limit, evict oldest protected BUT INACTIVE AND NOT UPCOMING elements (not locked)
     // This enforces the hard MAX limit even when all elements are in timeline
     if (this.videoCache.size - toEvict.length > this.MAX_CACHED_VIDEOS) {
       const protectedInactiveElements = Array.from(this.videoCache.entries())
@@ -1466,7 +1466,7 @@ export class PreviewMediaPool {
       }
     }
 
-    // PASS 4 (FINDING-018 FIX): Last resort - if STILL over limit, evict oldest protected ACTIVE elements (not locked)
+    // PASS 4 (FIX): Last resort - if STILL over limit, evict oldest protected ACTIVE elements (not locked)
     // This should rarely happen but prevents unbounded growth
     if (this.videoCache.size - toEvict.length > this.MAX_CACHED_VIDEOS) {
       const protectedActiveElements = Array.from(this.videoCache.entries())
@@ -1496,7 +1496,7 @@ export class PreviewMediaPool {
   private registerRVFC(managed: ManagedVideo, clip: Clip, syncState: PreviewSyncState, tracks: Array<{ id: string; type: string }>, isPrimaryAudibleVideo: boolean): void {
     const video = managed.element;
 
-    // FINDING-019: Increment generation to invalidate any pending callbacks
+    //  Increment generation to invalidate any pending callbacks
     // This prevents memory leaks from closures capturing large objects
     managed.rvfcGeneration++;
     const generation = managed.rvfcGeneration;
@@ -1510,7 +1510,7 @@ export class PreviewMediaPool {
     const trimIn = clip.trimIn || 0;
 
     const callback = (_now: number, metadata: VideoFrameCallbackMetadata) => {
-      // FINDING-019: Check generation first - exits immediately if stale
+      //  Check generation first - exits immediately if stale
       if (managed.rvfcGeneration !== generation) return;
 
       if (this._isDisposed) return;
@@ -1521,7 +1521,7 @@ export class PreviewMediaPool {
       // Recalculate expected source time based on latest clock state
       const latestSyncState = this.lastSyncState ?? syncState;
 
-      // FIX (FINDING-012): Use canonical sourceTime calculation instead of inline duplicate
+      // FIX (: Use canonical sourceTime calculation instead of inline duplicate
       // Build minimal clip object for sourceTime resolution
       const minimalClip: Pick<Clip, "startTime" | "duration" | "trimIn" | "trimOut"> = {
         startTime: clipStartTime,
