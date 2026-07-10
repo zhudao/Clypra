@@ -280,8 +280,6 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({ onRequestClose }) =>
           stickerSourceId: item.id,
         };
 
-        addMediaAsset(mediaAsset);
-
         const latestTracks = useTimelineStore.getState().tracks;
         const latestClips = useTimelineStore.getState().clips;
         const placement = resolveAddToTimelinePlacement({

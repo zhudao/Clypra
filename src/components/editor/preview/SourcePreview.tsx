@@ -435,9 +435,9 @@ export const SourcePreview: React.FC = () => {
     newClip.trimOut = trimOut;
     newClip.duration = trimOut - trimIn;
 
-    // Only add to media assets if it's NOT from the audio library
-    // Audio library items (id starts with "audio-library-") should only exist as clips
-    if (!mediaAsset.id.startsWith("audio-library-")) {
+    // Only add to media assets if it's NOT from the audio library or stickers
+    // Audio library items (id starts with "audio-library-") and stickers should only exist as clips
+    if (!mediaAsset.id.startsWith("audio-library-") && !mediaAsset.id.startsWith("sticker-")) {
       addMediaAsset(mediaAsset);
     }
     addClip(newClip);
