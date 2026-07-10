@@ -180,7 +180,7 @@ export const createClipFromAsset = ({ asset, trackId, startTime, width, height, 
   const kind = (isSticker ? "sticker" : asset.type) as Clip["kind"];
 
   const isVisual = asset.type === "video" || asset.type === "image";
-  const defaultConform: ClipConform | undefined = isVisual ? {
+  const defaultConform: ClipConform | undefined = (isVisual && !isSticker) ? {
     mode: "fit",
     sourceWidth: asset.width || 0,
     sourceHeight: asset.height || 0,
