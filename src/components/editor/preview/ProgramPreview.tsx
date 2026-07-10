@@ -1,10 +1,14 @@
-import React, { useState } from "react";
-import { ComplexProgramPreview } from "./ComplexProgramPreview.jsx";
+import React from "react";
 import { PixiProgramPreview } from "./PixiProgramPreview.jsx";
-import { DEV_PREVIEW_MODE, PRODUCTION_PREVIEW_MODE, type PreviewMode } from "./previewMode.js";
+import { WebGLUnavailableError } from "./WebGLUnavailableError.jsx";
 
-// React Error Boundary to catch WebGL / Pixi initialization errors
-class PreviewErrorBoundary extends React.Component<{ fallback: React.ReactNode; onError: (error: Error) => void; children: React.ReactNode }, { hasError: boolean }> {
+// React Error Boundary to catch WebGL / Pixi initialization errors.
+// On failure renders WebGLUnavailableError instead of falling back to a Canvas 2D
+// renderer — Canvas 2D preview has been retired. WebGL is a hard requirement.
+class PreviewErrorBoundary extends React.Component<
+  { fallback: React.ReactNode; children: React.ReactNode },
+  { hasError: boolean }
+> {
   state = { hasError: false };
 
   static getDerivedStateFromError() {
@@ -13,7 +17,6 @@ class PreviewErrorBoundary extends React.Component<{ fallback: React.ReactNode; 
 
   componentDidCatch(error: Error) {
     console.error("[PreviewLifecycle] PixiProgramPreview error boundary caught:", error);
-    this.props.onError(error);
   }
 
   render() {
@@ -25,25 +28,9 @@ class PreviewErrorBoundary extends React.Component<{ fallback: React.ReactNode; 
 }
 
 export const ProgramPreview: React.FC<any> = (props) => {
-  const [previewMode, setPreviewMode] = useState<PreviewMode>(import.meta.env.DEV ? DEV_PREVIEW_MODE : PRODUCTION_PREVIEW_MODE);
-
-  console.info("[PreviewLifecycle] ProgramPreview mode:", previewMode);
-
-  const handleWebGLFailure = (error: Error) => {
-    console.error("[ProgramPreview] complex-pixi mode failed, falling back to complex-canvas2d for this session", error);
-    setPreviewMode("complex-canvas2d");
-  };
-
-  switch (previewMode) {
-    case "complex-pixi":
-      return (
-        <PreviewErrorBoundary fallback={<ComplexProgramPreview {...props} />} onError={handleWebGLFailure}>
-          <PixiProgramPreview {...props} />
-        </PreviewErrorBoundary>
-      );
-
-    case "complex-canvas2d":
-    default:
-      return <ComplexProgramPreview {...props} />;
-  }
+  return (
+    <PreviewErrorBoundary fallback={<WebGLUnavailableError />}>
+      <PixiProgramPreview {...props} />
+    </PreviewErrorBoundary>
+  );
 };

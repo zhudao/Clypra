@@ -1,4 +1,5 @@
-export type PreviewMode = "complex-canvas2d" | "complex-pixi";
-
-export const PRODUCTION_PREVIEW_MODE: PreviewMode = "complex-canvas2d";
-export const DEV_PREVIEW_MODE: PreviewMode = "complex-pixi";
+// Pixi/WebGL is the single preview pipeline for all builds.
+// Canvas 2D preview (ComplexProgramPreview) has been retired.
+// If WebGL is unavailable, ProgramPreview renders WebGLUnavailableError.
+export const PREVIEW_MODE = "complex-pixi" as const;
+export type PreviewMode = typeof PREVIEW_MODE;
