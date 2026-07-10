@@ -80,13 +80,7 @@ vi.mock("@/core/playback/PlaybackClock", () => ({
   resetPlaybackClock: vi.fn(),
 }));
 
-vi.mock("@/core/scheduler/FrameScheduler", () => ({
-  getFrameScheduler: () => ({
-    cancelAll: vi.fn(),
-    getStats: () => ({ active: 0 }),
-  }),
-  resetFrameScheduler: vi.fn(),
-}));
+
 
 vi.mock("@/lib/monitoring/PerformanceMonitor", () => ({
   performanceMonitor: {
@@ -134,7 +128,6 @@ describe("ProjectStateReset", () => {
       expect(result.success).toBe(true);
       expect(result.errors).toHaveLength(0);
       expect(result.resetSubsystems).toContain("PlaybackClock");
-      expect(result.resetSubsystems).toContain("FrameScheduler");
       expect(result.resetSubsystems).toContain("DragStateStore");
       expect(result.resetSubsystems).toContain("TransformController");
       expect(result.resetSubsystems).toContain("UIStore");
@@ -154,7 +147,6 @@ describe("ProjectStateReset", () => {
       const options: ResetOptions = {
         resetHistory: true,
         resetPlayback: false,
-        resetScheduler: false,
         resetUI: false,
         resetDrag: false,
         resetViewport: false,

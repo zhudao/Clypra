@@ -33,7 +33,6 @@
  */
 
 import { getPlaybackClock } from "../playback/PlaybackClock";
-import { getFrameScheduler } from "../scheduler/FrameScheduler";
 import { performanceMonitor } from "@/lib/monitoring/PerformanceMonitor";
 
 /**
@@ -44,8 +43,7 @@ export interface ResetOptions {
   resetHistory?: boolean;
   /** Reset playback clock */
   resetPlayback?: boolean;
-  /** Reset frame scheduler */
-  resetScheduler?: boolean;
+
   /** Reset UI store */
   resetUI?: boolean;
   /** Reset drag state */
@@ -66,7 +64,7 @@ export interface ResetOptions {
 const DEFAULT_RESET_OPTIONS: Required<ResetOptions> = {
   resetHistory: true,
   resetPlayback: true,
-  resetScheduler: true,
+
   resetUI: true,
   resetDrag: true,
   resetViewport: true,
@@ -112,17 +110,7 @@ export async function resetAllProjectState(options: ResetOptions = {}): Promise<
     }
   }
 
-  if (opts.resetScheduler) {
-    try {
-      const { resetFrameScheduler } = await import("../scheduler/FrameScheduler");
-      resetFrameScheduler();
 
-      resetSubsystems.push("FrameScheduler");
-    } catch (error) {
-      errors.push({ subsystem: "FrameScheduler", error: error as Error });
-      console.error("  ❌ FrameScheduler reset failed:", error);
-    }
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════════
   // PHASE 2: Reset Interaction State
@@ -305,16 +293,7 @@ export async function resetAllProjectState(options: ResetOptions = {}): Promise<
         console.error("  ❌ EvaluationCache clear failed:", error);
       }),
 
-    // LottieRenderCache (PREV-BUG-003 fix) — hidden DOM containers leak across projects
-    import("../render/rasterizer")
-      .then(({ clearLottieRenderCache }) => {
-        clearLottieRenderCache();
-        resetSubsystems.push("LottieRenderCache");
-      })
-      .catch((error) => {
-        errors.push({ subsystem: "LottieRenderCache", error: error as Error });
-        console.error("  ❌ LottieRenderCache clear failed:", error);
-      }),
+
 
     // GlobalGPUCache
     opts.resetGPUCache
@@ -361,7 +340,7 @@ export async function resetSubsystem(subsystem: keyof ResetOptions): Promise<voi
     // Disable all others
     resetHistory: subsystem === "resetHistory",
     resetPlayback: subsystem === "resetPlayback",
-    resetScheduler: subsystem === "resetScheduler",
+
     resetUI: subsystem === "resetUI",
     resetDrag: subsystem === "resetDrag",
     resetViewport: subsystem === "resetViewport",
