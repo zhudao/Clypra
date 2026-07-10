@@ -278,6 +278,8 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({ onRequestClose }) =>
           stickerFormat: "lottie",
           stickerAnimationPath: absoluteAnimationPath,
           stickerSourceId: item.id,
+          width: 400,
+          height: 400,
         };
 
         const latestTracks = useTimelineStore.getState().tracks;

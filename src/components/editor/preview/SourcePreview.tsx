@@ -391,6 +391,8 @@ export const SourcePreview: React.FC = () => {
         mediaAsset = {
           ...mediaAsset,
           path: absoluteImagePath,
+          width: mediaAsset.width || 400,
+          height: mediaAsset.height || 400,
         };
       }
     }
