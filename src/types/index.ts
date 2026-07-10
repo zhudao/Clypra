@@ -195,6 +195,7 @@ export interface Clip {
   stickerFormat?: "static" | "gif" | "lottie";
   stickerAnimationPath?: string;
   stickerSourceId?: string;
+  stickerImagePath?: string;
   /** Text template ID for text clips */
   templateId?: string;
 }
