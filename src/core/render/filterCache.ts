@@ -2,8 +2,9 @@ import { Filter, BlurFilter } from "pixi.js";
 import { AdjustmentFilter } from "pixi-filters";
 import { resolveFilterToIR } from "./filterIR.js";
 import { createGPUPixelateFilter, createGPUScanlinesFilter, createGPURGBSplitFilter, createGPUFilmGrainFilter, createGPUVignetteFilter } from "./gpuFilters.js";
-import { applyBodyEffectMask, createGPUBodyOutlineFilter, createGPUBodyGlowFilter, createGPUBodyParticlesFilter } from "@clypra/engine";
+import { applyBodyEffectMask, createGPUBodyOutlineFilter, createGPUBodyGlowFilter, createGPUBodyParticlesFilter, ColorAdjustmentsEffect } from "@clypra/engine";
 import type { EvaluatedMediaLayer } from "../evaluation/types.js";
+import { filterCacheManager } from "../../features/filters/cache/filterCache.js";
 
 interface FilterCacheEntry {
   /** Signature of WHICH effects are structurally active — not their live parameter values */
@@ -81,9 +82,25 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
     const filterMap = new Map<string, Filter>();
 
     if (mediaLayer.filter && mediaLayer.filter.intensity > 0.001) {
-      const adj = new AdjustmentFilter();
-      filters.push(adj);
-      filterMap.set("__color_filter", adj);
+      const filter = ColorAdjustmentsEffect.filterSpec!.create({}) as Filter;
+      filters.push(filter);
+      filterMap.set("__color_filter", filter);
+
+      // Create blur filter if needed (since Blur is multi-pass in WebGL)
+      const cached = filterCacheManager.getCached(mediaLayer.filter.id);
+      const asset = cached?.filter;
+      let hasBlur = false;
+      if (asset?.gradingParams?.blur && asset.gradingParams.blur > 0.001) {
+        hasBlur = true;
+      } else if (asset?.swatch && asset.swatch.includes("blur")) {
+        hasBlur = true;
+      }
+
+      if (hasBlur) {
+        const blurFilter = new BlurFilter({ strength: 0 });
+        filters.push(blurFilter);
+        filterMap.set("__color_filter_blur", blurFilter);
+      }
     }
 
     for (const effect of mediaLayer.effects || []) {
@@ -138,12 +155,53 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
 
 function applyLiveParams(entry: FilterCacheEntry, mediaLayer: EvaluatedMediaLayer, width: number, height: number, bodyMasks: Map<string, any>): void {
   if (mediaLayer.filter) {
-    const adj = entry.filterMap.get("__color_filter") as AdjustmentFilter | undefined;
-    if (adj) {
-      const ir = resolveFilterToIR(mediaLayer.filter.id, mediaLayer.filter.intensity);
-      if (ir.sepia !== undefined) adj.contrast = 1.0 - ir.sepia * 0.15;
-      if (ir.saturate !== undefined) adj.saturation = ir.saturate;
-      if (ir.contrast !== undefined) adj.contrast = ir.contrast;
+    const filter = entry.filterMap.get("__color_filter");
+    if (filter) {
+      const cached = filterCacheManager.getCached(mediaLayer.filter.id);
+      const asset = cached?.filter;
+      const params: Record<string, number> = {};
+
+      if (asset?.gradingParams) {
+        const gp = asset.gradingParams;
+        params.exposure = (gp.exposure ?? 0.0) * mediaLayer.filter.intensity;
+        params.brightness = (gp.brightness ?? 0.0) * mediaLayer.filter.intensity;
+        params.contrast = (gp.contrast ?? 0.0) * mediaLayer.filter.intensity;
+        params.saturation = (gp.saturation ?? 0.0) * mediaLayer.filter.intensity;
+        params.temperature = (gp.temperature ?? 0.0) * mediaLayer.filter.intensity;
+        params.tint = (gp.tint ?? 0.0) * mediaLayer.filter.intensity;
+        params.sepia = (gp.sepia ?? 0.0) * mediaLayer.filter.intensity;
+        params.grayscale = (gp.grayscale ?? 0.0) * mediaLayer.filter.intensity;
+        params.hueRotate = (gp.hueRotate ?? 0.0) * mediaLayer.filter.intensity;
+        params.invert = (gp.invert ?? 0.0) * mediaLayer.filter.intensity;
+        params.vignette = (gp.vignette ?? 0.0) * mediaLayer.filter.intensity;
+      } else {
+        const swatch = asset?.swatch;
+        const ir = resolveFilterToIR(mediaLayer.filter.id, mediaLayer.filter.intensity, swatch);
+        
+        if (ir.sepia !== undefined) params.sepia = ir.sepia;
+        if (ir.grayscale !== undefined) params.grayscale = ir.grayscale;
+        if (ir.saturate !== undefined) params.saturation = ir.saturate - 1.0;
+        if (ir.contrast !== undefined) params.contrast = ir.contrast - 1.0;
+        if (ir.hueRotate !== undefined) params.hueRotate = (ir.hueRotate * Math.PI) / 180;
+      }
+
+      ColorAdjustmentsEffect.filterSpec!.updateUniforms!(filter, params, 0);
+    }
+
+    const blurFilter = entry.filterMap.get("__color_filter_blur") as BlurFilter | undefined;
+    if (blurFilter) {
+      const cached = filterCacheManager.getCached(mediaLayer.filter.id);
+      const asset = cached?.filter;
+      let blurAmount = 0;
+      if (asset?.gradingParams?.blur) {
+        blurAmount = asset.gradingParams.blur;
+      } else if (asset?.swatch) {
+        const blurMatch = asset.swatch.match(/blur\(([^)]+)\)/);
+        if (blurMatch) {
+          blurAmount = parseFloat(blurMatch[1]);
+        }
+      }
+      blurFilter.strength = blurAmount * mediaLayer.filter.intensity;
     }
   }
 

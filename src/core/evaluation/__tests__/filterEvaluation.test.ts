@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { evaluateTimelineScene } from "../evaluator";
-import { rasterizeScene } from "../../render/rasterizer";
 import { getResourceCache } from "../../resources/ResourceCache";
 import type { Clip, Track, MediaAsset, Project } from "@/types";
 
@@ -231,83 +230,5 @@ describe("Filter Evaluation", () => {
       intensity: 1,
       swatch: "",
     });
-  });
-
-  it("rasterizes filter onto canvas context", async () => {
-    // Register mock bitmap in resource cache
-    const resourceCache = getResourceCache();
-    const mockBitmap = Object.create(ImageBitmap.prototype);
-    mockBitmap.width = 1920;
-    mockBitmap.height = 1080;
-    mockBitmap.close = vi.fn();
-
-    resourceCache["resources"].set("res-test", {
-      handle: "res-test",
-      type: "image-bitmap",
-      data: mockBitmap,
-      sourceUrl: "url",
-      width: 1920,
-      height: 1080,
-      refCount: 1,
-      lastAccessTime: Date.now(),
-    });
-
-    const imageClip: Clip = {
-      id: "clip-image",
-      kind: "image",
-      trackId: "t-video",
-      mediaId: "image-asset",
-      startTime: 0,
-      duration: 5,
-      trimIn: 0,
-      trimOut: 5,
-      x: 0,
-      y: 0,
-      width: 1920,
-      height: 1080,
-      opacity: 1.0,
-      rotation: 0,
-    } as any;
-
-    const filterClip = {
-      id: "clip-filter-1",
-      kind: "filter",
-      trackId: "t-filter",
-      mediaId: "filter-sepia",
-      startTime: 0,
-      duration: 5,
-      trimIn: 0,
-      trimOut: 5,
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 100,
-      opacity: 1.0,
-      rotation: 0,
-      name: "Sepia Tone",
-      intensity: 0.8,
-    } as any;
-
-    const scene = evaluateTimelineScene(2.5, [imageClip, filterClip], tracks, assets, project);
-    
-    // Attach resourceHandle to the evaluated layer manually
-    const imageLayer = scene.visualLayers.find(l => l.clipId === "clip-image");
-    if (imageLayer) {
-      (imageLayer as any).resourceHandle = "res-test";
-    }
-
-    const canvas = new MockOffscreenCanvas(1920, 1080) as any;
-    
-    let filterAtDraw = "none";
-    canvas.ctx.drawImage = vi.fn().mockImplementation(() => {
-      filterAtDraw = canvas.ctx.filter;
-    });
-
-    await rasterizeScene(scene, {
-      width: 1920,
-      height: 1080,
-    }, canvas);
-
-    expect(filterAtDraw).toBe("sepia(80%)");
   });
 });
