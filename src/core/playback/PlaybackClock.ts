@@ -61,7 +61,7 @@ export class PlaybackClock {
   private _playStartAudioTime: number = 0;
   private _playStartClockTime: number = 0;
 
-  // FINDING-017: Generation counter to prevent stale RAF ticks
+  // Generation counter to prevent stale RAF ticks
   private _generation: number = 0;
 
   // Listeners (for UI snapshots only, not every frame)
@@ -219,7 +219,7 @@ export class PlaybackClock {
     this._state = "playing";
     this._notifyListeners();
 
-    // FINDING-017: Increment generation to invalidate stale RAF ticks
+    // Increment generation to invalidate stale RAF ticks
     this._generation++;
     const currentGeneration = this._generation;
 
@@ -320,10 +320,10 @@ export class PlaybackClock {
 
   /**
    * RAF tick wrapper with generation check.
-   * FINDING-017: Prevents stale RAF ticks from executing after seek/pause/play cycle.
+   * Prevents stale RAF ticks from executing after seek/pause/play cycle.
    */
   private _tickWithGeneration(generation: number): void {
-    // FINDING-017: Ignore this tick if generation doesn't match
+    // Ignore this tick if generation doesn't match
     // This happens when seek() does pause→play cycle and old RAF tick executes
     if (generation !== this._generation) {
       return; // Stale tick, ignore

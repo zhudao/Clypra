@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTransformStartClip, calculateScaledTextTransform, calculateTextResizeFontSize, isClipActiveAtTime, shouldScaleTextFontForHandle } from "../TransformOverlay";
+import { buildTransformStartClip, calculateScaledTextTransform, calculateTextResizeFontSize, isClipActiveAtTime, shouldScaleTextFontForHandle, getUpdatedConformForClipBounds } from "../TransformOverlay";
 import type { TextClip, TransformHandle, TransformState } from "@/types";
 
 describe("TransformOverlay resize policy", () => {
@@ -111,5 +111,46 @@ describe("TransformOverlay visibility policy", () => {
     expect(isClipActiveAtTime(clip, 3)).toBe(true);
     expect(isClipActiveAtTime(clip, 7.999)).toBe(true);
     expect(isClipActiveAtTime(clip, 8)).toBe(false);
+  });
+});
+
+describe("getUpdatedConformForClipBounds", () => {
+  it("calculates correct userScale and offsets for conformed media clip bounds", () => {
+    const clip = {
+      id: "clip-1",
+      kind: "video",
+      conform: {
+        mode: "fit" as const,
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        userScale: 1,
+        userOffsetX: 0,
+        userOffsetY: 0,
+      },
+    } as any;
+
+    const canvasWidth = 1920;
+    const canvasHeight = 1080;
+
+    // Resized clip bounds: half width, shifted right/down
+    const newWidth = 960;
+    const newHeight = 540;
+    const newX = 480;
+    const newY = 270;
+
+    const updatedConform = getUpdatedConformForClipBounds(
+      clip,
+      newX,
+      newY,
+      newWidth,
+      newHeight,
+      canvasWidth,
+      canvasHeight
+    );
+
+    expect(updatedConform).toBeDefined();
+    expect(updatedConform.userScale).toBe(0.5); // Width went from 1920 to 960
+    expect(updatedConform.userOffsetX).toBe(0); // Center is still at 960 (canvasWidth/2)
+    expect(updatedConform.userOffsetY).toBe(0); // Center is still at 540 (canvasHeight/2)
   });
 });

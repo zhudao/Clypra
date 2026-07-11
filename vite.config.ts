@@ -13,6 +13,8 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@clypra/engine/transitions": path.resolve(__dirname, "../clypra-studio/packages/clypra-engine/src/transitions/index.ts"),
+      "@clypra/engine": path.resolve(__dirname, "../clypra-studio/packages/clypra-engine/src/index.ts"),
     },
   },
 
@@ -35,6 +37,12 @@ export default defineConfig(async () => ({
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
+    },
+    fs: {
+      allow: [
+        path.resolve(__dirname, "."),
+        path.resolve(__dirname, "../clypra-studio/packages/clypra-engine"),
+      ],
     },
   },
 

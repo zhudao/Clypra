@@ -14,7 +14,7 @@ export function resolveClipSourceTime(clip: Pick<Clip, "startTime" | "duration" 
   const rawSourceTime = clip.trimIn + localTime;
 
   if (options?.clampToRange) {
-    // ✅ CRITICAL FIX (FINDING-004): Enforce trimOut as required
+    // Enforce trimOut as required
     // If trimOut is undefined, this indicates a bug in clip creation/split/trim logic
     // Fail fast rather than silently falling back to incorrect behavior
     if (clip.trimOut === undefined) {

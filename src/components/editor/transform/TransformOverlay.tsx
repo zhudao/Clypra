@@ -20,13 +20,12 @@ import { getTransformController } from "@/core/interactions";
 import { TransformClipCommand } from "@/core/history/commands/TransformCommand";
 import { calculateTransform, getDefaultConstraints, getCursorForHandle } from "@/lib/transform/calculator";
 import { screenToCanvas, canvasToScreen, hitTestClip, type ViewportTransform } from "@/lib/utils/coordinateSystem";
-import { textRenderTrace } from "@/lib/debug/textRenderTrace";
 import { hasTextClipContentTransformDrift, resolveTextClipContentTransform } from "@/lib/text/textClip";
 import type { Clip, TextClip, TransformHandle, TransformState } from "@/types";
 import { ContextMenu } from "@/components/ui/ContextMenu";
-import type { ContextMenuItem } from "@/components/ui/ContextMenu";
 import { useProjectStore } from "@/store/projectStore";
 import { Maximize2, Minimize2, RotateCcw } from "lucide-react";
+import { resolveConform } from "@clypra-studio/engine";
 
 const SELECT_TRACE = import.meta.env.DEV;
 const traceSelect = (...args: unknown[]) => {
@@ -172,6 +171,24 @@ function mouseToCanvas(clientX: number, clientY: number, overlayRect: DOMRect, v
   // Step 2: Overlay-local → canvas (the overlay sits at displayOffset=(0,0)
   // relative to itself, so pass zero offset)
   return screenToCanvas(localX, localY, viewport, { width: canvasWidth, height: canvasHeight }, scale, { x: 0, y: 0 });
+}
+
+export function getUpdatedConformForClipBounds(clip: Clip, newX: number, newY: number, newWidth: number, newHeight: number, canvasWidth: number, canvasHeight: number): any | undefined {
+  if (clip.conform && clip.conform.sourceWidth && clip.conform.sourceHeight) {
+    const baseConformed = resolveConform({ ...clip.conform, userScale: 1, userOffsetX: 0, userOffsetY: 0 }, canvasWidth, canvasHeight);
+    if (baseConformed) {
+      const userScale = newWidth / baseConformed.width;
+      const userOffsetX = newX + newWidth / 2 - canvasWidth / 2;
+      const userOffsetY = newY + newHeight / 2 - canvasHeight / 2;
+      return {
+        ...clip.conform,
+        userScale,
+        userOffsetX,
+        userOffsetY,
+      };
+    }
+  }
+  return undefined;
 }
 
 export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth, canvasHeight, scale, viewport, displayOffset, displayWidth, displayHeight, currentTime, visible = true }) => {
@@ -415,6 +432,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
           width: selectedClip.width,
           height: selectedClip.height,
           rotation: selectedClip.rotation,
+          conform: selectedClip.conform ? { ...selectedClip.conform } : undefined,
         },
         startMousePos: canvasCoords,
         aspectRatioLocked: selectedClip.aspectRatioLocked ?? true,
@@ -792,6 +810,13 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
         }
       }
 
+      if (selectedClip.conform && selectedClip.conform.sourceWidth && selectedClip.conform.sourceHeight) {
+        const updatedConform = getUpdatedConformForClipBounds(selectedClip, newTransform.x ?? selectedClip.x, newTransform.y ?? selectedClip.y, newTransform.width ?? selectedClip.width, newTransform.height ?? selectedClip.height, canvasWidth, canvasHeight);
+        if (updatedConform) {
+          (newTransform as any).conform = updatedConform;
+        }
+      }
+
       traceSelect("transform mousemove", { clipId: activeTransform.clipId, handle: activeTransform.handle, x: newTransform.x, y: newTransform.y, width: newTransform.width, height: newTransform.height });
 
       // Optimistic preview: update clip for visual feedback during drag
@@ -850,13 +875,17 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       rotation: finalClip.rotation,
     };
 
+    if (finalClip.conform) {
+      newTransform.conform = { ...finalClip.conform };
+    }
+
     if (startFontSizeRef.current !== undefined) {
       oldTransform.fontSize = startFontSizeRef.current;
       newTransform.fontSize = (finalClip as any).fontSize;
     }
 
     // Only create command if something actually changed
-    const hasChanged = oldTransform.x !== newTransform.x || oldTransform.y !== newTransform.y || oldTransform.width !== newTransform.width || oldTransform.height !== newTransform.height || oldTransform.rotation !== newTransform.rotation || oldTransform.fontSize !== newTransform.fontSize;
+    const hasChanged = oldTransform.x !== newTransform.x || oldTransform.y !== newTransform.y || oldTransform.width !== newTransform.width || oldTransform.height !== newTransform.height || oldTransform.rotation !== newTransform.rotation || oldTransform.fontSize !== newTransform.fontSize || JSON.stringify(oldTransform.conform) !== JSON.stringify(newTransform.conform);
 
     if (hasChanged) {
       execute(new TransformClipCommand(activeTransform.clipId, oldTransform, newTransform));
@@ -883,6 +912,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       width: selectedClip.width,
       height: selectedClip.height,
       ...("fontSize" in selectedClip ? { fontSize: (selectedClip as any).fontSize } : {}),
+      ...(selectedClip.conform ? { conform: { ...selectedClip.conform } } : {}),
     };
 
     const canvasAspect = canvasWidth / canvasHeight;
@@ -911,6 +941,10 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       const sizeScale = newWidth / Math.max(1, selectedClip.width);
       const currentFontSize = (selectedClip as any).fontSize || 48;
       newVal.fontSize = Math.max(10, Math.min(1000, Math.round(currentFontSize * sizeScale)));
+    }
+
+    if (selectedClip.conform) {
+      newVal.conform = getUpdatedConformForClipBounds(selectedClip, newVal.x, newVal.y, newVal.width, newVal.height, canvasWidth, canvasHeight);
     }
 
     execute(new TransformClipCommand(selectedClip.id, oldVal, newVal));
@@ -924,6 +958,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       width: selectedClip.width,
       height: selectedClip.height,
       ...("fontSize" in selectedClip ? { fontSize: (selectedClip as any).fontSize } : {}),
+      ...(selectedClip.conform ? { conform: { ...selectedClip.conform } } : {}),
     };
 
     const canvasAspect = canvasWidth / canvasHeight;
@@ -952,6 +987,10 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       const sizeScale = newWidth / Math.max(1, selectedClip.width);
       const currentFontSize = (selectedClip as any).fontSize || 48;
       newVal.fontSize = Math.max(10, Math.min(1000, Math.round(currentFontSize * sizeScale)));
+    }
+
+    if (selectedClip.conform) {
+      newVal.conform = getUpdatedConformForClipBounds(selectedClip, newVal.x, newVal.y, newVal.width, newVal.height, canvasWidth, canvasHeight);
     }
 
     execute(new TransformClipCommand(selectedClip.id, oldVal, newVal));
@@ -966,6 +1005,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
       height: selectedClip.height,
       rotation: selectedClip.rotation,
       ...("fontSize" in selectedClip ? { fontSize: (selectedClip as any).fontSize } : {}),
+      ...(selectedClip.conform ? { conform: { ...selectedClip.conform } } : {}),
     };
 
     let newVal: Record<string, any> = {
@@ -990,6 +1030,15 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
         newVal.width = canvasWidth;
         newVal.height = canvasHeight;
       }
+    }
+
+    if (selectedClip.conform) {
+      newVal.conform = {
+        ...selectedClip.conform,
+        userScale: 1,
+        userOffsetX: 0,
+        userOffsetY: 0,
+      };
     }
 
     execute(new TransformClipCommand(selectedClip.id, oldVal, newVal));
@@ -1085,12 +1134,30 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
   const clipCenterX = selectedClip.x + selectedClip.width / 2;
   const clipCenterY = selectedClip.y + selectedClip.height / 2;
 
-  // Convert clip center to screen space
-  const clipCenterScreen = canvasToScreen(clipCenterX, clipCenterY, viewport, { width: canvasWidth, height: canvasHeight }, scale, zeroOffset);
+  // Resolve actual rendered dimensions (accounting for conform if present)
+  // For clips with conform (e.g., 16:9 video fitted into 9:16 canvas),
+  // the transform overlay should match the actual rendered bounds, not the clip's logical bounds
+  let actualWidth = selectedClip.width;
+  let actualHeight = selectedClip.height;
+  let actualX = selectedClip.x;
+  let actualY = selectedClip.y;
+
+  if (selectedClip.conform && selectedClip.conform.sourceWidth && selectedClip.conform.sourceHeight) {
+    const resolved = resolveConform(selectedClip.conform, canvasWidth, canvasHeight);
+    actualWidth = resolved.width;
+    actualHeight = resolved.height;
+    actualX = resolved.x;
+    actualY = resolved.y;
+  }
+
+  // Convert clip center to screen space (use actual rendered position)
+  const actualCenterX = actualX + actualWidth / 2;
+  const actualCenterY = actualY + actualHeight / 2;
+  const clipCenterScreen = canvasToScreen(actualCenterX, actualCenterY, viewport, { width: canvasWidth, height: canvasHeight }, scale, zeroOffset);
 
   // Calculate screen-space dimensions (accounting for scale and zoom)
-  const handleDisplayWidth = selectedClip.width * scale * viewport.zoom;
-  const handleDisplayHeight = selectedClip.height * scale * viewport.zoom;
+  const handleDisplayWidth = actualWidth * scale * viewport.zoom;
+  const handleDisplayHeight = actualHeight * scale * viewport.zoom;
 
   // Position transform box centered at the clip center, rotation applied via CSS transform
   const handleDisplayX = clipCenterScreen.x - handleDisplayWidth / 2;
@@ -1107,24 +1174,6 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({ canvasWidth,
   const showRightGuide = isDragging && snappedRight;
   const showTopGuide = isDragging && snappedTop;
   const showBottomGuide = isDragging && snappedBottom;
-
-  textRenderTrace("text-overlay-bounds", {
-    clipId: selectedClip.id,
-    kind: selectedClip.kind,
-    styleId: (selectedClip as any).styleId,
-    text: (selectedClip as any).text,
-    fontFamily: (selectedClip as any).fontFamily,
-    fontSize: (selectedClip as any).fontSize,
-    fontWeight: (selectedClip as any).fontWeight,
-    background: (selectedClip as any).background,
-    hasStyleDefinition: !!(selectedClip as any).styleDefinition,
-    canvasBounds: { x: selectedClip.x, y: selectedClip.y, width: selectedClip.width, height: selectedClip.height },
-    screenBounds: { x: handleDisplayX, y: handleDisplayY, width: handleDisplayWidth, height: handleDisplayHeight },
-    scale,
-    viewport,
-    display: { width: displayWidth, height: displayHeight },
-    currentTime,
-  });
 
   return (
     <div

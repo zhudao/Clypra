@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { effectBleed, measureTextEffectContentBounds, calculateTextClipSize, createTextClip } from "../textClip";
-import type { TextEffectDefinition } from "@clypra/engine";
+import type { TextEffectDefinition } from "@clypra-studio/engine";
 
-// Mock @clypra/engine
-vi.mock("@clypra/engine", () => {
+// Mock @clypra-studio/engine
+vi.mock("@clypra-studio/engine", () => {
   class MockTemplateRenderer {
     updateLayer = vi.fn();
     drawFrame = vi.fn();

@@ -552,7 +552,7 @@ impl VideoDecoder {
                       ts, decode_time, total_time, packets_decoded, self.state.sequential_hits);
         }
         
-        // FIX (FINDING-009): Validate RGBA buffer size matches expected dimensions
+        // Validate RGBA buffer size matches expected dimensions
         // RGBA format = 4 bytes per pixel
         let expected_size = (fit_w * fit_h * 4) as usize;
         let actual_size = rgba.len();
@@ -760,7 +760,7 @@ pub(crate) struct DecoderEntry {
 pub(crate) static DECODER_POOL: Lazy<DashMap<String, DecoderEntry>> =
     Lazy::new(DashMap::new);
 
-// FIX (FINDING-014): Add pool size limit with proper LRU eviction
+// Add pool size limit with proper LRU eviction
 const MAX_DECODER_POOL_SIZE: usize = 20;
 
 pub async fn get_decoder(path: &str) -> Result<Arc<Mutex<VideoDecoder>>, String> {
@@ -781,7 +781,7 @@ pub async fn get_decoder(path: &str) -> Result<Arc<Mutex<VideoDecoder>>, String>
     #[cfg(debug_assertions)]
     eprintln!("[METRIC] decoder_pool.miss=1 path={}", path);
 
-    // FIX (FINDING-014): Evict least recently used decoder if pool is full
+    // Evict least recently used decoder if pool is full
     if DECODER_POOL.len() >= MAX_DECODER_POOL_SIZE {
         let mut oldest_key: Option<String> = None;
         let mut oldest_time = Instant::now();

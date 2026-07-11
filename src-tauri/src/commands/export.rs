@@ -64,7 +64,6 @@ pub struct ExportAudioClip {
     pub trim_in: f64,
     
     /// Volume multiplier (0.0-1.0)
-    /// ✅ CRITICAL FIX (FINDING-002): Changed from f32 to f64 to match TypeScript precision
     /// This prevents precision loss during serialization round-trips
     pub volume: f64,
 
@@ -202,7 +201,7 @@ pub async fn start_video_export(
     config: ExportConfig,
     on_progress: Channel<ExportProgress>,
 ) -> Result<String, String> {
-    // FIX (FINDING-003): Validate frame dimensions before starting export
+    // Validate frame dimensions before starting export
     if config.width == 0 || config.height == 0 {
         return Err(format!("Invalid export dimensions: {}x{}", config.width, config.height));
     }
@@ -264,7 +263,7 @@ pub async fn start_video_export(
             let fade_in = clip.fade_in.unwrap_or(0.0).max(0.0).min(clip.duration);
             let fade_out = clip.fade_out.unwrap_or(0.0).max(0.0).min(clip.duration);
             
-            // FIX (FINDING-018): Ensure audio timebase alignment with video to prevent A/V drift
+            // Ensure audio timebase alignment with video to prevent A/V drift
             // Resample to consistent 48kHz before processing to match video timebase
             let mut chain = format!(
                 "[{}:a]aresample=48000,atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS",
@@ -302,7 +301,7 @@ pub async fn start_video_export(
         
         // Configure AAC audio codec with explicit sample rate for consistency
         cmd.arg("-c:a").arg("aac");
-        cmd.arg("-ar").arg("48000"); // FIX (FINDING-018): Lock output sample rate
+        cmd.arg("-ar").arg("48000"); // Lock output sample rate
         cmd.arg("-b:a").arg("128k");
     } else {
         // Map only the video stream from input 0
@@ -424,7 +423,7 @@ pub async fn write_export_frame(
         .get_mut(&session_id)
         .ok_or_else(|| format!("Export session not found: {}", session_id))?;
     
-    // FIX (FINDING-003): Validate frame buffer size matches expected dimensions
+    // Validate frame buffer size matches expected dimensions
     // RGBA format = 4 bytes per pixel
     let expected_size = (session.width * session.height * 4) as usize;
     let actual_size = frame_data.len();

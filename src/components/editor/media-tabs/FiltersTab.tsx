@@ -217,14 +217,31 @@ const FilterCard: React.FC<FilterCardProps> = ({ filter, isFavorite, onFavorite,
 
     try {
       console.log(`[FilterCard] Adding filter "${filter.name}" to timeline`);
+      console.log(`[FilterCard] Filter object from listing:`, {
+        id: filter.id,
+        name: filter.name,
+        category: filter.category,
+        url: filter.url,
+        pipeline: filter.pipeline,
+        hasGradingParams: !!filter.gradingParams,
+        gradingParams: filter.gradingParams,
+        allKeys: Object.keys(filter),
+      });
       setIsDownloading(true);
 
       // Download filter JSON with minimum delay for visual feedback
       const downloadPromise = filterCacheManager.ensureDownloaded(filter);
       const delayPromise = new Promise((resolve) => setTimeout(resolve, 300));
 
-      await Promise.all([downloadPromise, delayPromise]);
+      const [cachedFilter] = await Promise.all([downloadPromise, delayPromise]);
       console.log(`[FilterCard] Filter "${filter.name}" downloaded successfully`);
+      console.log(`[FilterCard] Cached filter data:`, {
+        id: cachedFilter.id,
+        fileName: cachedFilter.fileName,
+        hasGradingParams: !!cachedFilter.filter.gradingParams,
+        gradingParams: cachedFilter.filter.gradingParams,
+        allKeys: Object.keys(cachedFilter.filter),
+      });
       setIsDownloaded(true);
 
       // Add to timeline
@@ -258,11 +275,7 @@ const FilterCard: React.FC<FilterCardProps> = ({ filter, isFavorite, onFavorite,
         <Star className={`w-3 h-3 ${isFavorite ? "fill-yellow-400 text-yellow-400!" : ""}`} />
       </button>
 
-      {filter.pipeline === "v2" && (
-        <span className="absolute top-1 left-1 px-1 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide bg-violet-600/80 text-white z-10">
-          V2
-        </span>
-      )}
+      {filter.pipeline === "v2" && <span className="absolute top-1 left-1 px-1 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide bg-violet-600/80 text-white z-10">V2</span>}
 
       {/* Preview Area / Image or Fallback Gradient */}
       <div className="flex-1 flex items-center justify-center w-full select-none relative overflow-hidden rounded-lg bg-surface">

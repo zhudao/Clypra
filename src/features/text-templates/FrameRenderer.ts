@@ -1,4 +1,4 @@
-import { TemplateRenderer } from "@clypra/engine";
+import { TemplateRenderer } from "@clypra-studio/engine";
 import { TextTemplate, TemplateCustomization, RenderedFrameSequence } from "./types";
 
 /**

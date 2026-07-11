@@ -1,7 +1,7 @@
 /**
  * Audio Clip Utilities
  *
- * ✅ CRITICAL FIX (FINDING-006): Extracted from videoExport.ts to create
+ * Extracted from videoExport.ts to create
  * a single source of truth for timeline audio clip queries.
  *
  * This logic was previously duplicated in export and likely other subsystems.

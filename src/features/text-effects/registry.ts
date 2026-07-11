@@ -22,7 +22,7 @@
 
 import type { TextEffectDefinition } from "./types/types";
 import { wrapText } from "./lib/helpers";
-import { _buildConfig, resolveFontFamilyName } from "@clypra/engine";
+import { _buildConfig, resolveFontFamilyName } from "@clypra-studio/engine";
 
 // ─── Internal registry state ──────────────────────────────────────────────────
 

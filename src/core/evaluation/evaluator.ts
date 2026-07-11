@@ -9,7 +9,7 @@
  * - Proxies
  *
  * NOTE: The function is named evaluateTimelineScene (not evaluateScene) to
- * avoid collision with @clypra/engine's evaluateScene, which takes a
+ * avoid collision with @clypra-studio/engine's evaluateScene, which takes a
  * SceneDocument and draws directly to a Canvas 2D context. These two
  * functions operate at different layers:
  *
@@ -22,6 +22,7 @@ import type { EvaluatedScene, EvaluatedVisualLayer, EvaluatedMediaLayer, Evaluat
 import { toCompositorClips } from "../timeline/adapter";
 import { getClipEndTime } from "@/lib/timeline/timelineClip";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { resolveConform } from "@clypra-studio/engine";
 
 const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
 import { getEvaluationCache, computeClipVersion, computeAssetsVersion } from "./cache";
@@ -30,7 +31,6 @@ import { resolveClipSourceTime } from "../timeline/sourceTime";
 import { calculateTextAnimationState } from "@/lib/text/textAnimation";
 import { normalizeFilterIntensity } from "../render/filterIR";
 import { useEffectsStore } from "@/features/text-effects/store/effectsStore";
-import { textRenderTrace } from "@/lib/debug/textRenderTrace";
 
 /**
  * Evaluate the NLE timeline at a specific time.
@@ -117,10 +117,19 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
     const offset = evalTime - clip.startTime;
     const kf = (clip as any).keyframes || {};
 
-    const evalX = kf.x !== undefined ? evaluateProperty(kf.x, offset, clip.duration) : clip.x;
-    const evalY = kf.y !== undefined ? evaluateProperty(kf.y, offset, clip.duration) : clip.y;
-    const evalW = kf.width !== undefined ? evaluateProperty(kf.width, offset, clip.duration) : clip.width;
-    const evalH = kf.height !== undefined ? evaluateProperty(kf.height, offset, clip.duration) : clip.height;
+    let evalX = kf.x !== undefined ? evaluateProperty(kf.x, offset, clip.duration) : clip.x;
+    let evalY = kf.y !== undefined ? evaluateProperty(kf.y, offset, clip.duration) : clip.y;
+    let evalW = kf.width !== undefined ? evaluateProperty(kf.width, offset, clip.duration) : clip.width;
+    let evalH = kf.height !== undefined ? evaluateProperty(kf.height, offset, clip.duration) : clip.height;
+
+    if (clip.conform && clip.conform.sourceWidth && clip.conform.sourceHeight) {
+      const conformed = resolveConform(clip.conform, project?.canvasWidth ?? 1920, project?.canvasHeight ?? 1080);
+      evalX = conformed.x;
+      evalY = conformed.y;
+      evalW = conformed.width;
+      evalH = conformed.height;
+    }
+
     const evalRot = kf.rotation !== undefined ? evaluateProperty(kf.rotation, offset, clip.duration) : clip.rotation;
     const evalOpacity = kf.opacity !== undefined ? evaluateProperty(kf.opacity, offset, clip.duration) : clip.opacity;
 
@@ -131,22 +140,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       const transitionState = evaluateTransitionState(clip, transitionWindows);
 
       const styleDefinition = textClip.styleId ? (useEffectsStore.getState().definitions[textClip.styleId] ?? textClip.styleDefinition) : textClip.styleDefinition;
-      textRenderTrace("text-evaluate-layer", {
-        clipId: clip.id,
-        evalTime,
-        startTime: clip.startTime,
-        duration: clip.duration,
-        offset,
-        trackId: clip.trackId,
-        role: clip.role,
-        trackIndex: clip.trackIndex,
-        contentBounds: { x: clip.x, y: clip.y, width: clip.width, height: clip.height, opacity: clip.opacity },
-        styleId: textClip.styleId,
-        hasStoreDefinition: !!(textClip.styleId && useEffectsStore.getState().definitions[textClip.styleId]),
-        hasEmbeddedDefinition: !!textClip.styleDefinition,
-        resolvedDefinitionId: styleDefinition?.id,
-        text: textClip.text,
-      });
+
       const evalFontSize = kf.fontSize !== undefined ? evaluateProperty(kf.fontSize, offset, clip.duration) : textClip.fontSize || 48;
       const evalColor = kf.color !== undefined ? evaluateProperty(kf.color, offset, clip.duration) : textClip.color || "#ffffff";
       const evalLetterSpacing = kf.letterSpacing !== undefined ? evaluateProperty(kf.letterSpacing, offset, clip.duration) : (textClip.letterSpacing ?? styleDefinition?.font?.letterSpacing ?? 0);
@@ -172,6 +166,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         role: clip.role,
         clipKind: clip.kind,
         zIndex: i,
+        trackIndex: clip.trackIndex,
         layerType: "text",
         time: evalTime,
         clipStartTime: clip.startTime,
@@ -206,23 +201,25 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       };
 
       visualLayers.push(textLayer);
-      textRenderTrace("text-evaluate-layer", {
-        clipId: textLayer.clipId,
-        layerId: textLayer.layerId,
-        zIndex: textLayer.zIndex,
-        contentBounds: { x: textLayer.x, y: textLayer.y, width: textLayer.width, height: textLayer.height },
-        opacity: textLayer.opacity,
-        fontFamily: textLayer.fontFamily,
-        fontSize: textLayer.fontSize,
-        fontWeight: textLayer.fontWeight,
-        styleId: textLayer.styleId,
-        hasStyleDefinition: !!textLayer.styleDefinition,
-      });
+
       continue;
     }
 
     // ── Media layers ──────────────────────────────────────────────────────────
-    const asset = assetMap.get(clip.mediaId);
+    let asset = assetMap.get(clip.mediaId);
+    if (!asset && (clip.kind === "sticker" || clip.mediaId.startsWith("sticker-"))) {
+      asset = {
+        id: clip.mediaId,
+        name: clip.name || "Sticker",
+        path: (clip as any).stickerImagePath || clip.stickerAnimationPath || "",
+        type: "image",
+        duration: clip.duration,
+        size: 0,
+        stickerFormat: clip.stickerFormat,
+        stickerAnimationPath: clip.stickerAnimationPath,
+        stickerSourceId: clip.stickerSourceId,
+      };
+    }
     if (!asset || (asset.type !== "video" && asset.type !== "image")) continue;
 
     const sourceTime = resolveClipSourceTime(clip, evalTime, {
@@ -240,6 +237,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       role: clip.role,
       clipKind: clip.kind,
       zIndex: i,
+      trackIndex: clip.trackIndex, // ADDED: Include track index for compositor debugging
       layerType: "media",
       mediaId: clip.mediaId,
       mediaType: asset.type === "video" ? "video" : "image",
@@ -247,12 +245,14 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       posterFrame: asset.posterFrame,
       sourceTime,
       sourceRotation: asset.rotation,
+      conform: (clip as any).conform,
       x: evalX,
       y: evalY,
       width: evalW,
       height: evalH,
       rotation: evalRot,
-      opacity: evalOpacity * (transitionState.opacity ?? 1.0),
+      opacity: evalOpacity,
+      transitionOpacity: transitionState.opacity ?? 1.0,
       inTransition: transitionState.inTransition,
       transitionType: transitionState.type,
       transitionProgress: transitionState.progress,
@@ -279,7 +279,16 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
           localTime: Math.max(0, evalTime - fxClip.startTime),
         })),
       ],
-      filter: clip.filter,
+      // Apply filter from clip (if directly attached) OR from activeFilterClip (timeline filter track)
+      filter:
+        clip.filter ||
+        (activeFilterClip
+          ? {
+              id: activeFilterClip.mediaId,
+              name: activeFilterClip.name || "",
+              intensity: normalizeFilterIntensity((activeFilterClip as any).intensity),
+            }
+          : undefined),
     };
 
     visualLayers.push(mediaLayer);
@@ -362,11 +371,8 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         id: activeFilterClip.mediaId,
         name: activeFilterClip.name || "",
         intensity: normalizeFilterIntensity((activeFilterClip as any).intensity),
-        swatch: (activeFilterClip as any).swatch || "",
         pipeline: (activeFilterClip as any).pipeline as "v2" | undefined,
-        effectStack: (activeFilterClip as any).effectStack as
-          | Array<{ type: string; params?: Record<string, unknown> }>
-          | undefined,
+        effectStack: (activeFilterClip as any).effectStack as Array<{ type: string; params?: Record<string, unknown> }> | undefined,
       }
     : undefined;
 

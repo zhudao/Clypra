@@ -2,7 +2,7 @@ import React, {
   useEffect, useRef, useImperativeHandle,
   forwardRef, useState
 } from 'react';
-import { TemplateRenderer } from '@clypra/engine';
+import { TemplateRenderer } from '@clypra-studio/engine';
 
 export interface TemplatePreviewPlayerHandle {
   play:        () => void;

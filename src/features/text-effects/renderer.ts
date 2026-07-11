@@ -1,4 +1,4 @@
-import { evaluateScene as engineEvaluateScene, textEffectConfigToScene, defaultConfig as engineDefaultConfig, type TextEffectConfig, _buildConfig } from "@clypra/engine";
+import { evaluateScene as engineEvaluateScene, textEffectConfigToScene, defaultConfig as engineDefaultConfig, type TextEffectConfig, _buildConfig } from "@clypra-studio/engine";
 import { TextEffectDefinition } from "./types/types";
 import { hasRegisteredEngine, renderRegisteredEffect } from "./registry";
 import { getFontLoader } from "@/core/fonts/FontLoader";
@@ -40,7 +40,7 @@ function buildEngineConfig(effect: TextEffectDefinition, text: string, fontSize:
 /**
  * Render a text effect onto any 2D canvas context.
  *
- * Uses the full @clypra/engine pipeline (evaluateScene) for API-fetched effects
+ * Uses the full @clypra-studio/engine pipeline (evaluateScene) for API-fetched effects
  * so stroke blur (ctx.filter), glow compositing, bevel, and all post-fx are
  * applied correctly. Locally registered engines (studio-generated classes) are
  * called via their drawFrame() method.

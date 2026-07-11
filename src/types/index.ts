@@ -177,6 +177,8 @@ export interface Clip {
   sourceAspectRatio?: number; // Original aspect ratio (width/height)
   /** Placement fit mode used for deterministic reset/re-fit behavior. */
   fitMode?: "contain" | "cover" | "fill" | "stretch" | "original";
+  /** Professional conform settings */
+  conform?: import("@clypra-studio/engine").ClipConform;
   /** Audio volume (0.0 to 1.0, default 1.0) */
   volume?: number;
   kind?: ClipKind; // Optional for backward compatibility
@@ -193,6 +195,7 @@ export interface Clip {
   stickerFormat?: "static" | "gif" | "lottie";
   stickerAnimationPath?: string;
   stickerSourceId?: string;
+  stickerImagePath?: string;
   /** Text template ID for text clips */
   templateId?: string;
 }
@@ -268,7 +271,6 @@ export interface FilterClip extends Clip {
   kind: "filter";
   name: string;
   intensity: number; // 0.0 to 1.0
-  swatch?: string;
   /** V2 MPG stack from Filter Lab — rendered via MPG pipeline when present */
   pipeline?: "v2";
   effectStack?: Array<{ type: string; params?: Record<string, unknown> }>;
@@ -357,7 +359,7 @@ export interface TextClip extends Clip {
     padding: number;
     borderRadius: number;
   };
-  styleDefinition?: import("@clypra/engine").TextEffectDefinition;
+  styleDefinition?: import("@clypra-studio/engine").TextEffectDefinition;
   /** Entrance animation */
   entranceAnimation?: TextAnimation;
   /** Exit animation */
@@ -432,11 +434,13 @@ export type TransitionType = "fade" | "dissolve" | "canvas";
 export type TransitionAlignment = "center" | "start" | "end";
 
 // Extended easing functions matching TransitionRenderer
-export type TransitionEasing = import("@clypra/engine").EasingFunction;
+export type TransitionEasing = import("@clypra-studio/engine").EasingFunction;
 
 export interface TransitionTimelineItem extends BaseTimelineItem {
   kind: "transition";
   type: TransitionType;
+  /** Renderer ID for GPU transition (e.g., "cross-dissolve", "push", "glitch") - used to resolve GPU implementation */
+  renderer?: string;
   fromItemId: string;
   toItemId: string;
   alignment: TransitionAlignment;
@@ -459,6 +463,7 @@ export interface TransformState {
     width: number;
     height: number;
     rotation: number;
+    conform?: any;
   };
   startMousePos: {
     x: number;

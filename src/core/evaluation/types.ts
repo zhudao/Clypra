@@ -35,6 +35,9 @@ interface BaseVisualLayer {
   /** Z-order (0 = background, higher = foreground) */
   readonly zIndex: number;
 
+  /** Track index of the clip */
+  readonly trackIndex?: number;
+
   /** Layer type discriminator */
   readonly layerType: "media" | "text";
 
@@ -101,6 +104,9 @@ export interface EvaluatedMediaLayer extends BaseVisualLayer {
   /** Source file path (Tauri-converted URL) */
   readonly sourcePath: string;
 
+  /** Track index (for compositor debugging and z-order verification) */
+  readonly trackIndex?: number;
+
   /** Render resource handle (for pre-resolved resources) */
   readonly resourceHandle?: RenderResourceHandle;
 
@@ -121,6 +127,19 @@ export interface EvaluatedMediaLayer extends BaseVisualLayer {
 
   /** Active color filter on this layer */
   readonly filter?: { id: string; name: string; intensity: number };
+
+  /** Layout parameters for the clip fitting/cropping/transforming */
+  readonly layout?: any;
+
+  /** Professional conform settings */
+  readonly conform?: import("@clypra-studio/engine").ClipConform;
+
+  /** Dimensions of the original source media file */
+  readonly sourceWidth?: number;
+  readonly sourceHeight?: number;
+
+  /** Combined transition-driven opacity fade contribution */
+  readonly transitionOpacity?: number;
 }
 
 /**
@@ -196,7 +215,7 @@ export interface EvaluatedTextLayer extends BaseVisualLayer {
 
   /** Style preset ID for text effects */
   readonly styleId?: string;
-  readonly styleDefinition?: import("@clypra/engine").TextEffectDefinition;
+  readonly styleDefinition?: import("@clypra-studio/engine").TextEffectDefinition;
 
   /** Template-specific settings */
   readonly templateId?: string;
@@ -248,8 +267,8 @@ export interface EvaluatedTransition {
   /** Transition ID */
   readonly transitionId: string;
 
-  /** Transition type - uses TransitionRenderer from @clypra/engine for single source of truth */
-  readonly type: import("@clypra/engine").TransitionRendererType;
+  /** Transition type - uses TransitionRenderer from @clypra-studio/engine for single source of truth */
+  readonly type: import("@clypra-studio/engine").TransitionRendererType;
 
   /** Progress (0.0 - 1.0) */
   readonly progress: number;
@@ -266,8 +285,8 @@ export interface EvaluatedTransition {
   /** Blend mode */
   readonly blendMode: BlendMode;
 
-  /** Optional transition parameters from @clypra/engine */
-  readonly params?: import("@clypra/engine").TransitionParameters;
+  /** Optional transition parameters from @clypra-studio/engine */
+  readonly params?: import("@clypra-studio/engine").TransitionParameters;
 }
 
 /**
@@ -349,7 +368,6 @@ export interface EvaluatedScene {
     id: string;
     name: string;
     intensity: number;
-    swatch?: string;
     pipeline?: "v2";
     effectStack?: ReadonlyArray<{ type: string; params?: Record<string, unknown> }>;
   };

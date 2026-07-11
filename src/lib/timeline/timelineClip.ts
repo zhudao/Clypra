@@ -2,6 +2,7 @@ import { DEFAULT_STILL_DURATION_SECONDS } from "../../constants/config";
 import type { Clip, MediaAsset } from "../../types";
 import { generateId } from "../utils/id";
 import { DEFAULT_PLACEMENT_POLICY } from "./placementPolicy";
+import type { ClipConform } from "@clypra-studio/engine";
 
 export const resolveClipDuration = (asset: MediaAsset): number => {
   if (asset.type === "image") return DEFAULT_STILL_DURATION_SECONDS;
@@ -178,11 +179,22 @@ export const createClipFromAsset = ({ asset, trackId, startTime, width, height, 
   const isSticker = asset.id.startsWith("sticker-");
   const kind = (isSticker ? "sticker" : asset.type) as Clip["kind"];
 
+  const isVisual = asset.type === "video" || asset.type === "image";
+  const defaultConform: ClipConform | undefined = (isVisual && !isSticker) ? {
+    mode: "fit",
+    sourceWidth: asset.width || 0,
+    sourceHeight: asset.height || 0,
+    userScale: 1,
+    userOffsetX: 0,
+    userOffsetY: 0,
+  } : undefined;
+
   return {
     id: generateId("clip"),
     kind,
     trackId,
     mediaId: asset.id,
+    name: asset.name,
     startTime,
     duration,
     trimIn: 0,
@@ -196,10 +208,12 @@ export const createClipFromAsset = ({ asset, trackId, startTime, width, height, 
     aspectRatioLocked: true, // Lock aspect ratio by default for video/images
     sourceAspectRatio,
     fitMode: fitMode as Clip["fitMode"],
+    conform: defaultConform,
     ...(asset.type !== "audio" && {
       stickerFormat: asset.stickerFormat,
       stickerAnimationPath: asset.stickerAnimationPath,
       stickerSourceId: asset.stickerSourceId,
+      ...(isSticker && { stickerImagePath: asset.path }),
     }),
     ...(audioPath && asset.type === "audio" && { audioPath }), // Include audioPath for audio clips
   } as any;

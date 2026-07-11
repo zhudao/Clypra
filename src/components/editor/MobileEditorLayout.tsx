@@ -240,9 +240,9 @@ export const MobileEditorLayout: React.FC = () => {
           stickerFormat: "lottie",
           stickerAnimationPath: absoluteAnimationPath,
           stickerSourceId: item.id,
+          width: 400,
+          height: 400,
         };
-
-        addMediaAsset(mediaAsset);
 
         const latestTracks = useTimelineStore.getState().tracks;
         const latestClips = useTimelineStore.getState().clips;
@@ -337,7 +337,6 @@ export const MobileEditorLayout: React.FC = () => {
         kind: "filter" as const,
         name: cachedFilter.filter.name || "Filter",
         intensity: defaultIntensity,
-        swatch: cachedFilter.filter.swatch || "",
         pipeline: cachedFilter.filter.pipeline,
         effectStack: cachedFilter.filter.effectStack,
       };

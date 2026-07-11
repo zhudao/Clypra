@@ -12,15 +12,15 @@ export interface WaveformOptions {
   barColor?: string;
   backgroundColor?: string;
   barGap?: number;
-  trimIn?: number; // FIX (FINDING-017): Add trim support
-  trimOut?: number; // FIX (FINDING-017): Add trim support
+  trimIn?: number; // Add trim support
+  trimOut?: number; // Add trim support
 }
 
 /**
  * Generate a waveform thumbnail from an audio file
  * Returns a base64 data URL that can be used as an image source
  *
- * FIX (FINDING-017): Now respects trimIn/trimOut to only analyze the used region
+ * Now respects trimIn/trimOut to only analyze the used region
  */
 export async function generateAudioWaveform(audioPath: string, options: WaveformOptions = {}): Promise<string> {
   const {
@@ -30,8 +30,8 @@ export async function generateAudioWaveform(audioPath: string, options: Waveform
     barColor = "#22d3ee", // cyan-400
     backgroundColor = "#1e293b", // slate-800
     barGap = 0.2,
-    trimIn = 0, // FIX (FINDING-017): Default to full audio
-    trimOut, // FIX (FINDING-017): Default to full audio
+    trimIn = 0, // Default to full audio
+    trimOut, // Default to full audio
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -54,7 +54,7 @@ export async function generateAudioWaveform(audioPath: string, options: Waveform
         const channelData = audioBuffer.getChannelData(0);
         const sampleRate = audioBuffer.sampleRate;
 
-        // FIX (FINDING-017): Calculate sample range for trimmed region
+        // Calculate sample range for trimmed region
         const startSample = Math.floor(trimIn * sampleRate);
         const endSample = trimOut ? Math.floor(trimOut * sampleRate) : channelData.length;
         const trimmedLength = Math.min(endSample - startSample, channelData.length - startSample);

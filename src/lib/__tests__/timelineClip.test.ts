@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getClipVisibleDuration, getClipEndTime, getTimelineContentEnd, getTimelineViewportEnd, normalizeClipTiming, createClipFromAsset, resolveClipDuration } from "../timeline/timelineClip";
+import { resolveDefaultFitModeForAsset } from "../timeline/placementPolicy";
 import type { Clip, MediaAsset } from "@/types";
 
 describe("timelineClip timing helpers", () => {
@@ -421,6 +422,42 @@ describe("timelineClip timing helpers", () => {
       const trimmed = normalizeClipTiming({ ...clip, trimIn: 2, trimOut: 8, duration: 999 }, asset);
       expect(trimmed.duration).toBe(trimmed.trimOut - trimmed.trimIn);
       expect(trimmed.duration).toBe(6);
+    });
+
+    it("creates a sticker clip with stickerImagePath, stickerFormat, and name set correctly", () => {
+      const asset: MediaAsset = {
+        id: "sticker-123",
+        name: "Joyful Laughing Face",
+        path: "/path/to/sticker.png",
+        type: "image",
+        duration: 3.0,
+        size: 0,
+        stickerFormat: "lottie",
+        stickerAnimationPath: "/path/to/sticker.json",
+        stickerSourceId: "123",
+        width: 400,
+        height: 400,
+      };
+
+      const clip = createClipFromAsset({
+        asset,
+        trackId: "track-1",
+        startTime: 5.0,
+        width: 1920,
+        height: 1080,
+        fitMode: resolveDefaultFitModeForAsset(asset),
+      });
+
+      expect(clip.kind).toBe("sticker");
+      expect(clip.mediaId).toBe("sticker-123");
+      expect(clip.name).toBe("Joyful Laughing Face");
+      expect((clip as any).stickerImagePath).toBe("/path/to/sticker.png");
+      expect(clip.stickerFormat).toBe("lottie");
+      expect(clip.stickerAnimationPath).toBe("/path/to/sticker.json");
+      expect(clip.stickerSourceId).toBe("123");
+      expect(clip.conform).toBeUndefined();
+      expect(clip.width).toBe(400);
+      expect(clip.height).toBe(400);
     });
   });
 });

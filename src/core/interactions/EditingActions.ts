@@ -122,7 +122,7 @@ export class EditingActions {
     try {
       useHistoryStore.getState().execute(command);
 
-      // FINDING-012 FIX: Get both new clip IDs (original clip is removed)
+      // Get both new clip IDs (original clip is removed)
       const leftClipId = command.getLeftClipId();
       const rightClipId = command.getRightClipId();
 
@@ -145,7 +145,7 @@ export class EditingActions {
         };
       }
 
-      // FINDING-012 FIX: Select BOTH splits (user expectation: both are "new")
+      // Select BOTH splits (user expectation: both are "new")
       // TL-BUG-003 fix: selectClip replaces the array, so use toggleClipSelection
       // for the second clip to append it instead of overwriting.
       const uiStore = useUIStore.getState();

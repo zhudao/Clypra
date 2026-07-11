@@ -32,7 +32,7 @@ const executeNextFrame = (): void => {
   callbacks.forEach((cb) => cb());
 };
 
-describe("PlaybackClock — FINDING-017: RAF Generation Counter", () => {
+describe("PlaybackClock: RAF Generation Counter", () => {
   let clock: PlaybackClock;
   let originalRAF: typeof requestAnimationFrame;
   let originalCAF: typeof cancelAnimationFrame;
@@ -65,7 +65,7 @@ describe("PlaybackClock — FINDING-017: RAF Generation Counter", () => {
   });
 
   it("should prevent stale RAF tick from executing after seek", () => {
-    // FINDING-017: When seek() does pause→play, old RAF tick can execute
+    // When seek() does pause→play, old RAF tick can execute
     // Generation counter prevents this
 
     clock.play();
@@ -90,7 +90,7 @@ describe("PlaybackClock — FINDING-017: RAF Generation Counter", () => {
     oldCallbacks[0]();
     const timeAfter = clock.time;
 
-    // FINDING-017 FIX: Time should NOT advance because old callback
+    // Time should NOT advance because old callback
     // has stale generation and should be ignored
     expect(timeAfter).toBe(timeBefore);
   });

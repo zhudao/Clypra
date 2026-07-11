@@ -1,7 +1,7 @@
 import { beforeAll, afterAll, describe, test, expect, vi } from "vitest";
 import { renderTextEffect, renderTextEffectToDataURL, renderTextEffectAsync } from "./renderer";
 import { TextEffectDefinition } from "./types/types";
-import { _buildConfig } from "@clypra/engine";
+import { _buildConfig } from "@clypra-studio/engine";
 const SolarisInkDefinition: TextEffectDefinition = {
   id: "solaris-ink",
   name: "Solaris Ink",

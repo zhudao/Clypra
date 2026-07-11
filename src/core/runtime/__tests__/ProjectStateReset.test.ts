@@ -80,18 +80,40 @@ vi.mock("@/core/playback/PlaybackClock", () => ({
   resetPlaybackClock: vi.fn(),
 }));
 
-vi.mock("@/core/scheduler/FrameScheduler", () => ({
-  getFrameScheduler: () => ({
-    cancelAll: vi.fn(),
-    getStats: () => ({ active: 0 }),
-  }),
-  resetFrameScheduler: vi.fn(),
-}));
+
 
 vi.mock("@/lib/monitoring/PerformanceMonitor", () => ({
   performanceMonitor: {
     reset: vi.fn(),
   },
+}));
+
+vi.mock("@/store/middleware/autoSaveMiddleware", () => ({
+  resumeAutoSave: vi.fn(),
+  suspendAutoSave: vi.fn(),
+  autoSaveMiddleware: (f: any) => f,
+}));
+
+vi.mock("../evaluation/evaluator", () => ({
+  clearEvaluationCache: vi.fn(),
+}));
+
+vi.mock("../render/rasterizer", () => ({
+  clearLottieRenderCache: vi.fn(),
+}));
+
+vi.mock("@/lib/cache/globalGPUCache", () => ({
+  globalGPUCache: {
+    clearAllTextures: vi.fn().mockReturnValue(0),
+  },
+}));
+
+vi.mock("@/components/editor/preview/previewMediaSync", () => ({
+  clearClipFilterCache: vi.fn(),
+}));
+
+vi.mock("../resources/ResourceCache", () => ({
+  resetResourceCache: vi.fn(),
 }));
 
 describe("ProjectStateReset", () => {
@@ -106,7 +128,6 @@ describe("ProjectStateReset", () => {
       expect(result.success).toBe(true);
       expect(result.errors).toHaveLength(0);
       expect(result.resetSubsystems).toContain("PlaybackClock");
-      expect(result.resetSubsystems).toContain("FrameScheduler");
       expect(result.resetSubsystems).toContain("DragStateStore");
       expect(result.resetSubsystems).toContain("TransformController");
       expect(result.resetSubsystems).toContain("UIStore");
@@ -126,7 +147,6 @@ describe("ProjectStateReset", () => {
       const options: ResetOptions = {
         resetHistory: true,
         resetPlayback: false,
-        resetScheduler: false,
         resetUI: false,
         resetDrag: false,
         resetViewport: false,

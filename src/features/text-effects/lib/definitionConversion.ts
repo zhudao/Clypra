@@ -1,4 +1,4 @@
-import type { TextEffectConfig } from "@clypra/engine";
+import type { TextEffectConfig } from "@clypra-studio/engine";
 import type { EffectFullDefinition } from "../types/types";
 
 export type BoundingBoxSpec = {

@@ -49,7 +49,7 @@ import { getPlaybackClock, PlaybackClock } from "../playback/PlaybackClock";
 import { TransportAuthority } from "../playback/TransportAuthority";
 import { ProgramPlaybackContext } from "../playback/ProgramPlaybackContext";
 import { SourcePlaybackContext } from "../playback/SourcePlaybackContext";
-import { getFrameScheduler, FrameScheduler } from "../scheduler/FrameScheduler";
+
 import { RenderEngine } from "@/lib/renderEngine/renderEngine";
 import { QualityPreset, RendererMode, type SrpConfig } from "@/lib/renderEngine/types";
 import { PreviewMediaPool, type PreviewSyncState } from "../resources/PreviewMediaPool";
@@ -77,7 +77,6 @@ export class ProjectSession {
 
   // Owned subsystems (created on initialize, destroyed on dispose)
   private _playback: PlaybackClock | null = null;
-  private _scheduler: FrameScheduler | null = null;
   private _renderRuntime: RenderEngine | null = null;
   private _transportAuthority: TransportAuthority | null = null;
   private _programContext: ProgramPlaybackContext | null = null;
@@ -111,12 +110,7 @@ export class ProjectSession {
     return this._playback;
   }
 
-  get scheduler(): FrameScheduler {
-    if (!this._scheduler) {
-      throw new Error(`[ProjectSession] Scheduler not initialized. Call initialize() first.`);
-    }
-    return this._scheduler;
-  }
+
 
   get renderRuntime(): RenderEngine {
     if (!this._renderRuntime) {
@@ -164,7 +158,7 @@ export class ProjectSession {
     try {
       // Use global singletons (single clock/scheduler ensures no divergence)
       this._playback = getPlaybackClock();
-      this._scheduler = getFrameScheduler();
+
 
       // Create playback contexts and transport authority
       this._programContext = new ProgramPlaybackContext(this._playback);
@@ -241,10 +235,7 @@ export class ProjectSession {
         this._playback.stop();
       }
 
-      // 3. Cancel all pending render jobs
-      if (this._scheduler) {
-        this._scheduler.cancelAll();
-      }
+
 
       // 4. Release media resources (video elements, audio nodes)
       await this._releaseMediaResources();
@@ -268,7 +259,7 @@ export class ProjectSession {
 
       // 8. Release references to global singletons (actual disposal handled by destroyRuntime)
       this._playback = null;
-      this._scheduler = null;
+
 
       // 9. Reset stores
       await this._resetStores();
@@ -319,6 +310,14 @@ export class ProjectSession {
    */
   getPreviewVideoElements(): Map<string, HTMLVideoElement> {
     return this._previewMediaPool?.getVideoElements() ?? new Map();
+  }
+
+  /**
+   * Get the PreviewMediaPool instance for compositor integration.
+   * @internal Used by PixiSceneCompositor for texture management
+   */
+  getPreviewMediaPool(): PreviewMediaPool | null {
+    return this._previewMediaPool;
   }
 
   /**
@@ -474,7 +473,7 @@ export class ProjectSession {
       projectId: this.projectId,
       state: this._state,
       playbackState: this._playback?.state ?? null,
-      pendingJobs: this._scheduler?.getStats().active ?? 0,
+      pendingJobs: 0,
       videoElements: this._previewMediaPool ? this._previewMediaPool.getVideoElements().size : 0,
       asyncTasks: this._asyncTasks.size,
       rafLoops: this._rafIds.size,

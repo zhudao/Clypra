@@ -8,7 +8,7 @@ import { useTimelineStore } from "@/store/timelineStore";
 import { useProjectStore } from "@/store/projectStore";
 import { generateId } from "@/lib/utils/id";
 import type { VideoEffectClip } from "@/types";
-import type { EffectRenderer as EffectRendererType, EffectParameters } from "@clypra/engine";
+import type { EffectRenderer as EffectRendererType, EffectParameters } from "@clypra-studio/engine";
 
 /**
  * Create a renderer-based effect as a separate clip on the timeline

@@ -3,7 +3,6 @@ import { usePlaybackClock, usePlaybackControls } from "@/hooks/usePlaybackClock"
 import { useTimelineStore } from "@/store/timelineStore";
 import { useProjectStore } from "@/store/projectStore";
 import { snapToFrameBoundary } from "@/lib/utils/frameTime";
-import { traceStart, traceEnd } from "@/lib/debug/performanceTrace";
 
 interface PlayheadProps {
   pixelsPerSecond: number;
@@ -51,17 +50,9 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
     }
 
     const tick = () => {
-      traceStart("playhead-tick");
-
-      if (!isDragging) {
-        traceEnd("playhead-tick");
-        return;
-      }
-
       const container = containerRef.current;
       if (!container) {
         rafRef.current = requestAnimationFrame(tick);
-        traceEnd("playhead-tick");
         return;
       }
 
@@ -106,7 +97,6 @@ export const Playhead: React.FC<PlayheadProps> = ({ pixelsPerSecond, duration, c
         lastSeekUpdateRef.current = now;
       }
 
-      traceEnd("playhead-tick");
       rafRef.current = requestAnimationFrame(tick);
     };
 

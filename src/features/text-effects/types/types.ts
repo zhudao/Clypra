@@ -4,5 +4,5 @@
  * Satisfies TextEffectDefinition interface structure
  */
 
-// Re-export types from @clypra/engine for consistency across the codebase
-export type { EffectIndexItem, EffectFullDefinition, TextEffectDefinition } from "@clypra/engine";
+// Re-export types from @clypra-studio/engine for consistency across the codebase
+export type { EffectIndexItem, EffectFullDefinition, TextEffectDefinition } from "@clypra-studio/engine";

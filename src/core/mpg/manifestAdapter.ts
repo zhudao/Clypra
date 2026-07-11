@@ -8,7 +8,7 @@ import {
   type TrackDefinition,
   type AssetHandle,
   type EffectInstance,
-} from "@clypra/engine";
+} from "@clypra-studio/engine";
 
 export interface TimelineClipLike {
   id: string;

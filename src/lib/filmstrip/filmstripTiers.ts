@@ -138,7 +138,7 @@ export function generateViewportTileAddresses(options: {
 /**
  * Get the tile key for a given address. Used for Map-based cache lookups.
  *
- * FIX (FINDING-013): Use integer milliseconds for timestamp to avoid floating-point rounding
+ * Use integer milliseconds for timestamp to avoid floating-point rounding
  * issues that cause cache key mismatches. toFixed(3) can produce different strings for
  * mathematically equal values due to IEEE 754 rounding.
  */

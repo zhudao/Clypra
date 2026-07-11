@@ -1,9 +1,10 @@
 /**
  * Core Render Module
  *
- * Single-frame rendering from evaluated scenes.
- * Foundation for export, thumbnails, and validation.
+ * Headless compositor for WebGL/PixiJS scene rendering.
  */
 
-export * from "./frameRenderer";
-export * from "./rasterizer";
+export * from "./pixiSceneCompositor";
+export * from "./filterCache";
+export * from "./stickerBridge";
+export * from "./textBridge";

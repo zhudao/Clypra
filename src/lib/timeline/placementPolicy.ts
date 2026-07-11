@@ -25,7 +25,8 @@ export type AddPlacementIntent = "playhead";
  * - Video: cover (full-frame editorial baseline)
  * - Image: contain (preserve full still content by default)
  */
-export function resolveDefaultFitModeForAsset(asset: Pick<MediaAsset, "type">): ClipFitModeExtended {
+export function resolveDefaultFitModeForAsset(asset: Pick<MediaAsset, "type"> & { id?: string }): ClipFitModeExtended {
+  if (asset.id?.startsWith("sticker-")) return "original";
   if (asset.type === "image") return "contain";
   if (asset.type === "video") return "cover";
   return DEFAULT_PLACEMENT_POLICY.defaultVisualFitMode;

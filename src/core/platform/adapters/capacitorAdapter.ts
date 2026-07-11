@@ -130,7 +130,7 @@ export class CapacitorPlatformAdapter implements PlatformInterface {
       }
       return readResult.data;
     } catch (err) {
-      // FIX (FINDING-023): LocalStorage fallback with platform-aware path parsing
+      // LocalStorage fallback with platform-aware path parsing
       const pathParts = path.replace(/\\/g, "/").split("/");
       const projectId = pathParts.pop()?.replace(".json", "") || "";
       const project = localStorage.getItem(`clypra_project_${projectId}`);
@@ -262,7 +262,9 @@ export class CapacitorPlatformAdapter implements PlatformInterface {
   async saveRecording(fileName: string, data: Uint8Array): Promise<string> {
     const { Filesystem, Directory } = await import("@capacitor/filesystem");
     const base64Data = btoa(
-      Array.from(data).map((byte) => String.fromCharCode(byte)).join("")
+      Array.from(data)
+        .map((byte) => String.fromCharCode(byte))
+        .join(""),
     );
     const writeResult = await Filesystem.writeFile({
       path: `projects/${fileName}`,

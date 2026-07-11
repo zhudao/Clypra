@@ -11,8 +11,8 @@ import {
   PixiRenderBackend,
   type ProjectManifestV2,
   type MediaProcessingGraph,
-} from "@clypra/engine";
-import type { FrameSource } from "@clypra/engine";
+} from "@clypra-studio/engine";
+import type { FrameSource } from "@clypra-studio/engine";
 
 const registry = NodeRegistry.createDefault();
 const validator = new GraphValidator(registry);

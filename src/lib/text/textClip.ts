@@ -5,12 +5,10 @@
  */
 
 import type { TextClip } from "../../types";
-import { TemplateRenderer, type TextEffectDefinition, type TextTemplate } from "@clypra/engine";
+import { TemplateRenderer, type TextEffectDefinition, type TextTemplate } from "@clypra-studio/engine";
 import { generateId } from "../utils/id";
 import { useEffectsStore } from "../../features/text-effects/store/effectsStore";
-import { logTextTemplate, logTemplateBounds, logRendererState } from "@/lib/debug/textTemplateDebug";
 import { useTemplateStore } from "../../features/text-templates/templateStore";
-import { textRenderTrace } from "@/lib/debug/textRenderTrace";
 
 export interface CreateTextClipOptions {
   /** Track ID to place the clip on */
@@ -277,25 +275,6 @@ export function measureTextEffectContentBounds(options: { text: string; fontFami
   const textHeight = source === "panel" ? options.fontSize * wrappedLineCount : measured.height * wrappedLineCount;
   const height = Math.max(24, textHeight + contentPaddingY * 2 + selectionInset * 2);
 
-  textRenderTrace("text-bounds-measure", {
-    text: options.text,
-    styleId: options.styleId,
-    fontFamily: options.fontFamily,
-    fontSize: options.fontSize,
-    fontWeight: options.fontWeight,
-    letterSpacing,
-    source,
-    isPanelEffect,
-    hasDeclaredBounds,
-    measured,
-    contentPadding: { x: contentPaddingX, y: contentPaddingY },
-    selectionInset,
-    textHeight,
-    contentBounds: { width, height },
-    renderBleed,
-    panelTrace: getPanelTrace(options.effectDefinition, options.background, options.fontSize),
-  });
-
   return {
     contentWidth: width,
     contentHeight: height,
@@ -391,10 +370,6 @@ function applyTemplateCustomization(renderer: TemplateRenderer, template: TextTe
 export function measureTextTemplateContentSize(options: { templateId?: string; templateDefinition?: TextTemplate; text?: string; customization?: any }): TextTemplateContentSize | null {
   const template = resolveTextTemplateDefinition(options.templateId, options.templateDefinition);
   if (!template?.layers?.length) {
-    textRenderTrace("text-template-measure-no-template", {
-      templateId: options.templateId,
-      hasTemplateDefinition: !!options.templateDefinition,
-    });
     return null;
   }
 
@@ -403,29 +378,12 @@ export function measureTextTemplateContentSize(options: { templateId?: string; t
   const templateHeight = Math.max(1, Number(legacyTemplate.canvasHeight ?? legacyTemplate.height ?? 450));
   const fallbackAspect = templateWidth / templateHeight;
 
-  textRenderTrace("text-template-measure-start", {
-    templateId: options.templateId ?? template.id,
-    text: options.text,
-    templateWidth,
-    templateHeight,
-    fallbackAspect,
-    layerCount: template.layers?.length,
-  });
-
   try {
     const canvas = createMeasurementCanvas(templateWidth, templateHeight);
     const ctx = canvas?.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     if (!ctx) {
-      textRenderTrace("text-template-measure-no-canvas", {
-        templateId: options.templateId ?? template.id,
-      });
       return { width: templateWidth, height: templateHeight, aspectRatio: fallbackAspect, bounds: null, source: "fallback" };
     }
-
-    logRendererState("Creating renderer", {
-      layers: template.layers?.length,
-      canvasDimensions: { width: templateWidth, height: templateHeight },
-    });
 
     const renderer = new TemplateRenderer(template);
     applyTemplateCustomization(renderer, template, options.text ?? "Text", options.customization);
@@ -436,31 +394,7 @@ export function measureTextTemplateContentSize(options: { templateId?: string; t
 
     const bounds = renderer.getContentBounds();
 
-    logTemplateBounds("Template bounds measured", {
-      templateId: options.templateId ?? template.id,
-      text: options.text,
-      canvasSize: { width: templateWidth, height: templateHeight },
-      contentBounds: bounds,
-    });
-
-    logRendererState("Draw complete", {
-      drawTime,
-      layers: template.layers?.length,
-    });
-
-    textRenderTrace("text-template-measure-bounds", {
-      templateId: options.templateId ?? template.id,
-      text: options.text,
-      bounds,
-      hasBounds: !!bounds,
-      boundsValid: bounds && bounds.width > 0 && bounds.height > 0,
-    });
-
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
-      textRenderTrace("text-template-measure-invalid-bounds", {
-        templateId: options.templateId ?? template.id,
-        bounds,
-      });
       return { width: templateWidth, height: templateHeight, aspectRatio: fallbackAspect, bounds: null, source: "fallback" };
     }
 
@@ -478,20 +412,6 @@ export function measureTextTemplateContentSize(options: { templateId?: string; t
       coverageYPercent: (bounds.height / templateHeight) * 100,
     };
 
-    textRenderTrace("text-template-measure-success", {
-      templateId: options.templateId ?? template.id,
-      templateCanvasSize: { width: templateWidth, height: templateHeight },
-      contentBounds: bounds,
-      boundsRelativeToCanvas,
-      aspectRatio: bounds.width / bounds.height,
-      source: "template",
-      analysis: {
-        hasPositionOffset: boundsOffsetX > 0 || boundsOffsetY > 0,
-        largeVerticalOffset: boundsOffsetY > templateHeight * 0.3,
-        largeHorizontalOffset: boundsOffsetX > templateWidth * 0.3,
-      },
-    });
-
     return {
       width: bounds.width,
       height: bounds.height,
@@ -500,25 +420,12 @@ export function measureTextTemplateContentSize(options: { templateId?: string; t
       source: "template",
     };
   } catch (error) {
-    textRenderTrace("text-template-bounds-measure-fallback", {
-      templateId: options.templateId ?? template.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
     return { width: templateWidth, height: templateHeight, aspectRatio: fallbackAspect, bounds: null, source: "fallback" };
   }
 }
 
 export function calculateTextTemplateClipSize(options: { canvasWidth: number; canvasHeight: number; templateId?: string; templateDefinition?: TextTemplate; text?: string; customization?: any }): { width: number; height: number; content: TextTemplateContentSize | null } {
   const content = measureTextTemplateContentSize(options);
-
-  textRenderTrace("text-template-calculate-size-start", {
-    templateId: options.templateId,
-    canvasWidth: options.canvasWidth,
-    canvasHeight: options.canvasHeight,
-    text: options.text,
-    contentMeasured: content,
-    contentSource: content?.source,
-  });
 
   // If we successfully measured content bounds, use them
   if (content?.source === "template" && content.bounds && content.bounds.width > 0 && content.bounds.height > 0) {
@@ -537,17 +444,6 @@ export function calculateTextTemplateClipSize(options: { canvasWidth: number; ca
     let width: number;
     let height: number;
 
-    textRenderTrace("text-template-calculate-size-using-bounds", {
-      templateId: options.templateId,
-      contentBounds: content.bounds,
-      contentWidth,
-      contentHeight,
-      contentAspect,
-      maxWidth,
-      maxHeight,
-      canvas: { width: options.canvasWidth, height: options.canvasHeight },
-    });
-
     // Determine if we need to scale down
     if (contentWidth > maxWidth || contentHeight > maxHeight) {
       // Content is larger than max, scale it down proportionally
@@ -557,51 +453,17 @@ export function calculateTextTemplateClipSize(options: { canvasWidth: number; ca
 
       width = contentWidth * scale;
       height = contentHeight * scale;
-
-      textRenderTrace("text-template-calculate-size-scaled-down", {
-        templateId: options.templateId,
-        originalSize: { width: contentWidth, height: contentHeight },
-        scaledSize: { width, height },
-        scale,
-      });
     } else {
       // Content fits within constraints - use actual content bounds size!
       // This ensures the transform overlay is exactly the size of visible content
       width = contentWidth;
       height = contentHeight;
-      textRenderTrace("text-template-calculate-size-actual-content", {
-        templateId: options.templateId,
-        width,
-        height,
-        usedActualBounds: true,
-      });
     }
-
-    textRenderTrace("text-template-calculate-size-result", {
-      templateId: options.templateId,
-      finalWidth: width,
-      finalHeight: height,
-      contentBounds: content.bounds,
-      source: "template-bounds",
-    });
-
-    logTemplateBounds("Final clip size calculated", {
-      templateId: options.templateId,
-      text: options.text,
-      contentBounds: content.bounds,
-      clipSize: { x: 0, y: 0, width, height },
-    });
 
     return { width, height, content };
   }
 
   // Fallback to aspect-based sizing if measurement failed or returned fallback
-  textRenderTrace("text-template-calculate-size-fallback", {
-    templateId: options.templateId,
-    contentSource: content?.source,
-    usingAspectFallback: true,
-  });
-
   const templateAspect = content?.aspectRatio && Number.isFinite(content.aspectRatio) && content.aspectRatio > 0 ? content.aspectRatio : 16 / 9;
   const maxWidth = options.canvasWidth * 0.5;
   const maxHeight = options.canvasHeight * 0.25;
@@ -616,15 +478,6 @@ export function calculateTextTemplateClipSize(options: { canvasWidth: number; ca
     height = width / templateAspect;
   }
 
-  textRenderTrace("text-template-calculate-size-fallback-result", {
-    templateId: options.templateId,
-    width,
-    height,
-    templateAspect,
-    maxWidth,
-    maxHeight,
-  });
-
   return { width, height, content };
 }
 
@@ -633,17 +486,6 @@ export function calculateTextTemplateClipSize(options: { canvasWidth: number; ca
  */
 export function createTextClip(options: CreateTextClipOptions): TextClip {
   const { trackId, startTime, duration = 5.0, text = "Text", canvasWidth, canvasHeight, color = "#ffffff", bold = false, italic = false, position = "center", textRole, words, styleId, templateId, customization, stroke, shadow, background, effectDefinition, templateDefinition } = options;
-
-  textRenderTrace("text-clip-create-start", {
-    trackId,
-    text,
-    templateId,
-    hasTemplateDefinition: !!templateDefinition,
-    styleId,
-    canvasWidth,
-    canvasHeight,
-    textRole,
-  });
 
   // For templates, calculate dimensions based on template's native aspect ratio
   // instead of text measurements to ensure professional full-canvas rendering
@@ -774,28 +616,6 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     background,
     sourceAspectRatio,
   };
-
-  textRenderTrace("text-bounds-create", {
-    clipId: clip.id,
-    text: clip.text,
-    startTime: clip.startTime,
-    duration: clip.duration,
-    x: clip.x,
-    y: clip.y,
-    width: clip.width,
-    height: clip.height,
-    fontFamily: clip.fontFamily,
-    fontSize: clip.fontSize,
-    fontWeight: clip.fontWeight,
-    styleId: clip.styleId,
-    hasStyleDefinition: !!clip.styleDefinition,
-    styleDefinitionFont: clip.styleDefinition?.font,
-    background: clip.background,
-    stroke: clip.stroke,
-    shadow: clip.shadow,
-    contentBounds: { x: clip.x, y: clip.y, width: clip.width, height: clip.height },
-    renderBleed: sizing.bounds,
-  });
 
   return clip;
 }
@@ -981,14 +801,6 @@ export function recalculateTextClipBounds(clip: TextClip, updates: Partial<TextC
   const cleanUpdates = { ...updates } as Partial<TextClip> & { _boundsReason?: string };
   delete cleanUpdates._boundsReason;
   const { merged, sizing, transform } = calculateTextClipContentTransform(clip, cleanUpdates, canvasWidth, _canvasHeight);
-
-  textRenderTrace("text-bounds-recalculate", {
-    clipId: clip.id,
-    reason: traceReason ? [traceReason] : Object.keys(cleanUpdates),
-    oldContentBounds: { x: clip.x, y: clip.y, width: clip.width, height: clip.height },
-    newContentBounds: transform,
-    renderBleed: sizing.bounds,
-  });
 
   return {
     ...merged,

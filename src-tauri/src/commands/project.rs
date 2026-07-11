@@ -33,7 +33,7 @@ pub fn save_project(app: tauri::AppHandle, project_data: String) -> Result<(), S
         project.media_assets.len()
     );
 
-    // CRITICAL FIX (FINDING-019): Implement atomic write to prevent data corruption
+    // Implement atomic write to prevent data corruption
     // Write to temp file first, then atomically rename to target path
     // This ensures project file is never left in a corrupt state if write fails
     let temp_path = projects_dir.join(format!("{}.tmp", project.id));

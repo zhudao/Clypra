@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import type { EffectIndexItem, EffectFullDefinition } from "../types/types";
 import { TextEffectsApi, TEXT_EFFECT_CATEGORIES } from "../api/textEffectsApi";
-import { builtInPresets } from "@clypra/engine";
+import { builtInPresets } from "@clypra-studio/engine";
 import { getTextEffectCache } from "../cache/persistentCache";
 import { getApiHeaders, getApiBaseUrl } from "@/lib/api";
 import { convertConfigToDefinition, convertRawConfigToDefinition, type EffectDefinitionWithBounds } from "../lib/definitionConversion";

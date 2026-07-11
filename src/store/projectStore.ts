@@ -210,6 +210,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   createProject: async (name, aspectRatio, frameRate) => {
+    console.trace("[ProjectLifecycle] createProject invoked");
     console.log("🆕 [PROJECT STORE] Creating new project:", name);
 
     // Dispose any existing session BEFORE resetting singletons (BUG-007 fix)
@@ -273,6 +274,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   loadProject: async (project, payload) => {
+    console.trace("[ProjectLifecycle] loadProject invoked", { projectId: project.id, projectName: project.name });
     const loadId = ++currentLoadId;
 
     // ✅ FIX-005: Wait for previous load to complete to prevent concurrent load races
@@ -494,6 +496,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   closeProject: async () => {
+    console.trace("[ProjectLifecycle] closeProject invoked");
     console.log("🏠 [PROJECT STORE] Closing project...");
     currentLoadId++; // Cancel any active load
 

@@ -264,7 +264,7 @@ export class GlobalGPUCacheManager {
   /**
    * Evict ALL textures from the GPU cache and clear viewport registrations.
    *
-   * Called on project switch/close (FINDING-009 / CONTAMINATION-004) to ensure
+   * Called on project switch/close to ensure
    * textures from the previous project are not accessible to the incoming one.
    * This is safe because the filmstrip and preview will re-upload needed textures
    * on the next render cycle.

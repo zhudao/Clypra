@@ -2,10 +2,15 @@
  * Frame Export Utilities
  *
  * High-level API for exporting single frames.
- * Uses the frame scheduler for consistency with preview.
+ * Migrated to PixiJS WebGL pipeline for exact visual parity with preview
+ * and correct rendering of filters and GPU transitions.
  */
 
-import { getFrameScheduler } from "../../core/scheduler/FrameScheduler";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { createPixiExportCompositor, destroyPixiExportCompositor, renderFrameWithPixi } from "./pixiExportRenderer";
+import { VideoElementPool } from "../../core/resources/VideoElementPool";
+import { resolveClipSourceTime } from "../../core/timeline/sourceTime";
+import { evaluateTimelineSceneCached } from "../../core/evaluation/evaluator";
 import type { Clip, Track, MediaAsset, Project } from "../../types";
 
 export interface ExportFrameOptions {
@@ -43,40 +48,87 @@ export interface ExportFrameOptions {
 /**
  * Export a single frame as PNG or JPEG.
  *
- * This uses the frame scheduler for consistency with preview rendering.
- * Ensures preview and export use the same pipeline.
+ * Headless PixiJS rendering ensures preview and export use the same pipeline.
  *
  * @param options - Export options
  * @returns Blob containing the exported frame
  */
 export async function exportFrame(options: ExportFrameOptions): Promise<Blob> {
-  const { time, clips, tracks, assets, project, epoch, width = project?.canvasWidth || 1920, height = project?.canvasHeight || 1080, format = "png", quality = 0.92 } = options;
-
-  // Get scheduler and update timeline state
-  const scheduler = getFrameScheduler();
-  scheduler.updateTimeline(clips, tracks, assets, project, epoch);
-
-  // Schedule frame render with export priority
-  const jobId = scheduler.schedule({
+  const {
     time,
-    resolution: {
-      width,
-      height,
-    },
-    pixelRatio: 1,
-    outputFormat: "blob",
-    quality,
-    priority: "export",
+    clips,
+    tracks,
+    assets,
+    project,
+    epoch,
+    width = project?.canvasWidth || 1920,
+    height = project?.canvasHeight || 1080,
+    format = "png",
+    quality = 0.92,
+  } = options;
+
+  // Create headless Pixi compositor for single frame
+  const pixiHandle = createPixiExportCompositor(width, height);
+
+  const videoPool = new VideoElementPool({
+    maxConcurrent: 10,
+    debug: false,
   });
 
-  // Wait for result
-  const result = await scheduler.wait(jobId);
+  const frameVideoElements: HTMLVideoElement[] = [];
 
-  if (!(result.data instanceof Blob)) {
-    throw new Error("Expected Blob output from scheduler");
+  try {
+    const videoElements = new Map<string, HTMLVideoElement>();
+
+    // Find all video clips active at this time and acquire them
+    for (const clip of clips) {
+      const asset = assets.find((a) => a.id === clip.mediaId);
+      if (asset?.type !== "video") continue;
+
+      const clipEnd = clip.startTime + clip.duration;
+      if (time < clip.startTime || time >= clipEnd) continue;
+
+      const { sourceTime } = resolveClipSourceTime(clip, time, {
+        clampToRange: true,
+        frameRate: project?.frameRate || 30,
+      });
+
+      const resolvedPath = asset.path.startsWith("asset://") ? asset.path : convertFileSrc(asset.path);
+      const key = `${clip.id}-${clip.mediaId}`;
+      const video = await videoPool.acquire(resolvedPath, sourceTime);
+      videoElements.set(key, video);
+      frameVideoElements.push(video);
+    }
+
+    const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch);
+    await renderFrameWithPixi(pixiHandle, scene, videoElements);
+
+    // Convert canvas to Blob
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      pixiHandle.readbackCanvas.toBlob(
+        (b) => {
+          if (b) resolve(b);
+          else reject(new Error("[ExportFrame] Failed to create blob from readback canvas"));
+        },
+        format === "jpeg" ? "image/jpeg" : "image/png",
+        quality,
+      );
+    });
+
+    for (const vid of frameVideoElements) {
+      videoPool.releaseElement(vid);
+    }
+
+    return blob;
+  } catch (error) {
+    for (const vid of frameVideoElements) {
+      videoPool.releaseElement(vid);
+    }
+    throw error;
+  } finally {
+    videoPool.clear();
+    destroyPixiExportCompositor(pixiHandle);
   }
-
-  return result.data;
 }
 
 /**

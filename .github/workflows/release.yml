@@ -100,16 +100,28 @@ jobs:
             args: ""
 
     runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        working-directory: clypra
 
     steps:
-      - name: Checkout code
+      - name: Checkout Clypra
         uses: actions/checkout@v4
+        with:
+          path: clypra
+
+      - name: Checkout clypra-studio
+        uses: actions/checkout@v4
+        with:
+          repository: AIEraDev/clypra-studio
+          path: clypra-studio
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
+          cache-dependency-path: "clypra/package-lock.json"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -119,13 +131,13 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: clypra/src-tauri
 
       - name: Install FFmpeg (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
           brew install ffmpeg
-          echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
+          echo FFMPEG_DIR=$(brew --prefix ffmpeg) >> $GITHUB_ENV
 
       - name: Install FFmpeg (Linux)
         if: matrix.platform == 'ubuntu-24.04'
@@ -166,5 +178,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          projectPath: clypra
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}

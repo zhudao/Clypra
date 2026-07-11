@@ -61,8 +61,6 @@ export const interpolateColor = (color1: string, color2: string, factor: number)
 export const applyFontConfig = (ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, font: TextEffectDefinition["font"], fontSize: number) => {
   const family = getFontFamilyStack(font.family);
 
-  console.info(`[Clypra Canvas Engine] Font Applied: "${font.family}" | Mapped Stack: ${family} | Size: ${fontSize}px`);
-
   ctx.font = `${font.style} ${font.weight} ${fontSize}px ${family}`;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";

@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 /**
- * Tests for FINDING-011: Race condition between sync() and render
+ * Tests for Race condition between sync() and render
  *
  * This test suite validates the fix for the race condition where:
  * - Frame 1: sync() + start render (isRendering = true)
@@ -50,7 +50,7 @@ class MockRenderLoop {
   }
 
   /**
-   * Simulate one RAF tick with CORRECT order (FINDING-011 fix applied)
+   * Simulate one RAF tick with CORRECT order
    */
   rafTickFixed(): void {
     // 1. Check isRendering guard FIRST (prevents sync during render)
@@ -68,7 +68,7 @@ class MockRenderLoop {
   }
 
   /**
-   * Simulate one RAF tick with WRONG order (before FINDING-011 fix)
+   * Simulate one RAF tick with WRONG order
    */
   rafTickBroken(): void {
     // 1. Call sync BEFORE checking isRendering (WRONG!)
@@ -122,7 +122,7 @@ class MockRenderLoop {
   }
 }
 
-describe("ProgramPreview RAF Loop — FINDING-011: Render Race Condition", () => {
+describe("ProgramPreview RAF Loop — Render Race Condition", () => {
   let loop: MockRenderLoop;
 
   beforeEach(() => {
@@ -142,7 +142,7 @@ describe("ProgramPreview RAF Loop — FINDING-011: Render Race Condition", () =>
     expect(state.droppedFrames).toBe(0);
   });
 
-  it("should block sync when render is in progress (FINDING-011 fix)", () => {
+  it("should block sync when render is in progress", () => {
     // Create loop with slow render (simulates heavy scene)
     const slowLoop = new MockRenderLoop({ renderDuration: 20 });
 
@@ -182,7 +182,7 @@ describe("ProgramPreview RAF Loop — FINDING-011: Render Race Condition", () =>
     expect(state.droppedFrames).toBe(1);
   });
 
-  it("should prevent state mutation during active render (FINDING-011 fix)", () => {
+  it("should prevent state mutation during active render", () => {
     const slowLoop = new MockRenderLoop({ renderDuration: 20, syncMutatesState: true });
 
     // Frame 1: sync v0→v1, start render with v1
@@ -551,9 +551,9 @@ describe("ProgramPreview RAF Loop — Real World Scenarios", () => {
   });
 });
 
-describe("ProgramPreview RAF Loop — FINDING-009: Separate needsSync from needsRender", () => {
+describe("ProgramPreview RAF Loop: Separate needsSync from needsRender", () => {
   /**
-   * Mock RAF render loop that implements FINDING-009 optimization
+   * Mock RAF render loop that implements optimization
    */
   class MockRenderLoopWithSyncOptimization {
     private isRendering = false;
@@ -566,16 +566,16 @@ describe("ProgramPreview RAF Loop — FINDING-009: Separate needsSync from needs
     private droppedFrames = 0;
 
     /**
-     * Simulate RAF tick WITH FINDING-009 optimization
+     * Simulate RAF tick WITH optimization
      */
-    tick(time: number, playbackState: "playing" | "paused" | "stopped", epoch: number): void {
+    tick(time: number, playbackState: "playing" | "paused" | "stopped", epoch: number, hasActiveTransform = false): void {
       const timeChanged = time !== this.lastRenderedTime;
       const epochChanged = epoch !== this.lastRenderedEpoch;
       const isFirstFrame = this.lastRenderedTime === -1;
       const isPlaying = playbackState === "playing";
 
-      // needsRender: frame scheduling (every frame during playback)
-      const needsRender = isPlaying || timeChanged || epochChanged || isFirstFrame;
+      // needsRender: frame scheduling (every frame during playback or active transform)
+      const needsRender = isPlaying || timeChanged || epochChanged || isFirstFrame || hasActiveTransform;
 
       // needsSync: element lifecycle (only on state changes)
       const playbackStateChanged = playbackState !== this.lastRenderedPlaybackState;
@@ -1007,5 +1007,23 @@ describe("ProgramPreview RAF Loop — FINDING-009: Separate needsSync from needs
 
     // 202 total renders, but only 2 syncs
     expect(loop.getStats().renderCalls).toBe(202);
+  });
+
+  it("should render when transform is active (even if time/epoch/playbackState unchanged)", () => {
+    // First frame
+    loop.tick(0.0, "paused", 1);
+    expect(loop.getStats().renderCalls).toBe(1);
+
+    // Second frame: stationary, no state changes, no transform → no render
+    loop.tick(0.0, "paused", 1, false);
+    expect(loop.getStats().renderCalls).toBe(1); // Still 1
+
+    // Third frame: stationary, but has active transform → should render!
+    loop.tick(0.0, "paused", 1, true);
+    expect(loop.getStats().renderCalls).toBe(2); // Incremented to 2
+
+    // Fourth frame: still stationary and active transform → should render again!
+    loop.tick(0.0, "paused", 1, true);
+    expect(loop.getStats().renderCalls).toBe(3); // Incremented to 3
   });
 });

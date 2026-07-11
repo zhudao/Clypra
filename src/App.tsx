@@ -10,7 +10,7 @@ import { platform } from "@/core/platform";
 import { SettingsModal } from "./components/ui/SettingsModal";
 import { ClosingProjectModal } from "./components/ui/ClosingProjectModal";
 import { CrashRecoveryDialog } from "./components/ui/CrashRecoveryDialog";
-import { ErrorBoundary } from "@/components/ErrorBoundary"; // FIX (FINDING-022): Add root error boundary
+import { ErrorBoundary } from "@/components/ErrorBoundary"; // Add root error boundary
 import { initializePerformanceAdapter, shutdownPerformanceAdapter } from "@/lib/platform/performanceAdapter";
 import { hasSnapshot, getSnapshot, clearSnapshot, type RecoverySnapshot } from "@/core/runtime/CrashRecoveryService";
 import { lifecycleMonitor } from "@/lib/monitoring/LifecycleMonitor";
@@ -18,7 +18,7 @@ import { useRecordingStore } from "@/store/recordingStore";
 import { FloatingWidget } from "@/components/ui/FloatingWidget";
 import { ScreenRecordingPreviewModal } from "@/components/ui/ScreenRecordingPreviewModal";
 
-const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
+// const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
 
 const App = () => {
   const { project, createProject, loadProject, setRecentProjects } = useProjectStore();
@@ -185,7 +185,6 @@ const App = () => {
       }, 500);
     }
   };
-
 
   const handleOpenProject = async (proj: Project) => {
     try {
@@ -376,7 +375,7 @@ const App = () => {
     );
   }
 
-  // FIX (FINDING-022): Wrap entire app in root-level ErrorBoundary for crash recovery
+  // Wrap entire app in root-level ErrorBoundary for crash recovery
   return (
     <ErrorBoundary
       fallback={
@@ -392,17 +391,9 @@ const App = () => {
         </div>
       }
     >
-      {isRecording ? (
-        <FloatingWidget onProjectCreate={handleCreateProject} />
-      ) : (
-        <TooltipProvider delayDuration={0}>{project ? <EditorScreen onRequestClose={handleCloseProject} /> : <LaunchScreen onProjectCreate={handleCreateProject} onProjectOpen={handleOpenProject} />}</TooltipProvider>
-      )}
+      {isRecording ? <FloatingWidget onProjectCreate={handleCreateProject} /> : <TooltipProvider delayDuration={0}>{project ? <EditorScreen onRequestClose={handleCloseProject} /> : <LaunchScreen onProjectCreate={handleCreateProject} onProjectOpen={handleOpenProject} />}</TooltipProvider>}
       <SettingsModal isOpen={showSettingsModal} onClose={toggleSettingsModal} />
-      <ScreenRecordingPreviewModal
-        isOpen={!!previewRecording}
-        onClose={() => setPreviewRecording(null)}
-        onProjectCreate={handleCreateProject}
-      />
+      <ScreenRecordingPreviewModal isOpen={!!previewRecording} onClose={() => setPreviewRecording(null)} onProjectCreate={handleCreateProject} />
 
       {/* ── Closing Project Modal ────────────────────────────────────────── */}
       <ClosingProjectModal

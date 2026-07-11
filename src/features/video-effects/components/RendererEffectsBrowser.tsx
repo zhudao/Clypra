@@ -1,14 +1,14 @@
 /**
  * Renderer Effects Browser
  *
- * Browse and apply renderer-based effects from @clypra/engine
+ * Browse and apply renderer-based effects from @clypra-studio/engine
  */
 
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Download, Plus, Loader2, Smile, Star } from "lucide-react";
 import { VideoEffectsApi } from "../api/videoEffectsApi";
-import { type EffectMetadata } from "@clypra/engine";
-import type { EffectRenderer as EffectRendererType } from "@clypra/engine";
+import { type EffectMetadata } from "@clypra-studio/engine";
+import type { EffectRenderer as EffectRendererType } from "@clypra-studio/engine";
 import type { TabType } from "@/components/editor/media-tabs/types";
 import { useFavoritesStore } from "@/store/favoritesStore";
 
@@ -56,7 +56,7 @@ export function RendererEffectsBrowser({ onEffectSelect, onAddToTimeline, showAp
       console.error("Failed to load effects:", error);
       // Fallback to local registry if API fails
       try {
-        const { getEffectsByCategory } = await import("@clypra/engine");
+        const { getEffectsByCategory } = await import("@clypra-studio/engine");
         const categoryEffects = getEffectsByCategory(selectedCategory as any);
         setEffects(categoryEffects);
       } catch (fallbackError) {

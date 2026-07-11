@@ -335,7 +335,7 @@ export const SourcePreview: React.FC = () => {
       // This ensures the rasterizer will find the cached definition when rendering the clip.
       const styleId = preset.presetType === "effect" ? preset.id : undefined;
 
-      // FIX (FINDING-016): Verify effect definition is loaded before creating clip
+      // Verify effect definition is loaded before creating clip
       // Get the effect definition for accurate bounding box calculation
       const effectDefinition = styleId ? useEffectsStore.getState().definitions[styleId] : undefined;
 
@@ -391,6 +391,8 @@ export const SourcePreview: React.FC = () => {
         mediaAsset = {
           ...mediaAsset,
           path: absoluteImagePath,
+          width: mediaAsset.width || 400,
+          height: mediaAsset.height || 400,
         };
       }
     }
@@ -435,9 +437,9 @@ export const SourcePreview: React.FC = () => {
     newClip.trimOut = trimOut;
     newClip.duration = trimOut - trimIn;
 
-    // Only add to media assets if it's NOT from the audio library
-    // Audio library items (id starts with "audio-library-") should only exist as clips
-    if (!mediaAsset.id.startsWith("audio-library-")) {
+    // Only add to media assets if it's NOT from the audio library or stickers
+    // Audio library items (id starts with "audio-library-") and stickers should only exist as clips
+    if (!mediaAsset.id.startsWith("audio-library-") && !mediaAsset.id.startsWith("sticker-")) {
       addMediaAsset(mediaAsset);
     }
     addClip(newClip);

@@ -2,19 +2,15 @@
  * Image Sequence Export
  *
  * Exports a range of frames as an image sequence.
- * Uses the frame scheduler for proper temporal orchestration.
- *
- * Architecture:
- *   Timeline Range → Frame Scheduler → Image Sequence
- *
- * Key principles:
- * - Proper cancellation propagation
- * - Progress tracking
- * - Resource pre-loading
- * - Priority scheduling
+ * Migrated to headless PixiJS WebGL compositor for exact visual parity
+ * with preview and correct rendering of all filters and GPU transitions.
  */
 
-import { getFrameScheduler } from "../../core/scheduler/FrameScheduler";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { createPixiExportCompositor, destroyPixiExportCompositor, renderFrameWithPixi } from "./pixiExportRenderer";
+import { VideoElementPool } from "../../core/resources/VideoElementPool";
+import { resolveClipSourceTime } from "../../core/timeline/sourceTime";
+import { evaluateTimelineSceneCached } from "../../core/evaluation/evaluator";
 import type { Clip, Track, MediaAsset, Project, TransitionTimelineItem } from "../../types";
 
 /**
@@ -84,25 +80,37 @@ export interface ExportSequenceResult {
   cancelled: boolean;
 }
 
+let activeAbortController: AbortController | null = null;
+
 /**
  * Export an image sequence.
  *
- * This uses the frame scheduler for proper temporal orchestration:
- * - Priority-based scheduling (export priority)
- * - Resource pre-loading
- * - Cancellation propagation
- * - Progress tracking
+ * Headless PixiJS rendering ensures preview and export use the same pipeline.
  *
  * @param options - Export options
  * @returns Export result
  */
 export async function exportSequence(options: ExportSequenceOptions): Promise<ExportSequenceResult> {
-  const { clips, tracks, transitions = [], assets, project, epoch, startTime, endTime, frameRate = project?.frameRate || 30, width = project?.canvasWidth || 1920, height = project?.canvasHeight || 1080, format = "png", quality = 0.92, onProgress, onFrame } = options;
+  const {
+    clips,
+    tracks,
+    transitions = [],
+    assets,
+    project,
+    epoch,
+    startTime,
+    endTime,
+    frameRate = project?.frameRate || 30,
+    width = project?.canvasWidth || 1920,
+    height = project?.canvasHeight || 1080,
+    format = "png",
+    quality = 0.92,
+    onProgress,
+    onFrame,
+  } = options;
 
   const startTimeMs = Date.now();
 
-  // Calculate frame times using integer frame arithmetic (prevents float accumulation)
-  // This matches the approach in videoExport.ts for consistency
   const totalFrames = Math.round((endTime - startTime) * frameRate);
   const frameTimes: number[] = [];
   const startFrameIndex = Math.round(startTime * frameRate);
@@ -121,65 +129,100 @@ export async function exportSequence(options: ExportSequenceOptions): Promise<Ex
     };
   }
 
-  // Get scheduler and update timeline state
-  const scheduler = getFrameScheduler();
-  scheduler.updateTimeline(clips, tracks, assets, project, epoch, transitions);
+  const abortController = new AbortController();
+  activeAbortController = abortController;
+  const signal = abortController.signal;
 
-  // Schedule all frames
-  const jobIds: string[] = [];
-  for (let i = 0; i < frameTimes.length; i++) {
-    const time = frameTimes[i];
+  const pixiHandle = createPixiExportCompositor(width, height);
+  const videoPool = new VideoElementPool({
+    maxConcurrent: 10,
+    debug: false,
+  });
 
-    const jobId = scheduler.schedule({
-      time,
-      resolution: {
-        width,
-        height,
-      },
-      pixelRatio: 1,
-      outputFormat: "blob",
-      quality,
-      priority: "export",
-    });
-
-    jobIds.push(jobId);
-  }
-
-  // Wait for all frames to complete
   let completedFrames = 0;
   let cancelled = false;
 
   try {
-    for (let i = 0; i < jobIds.length; i++) {
-      const jobId = jobIds[i];
-
-      // Wait for frame
-      const result = await scheduler.wait(jobId);
-
-      if (!(result.data instanceof Blob)) {
-        throw new Error("Expected Blob output from scheduler");
+    for (let i = 0; i < frameTimes.length; i++) {
+      if (signal.aborted) {
+        throw new Error("Job cancelled");
       }
 
-      // Call frame callback
-      if (onFrame) {
-        await onFrame(i, result.data);
-      }
+      const time = frameTimes[i];
+      const frameVideoElements: HTMLVideoElement[] = [];
 
-      completedFrames++;
+      try {
+        const videoElements = new Map<string, HTMLVideoElement>();
 
-      // Report progress
-      if (onProgress) {
-        const progress = completedFrames / totalFrames;
-        onProgress(progress, completedFrames, totalFrames);
+        for (const clip of clips) {
+          const asset = assets.find((a) => a.id === clip.mediaId);
+          if (asset?.type !== "video") continue;
+
+          const clipEnd = clip.startTime + clip.duration;
+          if (time < clip.startTime || time >= clipEnd) continue;
+
+          const { sourceTime } = resolveClipSourceTime(clip, time, {
+            clampToRange: true,
+            frameRate,
+          });
+
+          const resolvedPath = asset.path.startsWith("asset://") ? asset.path : convertFileSrc(asset.path);
+          const key = `${clip.id}-${clip.mediaId}`;
+          const video = await videoPool.acquire(resolvedPath, sourceTime);
+          videoElements.set(key, video);
+          frameVideoElements.push(video);
+        }
+
+        if (signal.aborted) {
+          throw new Error("Job cancelled");
+        }
+
+        const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
+        await renderFrameWithPixi(pixiHandle, scene, videoElements);
+
+        const blob = await new Promise<Blob>((resolve, reject) => {
+          pixiHandle.readbackCanvas.toBlob(
+            (b) => {
+              if (b) resolve(b);
+              else reject(new Error("[ExportSequence] Failed to create blob"));
+            },
+            format === "jpeg" ? "image/jpeg" : "image/png",
+            quality,
+          );
+        });
+
+        for (const vid of frameVideoElements) {
+          videoPool.releaseElement(vid);
+        }
+
+        if (onFrame) {
+          await onFrame(i, blob);
+        }
+
+        completedFrames++;
+
+        if (onProgress) {
+          onProgress(completedFrames / totalFrames, completedFrames, totalFrames);
+        }
+      } catch (err) {
+        for (const vid of frameVideoElements) {
+          videoPool.releaseElement(vid);
+        }
+        throw err;
       }
     }
   } catch (error) {
-    // Check if cancelled
     if (error instanceof Error && error.message === "Job cancelled") {
       cancelled = true;
     } else {
       throw error;
     }
+  } finally {
+    if (activeAbortController === abortController) {
+      activeAbortController = null;
+    }
+    videoPool.clear();
+    destroyPixiExportCompositor(pixiHandle);
   }
 
   const totalTimeMs = Date.now() - startTimeMs;
@@ -195,19 +238,14 @@ export async function exportSequence(options: ExportSequenceOptions): Promise<Ex
 
 /**
  * Cancel an ongoing export.
- * Cancels all pending frame jobs.
  */
 export function cancelExport(): void {
-  const scheduler = getFrameScheduler();
-  scheduler.cancelAll();
+  activeAbortController?.abort();
 }
 
 /**
  * Export sequence and download as ZIP.
- * (Requires additional ZIP library - placeholder for now)
- *
- * @param options - Export options
- * @param filename - Output filename
+ * (Placeholder download behavior)
  */
 export async function exportSequenceAndDownload(options: ExportSequenceOptions, filename?: string): Promise<void> {
   const frames: { frameNumber: number; blob: Blob }[] = [];
@@ -219,8 +257,6 @@ export async function exportSequenceAndDownload(options: ExportSequenceOptions, 
     },
   });
 
-  // TODO: Create ZIP file with all frames
-  // For now, just download the first frame
   if (frames.length > 0) {
     const ext = options.format === "jpeg" ? "jpg" : "png";
     const name = filename || `sequence-frame-0000.${ext}`;

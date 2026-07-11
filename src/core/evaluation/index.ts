@@ -12,7 +12,7 @@
  *   rasterizeScene()         ← pixel generation (rasterizer.ts)
  *
  * Naming note: the function is called evaluateTimelineScene (not evaluateScene)
- * to avoid collision with @clypra/engine's evaluateScene, which operates on
+ * to avoid collision with @clypra-studio/engine's evaluateScene, which operates on
  * a SceneDocument and draws directly to a Canvas 2D context.
  */
 
