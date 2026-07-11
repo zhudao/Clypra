@@ -15,19 +15,21 @@ import type { TransitionAsset } from "@/features/transitions/types";
 import { getPlaybackClock } from "@/hooks/usePlaybackClock";
 
 // Hardcoded transition categories for instant UI rendering
+// Matches GPU transition categories from Transition Lab Console
 const TRANSITION_CATEGORIES = [
-  { id: "fade", label: "Fade" },
-  { id: "slide", label: "Slide" },
-  { id: "wipe", label: "Wipe" },
-  { id: "zoom", label: "Zoom" },
-  { id: "dissolve", label: "Dissolve" },
-  { id: "creative", label: "Creative" },
+  { id: "geometric", label: "Geometric" },
+  { id: "optical-distortion", label: "Optical Distortion" },
+  { id: "temporal", label: "Temporal" },
+  { id: "particle-dissolve", label: "Particle Dissolve" },
+  { id: "light-based", label: "Light Based" },
+  { id: "depth-based", label: "Depth Based" },
+  { id: "physics-simulated", label: "Physics Simulated" },
 ] as const;
 
 type TransitionCategory = (typeof TRANSITION_CATEGORIES)[number]["id"];
 
 export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
-  const [activeCategory, setActiveCategory] = useState<TransitionCategory>("fade");
+  const [activeCategory, setActiveCategory] = useState<TransitionCategory>("geometric");
   const [transitions, setTransitions] = useState<TransitionAsset[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
