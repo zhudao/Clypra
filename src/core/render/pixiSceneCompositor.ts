@@ -341,6 +341,9 @@ export class PixiSceneCompositor {
       this.transitionOffscreenContainers.set(slot, container);
     }
 
+    // Clear the container to prevent sprite accumulation
+    container.removeChildren();
+
     // Use media resolver to get source element
     const sourceElement = resolveMediaSource(layer, videoElements, resourceHandleMap);
 
