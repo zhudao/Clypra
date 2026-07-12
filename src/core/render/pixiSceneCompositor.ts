@@ -50,6 +50,16 @@ export class PixiSceneCompositor {
     this.setupContextLossHandlers(canvas);
   }
 
+  get isReady(): boolean {
+    return this.renderer?.isReady || false;
+  }
+
+  async waitForReady(): Promise<void> {
+    while (!this.renderer?.isReady) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   private setupContextLossHandlers(canvas: HTMLCanvasElement): void {
     this.contextLostHandler = (event: Event) => {
       event.preventDefault();
