@@ -255,6 +255,16 @@ pub async fn start_video_export(
     if !valid_audio_clips.is_empty() {
         let mut filter_complex = String::new();
         
+        // Generate a silent audio track matching the exact video duration.
+        // This serves as a duration anchor. When mixed with duration=longest,
+        // it ensures that the mixed audio stream has the exact same duration
+        // as the video, preventing early audio cut-off from other clips ending.
+        let total_duration = config.total_frames as f64 / config.frame_rate;
+        filter_complex.push_str(&format!(
+            "anullsrc=channel_layout=stereo:sample_rate=48000:duration={:.3}[asilence];",
+            total_duration
+        ));
+        
         for (idx, clip) in valid_audio_clips.iter().enumerate() {
             let input_idx = idx + 1; // input 0 is pipe:0 (video)
             let delay_ms = (clip.start_time * 1000.0) as i64;
@@ -281,16 +291,18 @@ pub async fn start_video_export(
             filter_complex.push_str(&chain);
         }
         
-        // Map all processed streams into amix
+        // Map all processed streams (including silence) into amix
+        filter_complex.push_str("[asilence]");
         for idx in 0..valid_audio_clips.len() {
             filter_complex.push_str(&format!("[a{}]", idx + 1));
         }
-        // FIX (BUG-6): Use duration=shortest so audio doesn't outlast the video stream.
-        // With duration=longest, a background music track extending beyond the video
-        // creates trailing audio-only content in the output file.
+        
+        // Mix with duration=longest. The silence stream guarantees the audio
+        // output has exactly the same duration as the video, preventing both
+        // early cut-off (BUG-shortest) and trailing audio bloat.
         filter_complex.push_str(&format!(
-            "amix=inputs={}:duration=shortest[a]",
-            valid_audio_clips.len()
+            "amix=inputs={}:duration=longest[a]",
+            valid_audio_clips.len() + 1
         ));
         
         cmd.arg("-filter_complex").arg(filter_complex);
