@@ -46,8 +46,23 @@ export function resumeAutoSave(): void {
 const autoSaveImpl: AutoSaveImpl = (f) => (set, get, store) => {
   // Wrap the set function to trigger auto-save after state changes
   const wrappedSet: typeof set = (partial, replace) => {
+    const oldState = get() as any;
+
     // Call the original set with proper arguments
     set(partial, replace as any);
+
+    const newState = get() as any;
+
+    // Check if any persistent project data actually changed
+    const hasProjectDataChanged =
+      (oldState.tracks !== newState.tracks && newState.tracks !== undefined) ||
+      (oldState.clips !== newState.clips && newState.clips !== undefined) ||
+      (oldState.gaps !== newState.gaps && newState.gaps !== undefined) ||
+      (oldState.transitions !== newState.transitions && newState.transitions !== undefined);
+
+    if (!hasProjectDataChanged) {
+      return;
+    }
 
     // If suspended (e.g., during drag), defer save until resume
     if (_suspended) {

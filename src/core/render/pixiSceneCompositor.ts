@@ -23,6 +23,7 @@ export class PixiSceneCompositor {
   private currentFrameId = 0;
   private transitionRenderTextures = new Map<"from" | "to", RenderTexture>();
   private transitionOffscreenContainers = new Map<"from" | "to", Container>();
+  private transitionLastRenderedTime = new Map<"from" | "to", number>();
   private hadActiveTransition = false;
   private isDestroying = false;
   private canvas: HTMLCanvasElement | null = null;
@@ -140,6 +141,8 @@ export class PixiSceneCompositor {
         transitionSprite.parent?.removeChild(transitionSprite);
         app.stage.addChildAt(transitionSprite, 2);
       }
+      // Clear transition time cache when transition ends
+      this.transitionLastRenderedTime.clear();
     }
     this.hadActiveTransition = isTransitionActive;
 
@@ -339,7 +342,21 @@ export class PixiSceneCompositor {
       container = new Container();
       this.transitionRenderTextures.set(slot, texture);
       this.transitionOffscreenContainers.set(slot, container);
+      this.transitionLastRenderedTime.delete(slot); // Force re-render on texture recreation
     }
+
+    // Check if we need to re-render (only when video frame changes or first render)
+    const currentTime = layer.sourceTime;
+    const lastRenderedTime = this.transitionLastRenderedTime.get(slot);
+    const needsRender = lastRenderedTime === undefined || Math.abs(currentTime - lastRenderedTime) > 0.001;
+
+    if (!needsRender) {
+      // Reuse existing texture without re-rendering
+      return texture;
+    }
+
+    // Clear the container to prevent sprite accumulation
+    container.removeChildren();
 
     // Use media resolver to get source element
     const sourceElement = resolveMediaSource(layer, videoElements, resourceHandleMap);
@@ -377,6 +394,9 @@ export class PixiSceneCompositor {
       record.sprite.zIndex = 0;
 
       app.renderer.render({ container, target: texture, clear: true });
+
+      // Mark this time as rendered
+      this.transitionLastRenderedTime.set(slot, currentTime);
     }
 
     return texture;

@@ -4,11 +4,13 @@
 
 ![Clypra Showcase Banner](public/clypra.jpg)
 
-A professional-grade, open-source video editor built on Tauri v2, React 19, and Rust. Designed for desktop and mobile platforms with hardware-accelerated video processing.
+**Professional video editing—free and open source forever.**
+
+A modern video editor built on Tauri v2, React 19, and Rust. Hardware-accelerated processing, cross-platform (desktop + mobile), with optional AI-powered features.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md) [![GitHub issues](https://img.shields.io/github/issues/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/issues) [![GitHub stars](https://img.shields.io/github/stars/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/stargazers)
 
-[Features](#features) • [Architecture](#architecture) • [Installation](#installation) • [Development](#development) • [Contributing](#contributing)
+[Features](#features) • [Architecture](#architecture) • [Installation](#installation) • [Development](#development) • [Contributing](#contributing) • [Open Core](#open-core-model)
 
 </div>
 
@@ -16,7 +18,9 @@ A professional-grade, open-source video editor built on Tauri v2, React 19, and 
 
 ## Overview
 
-Clypra is a native desktop and mobile video editor leveraging Rust's performance with React's UI flexibility. The application provides frame-accurate editing, professional audio visualization, and hardware-accelerated video processing through FFmpeg's native backend.
+Clypra is a **free, open-source video editor** (MIT License) with professional-grade features. The core editor, effects engine, and all UI components are free forever—no watermarks, no feature limits, no subscriptions required.
+
+Want AI superpowers? Optional [Pro features](#pro-features-ai-layer) add natural language editing, auto-captions, smart reframing, and more.
 
 ### Target Platforms
 
@@ -451,6 +455,46 @@ Binary releases include FFmpeg under LGPL. If you build with GPL components, ens
 
 ---
 
+## Open Core Model
+
+Clypra uses an **Open Core** business model:
+
+### Free & Open Source (MIT License)
+
+✅ **Core Video Editor** - Multi-track timeline, frame-accurate editing, hardware-accelerated processing  
+✅ **Effects Engine** - Professional video effects, transitions, filters (via `@clypra-studio/engine`)  
+✅ **Audio Tools** - Waveform visualization, volume control, AV sync  
+✅ **Export Pipeline** - H.264, H.265, ProRes export with FFmpeg  
+✅ **Text Overlays** - Custom fonts, styles, and animations  
+✅ **All UI Components** - Full source code, no proprietary dependencies
+
+**No watermarks. No feature limits. No subscriptions. Forever.**
+
+### Pro Features (AI Layer)
+
+🎯 **Natural Language Editing** - "Remove all pauses", "Add captions", "Make this shorter"  
+🎯 **Auto-Captioning** - Transcription with speaker detection and customizable styles  
+🎯 **Smart Reframe** - Auto-crop for Instagram Stories, TikTok, YouTube Shorts  
+🎯 **Scene Detection** - AI-powered scene splitting and B-roll suggestions  
+🎯 **Audio Enhancement** - Noise removal, EQ, compression  
+🎯 **Voice Cloning** - Match narrator voice across clips (coming soon)  
+🎯 **Multi-language Dubbing** - Translate and dub with lip sync (coming soon)
+
+**Pricing**: Free tier (100 AI calls/month) • Pro ($10/month, unlimited) • Enterprise (custom)
+
+[Learn more about Pro features →](https://clypra.com/pricing)
+
+### Why Open Core?
+
+We believe professional video editing should be free and accessible to everyone. Open source ensures:
+
+- **Transparency** - You can audit every line of code
+- **Ownership** - Your edits, your data, your workflow
+- **Community** - Contributions from creators worldwide
+- **Longevity** - The editor can't be shut down or paywalled
+
+The Pro AI features fund full-time development on the open source core. Everyone wins.
+
 ## Roadmap
 
 See [PERFORMANCE-DESKTOP-ROADMAP.md](./PERFORMANCE-DESKTOP-ROADMAP.md) for upcoming performance improvements.
@@ -460,6 +504,13 @@ Planned features:
 - Mobile app release (iOS/Android via Capacitor)
 - Advanced color grading
 - Multi-camera editing
-- Collaborative editing (cloud sync)
 - Plugin system for extensions
 - GPU-accelerated effects rendering
+
+**Pro Roadmap** (AI features):
+
+- Natural language commands (Q3 2026)
+- Auto-captioning (Q3 2026)
+- Smart reframe (Q4 2026)
+- Voice cloning (Q1 2027)
+- Multi-language dubbing (Q2 2027)

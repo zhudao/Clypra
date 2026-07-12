@@ -330,6 +330,50 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         await preloadTextEffectDefinitionsFromClips(payload?.clips);
         if (currentLoadId !== loadId) return;
 
+        // Preload filters from clips
+        try {
+          const { filterCacheManager } = await import("@/features/filters/cache/filterCache");
+          await filterCacheManager.initialize();
+
+          const filterClips = (payload?.clips ?? []).filter((clip: any) => clip.kind === "filter" && clip.mediaId);
+
+          if (filterClips.length > 0) {
+            console.log(`  ⏳ Pre-caching ${filterClips.length} filter(s)...`);
+
+            for (const clip of filterClips) {
+              try {
+                // Check if already cached
+                if (!filterCacheManager.isCached(clip.mediaId)) {
+                  // Create FilterAsset from complete clip data (stored on save)
+                  const filterAsset = {
+                    id: clip.mediaId,
+                    name: clip.name || "Filter",
+                    type: "filter" as const,
+                    category: clip.category || "essentials", // Use stored category
+                    description: "",
+                    thumbnail: "",
+                    url: clip.url, // Stored URL for re-fetching if needed
+                    pipeline: clip.pipeline,
+                    gradingParams: clip.gradingParams, // Critical: GPU shader parameters
+                    effectStack: clip.effectStack,
+                  };
+
+                  await filterCacheManager.ensureDownloaded(filterAsset as any);
+                }
+              } catch (err) {
+                console.warn(`  ⚠️ Failed to pre-cache filter ${clip.mediaId}:`, err);
+              }
+            }
+
+            console.log(`  ✅ Filters pre-cached`);
+          }
+        } catch (err) {
+          console.warn("  ⚠️ Filter pre-caching failed:", err);
+          // Non-fatal - filters will be downloaded on-demand
+        }
+
+        if (currentLoadId !== loadId) return;
+
         // Preload text templates and their fonts with persistent caching
         try {
           const { useTemplateStore } = await import("@/features/text-templates/templateStore");

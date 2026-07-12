@@ -339,6 +339,7 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       return {
         transitionId: transition.transition.id,
         type: transition.transition.type,
+        renderer: transition.transition.renderer, // Pass renderer from timeline transition
         progress: transition.progress,
         duration: transition.transition.placement.duration,
         outgoingLayer: outgoingLayer.layerId,

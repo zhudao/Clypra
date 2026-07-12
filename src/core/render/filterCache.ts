@@ -60,29 +60,12 @@ function buildStructuralKey(mediaLayer: EvaluatedMediaLayer, bodyMasks: Map<stri
 export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: number, height: number, bodyMasks: Map<string, any>): Filter[] {
   const clipId = mediaLayer.clipId;
 
-  console.log("[FilterCache] getOrUpdateFilters called:", {
-    clipId,
-    layerId: mediaLayer.layerId,
-    hasFilter: !!mediaLayer.filter,
-    filter: mediaLayer.filter,
-    effectsCount: mediaLayer.effects?.length || 0,
-    effects: mediaLayer.effects,
-  });
-
   const structuralKey = buildStructuralKey(mediaLayer, bodyMasks);
-  console.log("[FilterCache] structuralKey:", structuralKey);
 
   let entry = filterCache.get(clipId);
 
   if (!entry || entry.structuralKey !== structuralKey) {
     rebuildCounter++;
-    console.log("[Filters] rebuild count this session:", rebuildCounter);
-    console.log("[Filters] REBUILDING filter for clip:", clipId, {
-      oldKey: entry?.structuralKey,
-      newKey: structuralKey,
-      mediaLayerFilter: mediaLayer.filter,
-      mediaLayerEffects: mediaLayer.effects,
-    });
 
     // Structural change — full rebuild, but ONLY when the effect set actually changed
     if (entry) {
@@ -99,26 +82,12 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
     const filterMap = new Map<string, Filter>();
 
     if (mediaLayer.filter && mediaLayer.filter.intensity > 0.001) {
-      console.log("[Filters] Creating ColorAdjustmentsEffect filter for:", {
-        filterId: mediaLayer.filter.id,
-        intensity: mediaLayer.filter.intensity,
-      });
-
       const filter = ColorAdjustmentsEffect.filterSpec!.create({}) as Filter;
       filters.push(filter);
       filterMap.set("__color_filter", filter);
 
-      console.log("[Filters] ColorAdjustmentsEffect filter created and added to filterMap");
-
       // Create blur filter if needed (since Blur is multi-pass in WebGL)
       const cached = filterCacheManager.getCached(mediaLayer.filter.id);
-      console.log("[Filters] Checking if blur filter needed, cached:", {
-        cached: cached ? "EXISTS" : "NULL",
-        filter: cached?.filter,
-        gradingParams: cached?.filter?.gradingParams,
-        blur: cached?.filter?.gradingParams?.blur,
-      });
-
       const asset = cached?.filter;
       let hasBlur = false;
       if (asset?.gradingParams?.blur && asset.gradingParams.blur > 0.001) {
@@ -129,13 +98,7 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
         const blurFilter = new BlurFilter({ strength: 0 });
         filters.push(blurFilter);
         filterMap.set("__color_filter_blur", blurFilter);
-        console.log("[Filters] Blur filter added");
       }
-    } else {
-      console.log("[Filters] NO filter on mediaLayer OR intensity too low:", {
-        hasFilter: !!mediaLayer.filter,
-        intensity: mediaLayer.filter?.intensity,
-      });
     }
 
     for (const effect of mediaLayer.effects || []) {
@@ -190,26 +153,10 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
 
 function applyLiveParams(entry: FilterCacheEntry, mediaLayer: EvaluatedMediaLayer, width: number, height: number, bodyMasks: Map<string, any>): void {
   if (mediaLayer.filter) {
-    console.log("[FilterCache] applyLiveParams - mediaLayer.filter:", {
-      clipId: mediaLayer.clipId,
-      filterId: mediaLayer.filter.id,
-      intensity: mediaLayer.filter.intensity,
-      mediaLayerFilter: mediaLayer.filter,
-    });
-
     const filter = entry.filterMap.get("__color_filter");
-    console.log("[FilterCache] filter instance from filterMap:", filter ? "EXISTS" : "NULL");
 
     if (filter) {
       const cached = filterCacheManager.getCached(mediaLayer.filter.id);
-      console.log("[FilterCache] cached filter from filterCacheManager:", {
-        cached: cached ? "EXISTS" : "NULL",
-        cachedFilterObject: cached,
-        filterProperty: cached?.filter,
-        gradingParams: cached?.filter?.gradingParams,
-        filterKeys: cached?.filter ? Object.keys(cached.filter) : [],
-      });
-
       const asset = cached?.filter;
       const params: Record<string, number> = {};
 
@@ -297,16 +244,9 @@ function applyLiveParams(entry: FilterCacheEntry, mediaLayer: EvaluatedMediaLaye
         if (gp.crossProcessAmount !== undefined) {
           params.crossProcessAmount = gp.crossProcessAmount * intensity;
         }
-
-        console.log("[FilterCache] computed params to apply:", params);
-      } else {
-        console.warn("[FilterCache] NO gradingParams found in asset!");
       }
 
       ColorAdjustmentsEffect.filterSpec!.updateUniforms!(filter, params, 0);
-      console.log("[FilterCache] updateUniforms called with params:", params);
-    } else {
-      console.warn("[FilterCache] filter instance not found in filterMap!");
     }
 
     const blurFilter = entry.filterMap.get("__color_filter_blur") as BlurFilter | undefined;

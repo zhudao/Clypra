@@ -270,6 +270,9 @@ export interface EvaluatedTransition {
   /** Transition type - uses TransitionRenderer from @clypra-studio/engine for single source of truth */
   readonly type: import("@clypra-studio/engine").TransitionRendererType;
 
+  /** GPU transition renderer ID (from API or engine) - used to resolve actual GPU implementation */
+  readonly renderer?: string;
+
   /** Progress (0.0 - 1.0) */
   readonly progress: number;
 

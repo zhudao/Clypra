@@ -1363,7 +1363,6 @@ export class PreviewMediaPool {
 
     // Guard 3: Session-level autoplay block → latch until user gesture
     if (this.sessionAutoplayBlocked) {
-      console.warn(`[PreviewMediaPool] Session autoplay blocked - waiting for user gesture`);
       return;
     }
 

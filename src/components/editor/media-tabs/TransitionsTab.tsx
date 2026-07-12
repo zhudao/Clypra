@@ -7,27 +7,37 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Wand2, Plus, AlertCircle } from "lucide-react";
 import type { TabProps } from "./types";
 import { useProjectStore } from "@/store/projectStore";
+import { useTimelineStore } from "@/store/timelineStore";
+import { useUIStore } from "@/store/uiStore";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/Tooltip";
 import { TransitionsApi } from "@/features/transitions/api/transitionsApi";
 import type { TransitionAsset } from "@/features/transitions/types";
+import { getPlaybackClock } from "@/hooks/usePlaybackClock";
 
 // Hardcoded transition categories for instant UI rendering
+// Matches GPU transition categories from Transition Lab Console
 const TRANSITION_CATEGORIES = [
-  { id: "fade", label: "Fade" },
-  { id: "slide", label: "Slide" },
-  { id: "wipe", label: "Wipe" },
-  { id: "zoom", label: "Zoom" },
-  { id: "dissolve", label: "Dissolve" },
-  { id: "creative", label: "Creative" },
+  { id: "geometric", label: "Geometric" },
+  { id: "optical-distortion", label: "Optical Distortion" },
+  { id: "temporal", label: "Temporal" },
+  { id: "particle-dissolve", label: "Particle Dissolve" },
+  { id: "light-based", label: "Light Based" },
+  { id: "depth-based", label: "Depth Based" },
+  { id: "physics-simulated", label: "Physics Simulated" },
 ] as const;
 
 type TransitionCategory = (typeof TRANSITION_CATEGORIES)[number]["id"];
 
 export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
-  const [activeCategory, setActiveCategory] = useState<TransitionCategory>("fade");
+  const [activeCategory, setActiveCategory] = useState<TransitionCategory>("geometric");
   const [transitions, setTransitions] = useState<TransitionAsset[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Get selection state from stores
+  const selectedClipIds = useUIStore((s) => s.selectedClipIds);
+  const tracks = useTimelineStore((s) => s.tracks);
+  const clips = useTimelineStore((s) => s.clips);
 
   // Fetch transitions when category changes
   useEffect(() => {
@@ -51,6 +61,33 @@ export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
 
   // Filter transitions based on category
   const filteredTransitions = useMemo(() => transitions, [transitions]);
+
+  // Check if transition can be applied: requires 2 selected clips OR playhead at a cut
+  const canApplyTransition = useMemo(() => {
+    // Case 1: Exactly 2 clips selected
+    if (selectedClipIds.length === 2) {
+      return true;
+    }
+
+    // Case 2: Playhead at a cut between two adjacent clips
+    const playheadTime = getPlaybackClock().time;
+    for (const track of tracks.filter((t) => t.type !== "audio" && !t.locked)) {
+      const sorted = clips.filter((clip) => clip.trackId === track.id).sort((a, b) => a.startTime - b.startTime);
+
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const left = sorted[i];
+        const right = sorted[i + 1];
+        const cutTime = left.startTime + left.duration;
+        const isAtCut = Math.abs(cutTime - right.startTime) <= 0.001 && Math.abs(playheadTime - cutTime) <= 0.25;
+
+        if (isAtCut) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }, [selectedClipIds, tracks, clips]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-surface/5 select-none">
@@ -95,7 +132,7 @@ export const TransitionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
         ) : (
           <div className="grid grid-cols-3 gap-1.5">
             {filteredTransitions.map((transition) => (
-              <TransitionCard key={transition.id} transition={transition} onAddToTimeline={() => onAddToTimeline?.(transition as any, "transitions")} />
+              <TransitionCard key={transition.id} transition={transition} onAddToTimeline={() => onAddToTimeline?.(transition as any, "transitions")} disabled={!canApplyTransition} />
             ))}
           </div>
         )}
@@ -116,15 +153,15 @@ const SkeletonCard = () => (
   </div>
 );
 
-const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: () => void }> = ({ transition, onAddToTimeline }) => {
+const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: () => void; disabled?: boolean }> = ({ transition, onAddToTimeline, disabled = false }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [imageError, setImageError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Handle video playback on hover
+  // Handle video playback on hover (only if not disabled)
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || disabled) return;
 
     if (isHovered) {
       // Reset to start and play
@@ -140,31 +177,32 @@ const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: (
       video.pause();
       video.currentTime = 0;
     }
-  }, [isHovered]);
+  }, [isHovered, disabled]);
 
   const handleAddToTimeline = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (disabled) return;
     onAddToTimeline();
     useProjectStore.getState().showToast(`Added ${transition.name} transition`);
   };
 
-  return (
-    <div onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)} className="w-full aspect-square bg-surface-raised/40 hover:bg-surface-raised/80 border border-border/40 hover:border-accent/40 rounded-xl relative overflow-hidden flex flex-col justify-between p-1 transition-all duration-300 group cursor-pointer shadow-[0_4px_16px_rgba(0,0,0,0.3)]">
+  const cardContent = (
+    <div onMouseEnter={() => !disabled && setIsHovered(true)} onMouseLeave={() => setIsHovered(false)} className={`w-full aspect-square bg-surface-raised/40 border border-border/40 rounded-xl relative overflow-hidden flex flex-col justify-between p-1 transition-all duration-300 group shadow-[0_4px_16px_rgba(0,0,0,0.3)] ${disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-surface-raised/80 hover:border-accent/40 cursor-pointer"}`}>
       {/* Premium Badge - top-left, appears on hover */}
-      {transition.isPremium && (
+      {transition.isPremium && !disabled && (
         <button className={`absolute top-1 left-1 p-1 rounded-full bg-surface/40 hover:bg-surface/60 border border-border/50 transition-all duration-200 z-10 ${isHovered ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"}`}>
           <Wand2 className="w-3 h-3 text-purple-400" />
         </button>
       )}
 
       {/* Preview area - with hover scale animation */}
-      <div className="flex-1 flex items-center justify-center w-full select-none relative overflow-hidden transition-transform duration-500 ease-out group-hover:scale-[1.05]">
+      <div className={`flex-1 flex items-center justify-center w-full select-none relative overflow-hidden transition-transform duration-500 ease-out ${!disabled && "group-hover:scale-[1.05]"}`}>
         {/* WebM Video Preview (shown on hover) */}
-        {transition.preview && <video ref={videoRef} src={transition.preview} loop muted playsInline preload="auto" controls={false} disablePictureInPicture style={{ pointerEvents: "none" }} className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-100 z-10" : "opacity-0 z-0"}`} />}
+        {transition.preview && !disabled && <video ref={videoRef} src={transition.preview} loop muted playsInline preload="auto" controls={false} disablePictureInPicture style={{ pointerEvents: "none" }} className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-100 z-10" : "opacity-0 z-0"}`} />}
 
         {/* Static Thumbnail */}
         {!imageError ? (
-          <img src={transition.thumbnail} alt={transition.name} className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered ? "opacity-0 z-0" : "opacity-100 z-10"}`} onError={() => setImageError(true)} />
+          <img src={transition.thumbnail} alt={transition.name} className={`max-w-full max-h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] select-none pointer-events-none transition-opacity duration-300 absolute inset-0 m-auto ${isHovered && !disabled ? "opacity-0 z-0" : "opacity-100 z-10"}`} onError={() => setImageError(true)} />
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 text-text-muted">
             <Wand2 className="w-6 h-6" />
@@ -175,11 +213,25 @@ const TransitionCard: React.FC<{ transition: TransitionAsset; onAddToTimeline: (
 
       {/* Footer - name + apply button, always visible */}
       <div className="flex items-center justify-between w-full mt-0.5 z-10">
-        <span className="text-[9px] text-text-muted font-medium group-hover:text-text-primary transition-colors truncate max-w-[65px]">{transition.name}</span>
-        <button onClick={handleAddToTimeline} title="Add transition to timeline" aria-label="Add transition to timeline" className="w-4 h-4 rounded-full flex items-center justify-center transition-all bg-accent hover:bg-accent/85 border border-accent text-white cursor-pointer">
-          <Plus className="w-3 h-3 group-hover:scale-110 transition-transform" />
+        <span className={`text-[9px] font-medium truncate max-w-[65px] ${disabled ? "text-text-muted" : "text-text-muted group-hover:text-text-primary"} transition-colors`}>{transition.name}</span>
+        <button onClick={handleAddToTimeline} title={disabled ? "Select two clips or place playhead at a cut" : "Add transition to timeline"} aria-label="Add transition to timeline" disabled={disabled} className={`w-4 h-4 rounded-full flex items-center justify-center transition-all border ${disabled ? "bg-surface/40 border-border/30 text-text-muted cursor-not-allowed" : "bg-accent hover:bg-accent/85 border-accent text-white cursor-pointer"}`}>
+          <Plus className={`w-3 h-3 ${!disabled && "group-hover:scale-110"} transition-transform`} />
         </button>
       </div>
     </div>
   );
+
+  // Wrap with tooltip if disabled
+  if (disabled) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>{cardContent}</TooltipTrigger>
+        <TooltipContent side="top" className="text-xs">
+          Select two adjacent clips or place playhead at a cut
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return cardContent;
 };

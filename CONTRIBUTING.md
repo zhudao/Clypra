@@ -1,293 +1,305 @@
 # Contributing to Clypra
 
-Thank you for your interest in contributing to Clypra! This document provides guidelines and instructions for contributing.
+First off, thank you for considering contributing to Clypra! It's people like you that make Clypra a great tool for creators worldwide.
+
+## Open Core Model
+
+Clypra uses an **Open Core** model:
+
+- **Open Source (MIT License)**: The core editor, effects engine, and all UI components are free and open source forever
+- **Commercial**: AI-powered features (auto-captions, natural language editing, smart reframe) are proprietary and accessed via API
+
+This document covers contributions to the **open source** components. All contributions to the open source core are welcome!
 
 ## Code of Conduct
 
-By participating in this project, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
 
 ## How Can I Contribute?
 
 ### Reporting Bugs
 
-Before creating a bug report:
+Before creating bug reports, please check the existing issues to avoid duplicates. When you create a bug report, include as many details as possible:
 
-1. Check the [existing issues](https://github.com/AIEraDev/Clypra/issues) to avoid duplicates
-2. Gather information about the bug (version, platform, steps to reproduce)
-
-When creating a bug report, use the bug report template and include:
-
-- Clypra version
-- Operating system and version
-- Clear steps to reproduce
-- Expected vs actual behavior
-- Error logs if available
-- Screenshots or screen recordings if helpful
+- **Use a clear and descriptive title**
+- **Describe the exact steps to reproduce the problem**
+- **Provide specific examples** (code snippets, screenshots, videos)
+- **Describe the behavior you observed and what you expected**
+- **Include your environment**: OS version, Clypra version, hardware specs
 
 ### Suggesting Features
 
-Feature requests are welcome! Use the feature request template and include:
+Feature suggestions are welcome! Before creating a feature request:
 
-- The problem you're trying to solve
-- Your proposed solution
-- Why this would be useful to other users
-- Any alternative solutions you've considered
+- **Check if the feature already exists** in a newer version
+- **Check if it's already been suggested** in Issues or Discussions
+- **Provide a clear use case** - why would this benefit users?
+- **Consider the scope** - does it fit Clypra's mission?
 
 ### Pull Requests
 
-1. **Fork the repository** and create your branch from `develop`
-2. **Make your changes** following our coding standards
-3. **Test your changes** on all platforms if possible
-4. **Update documentation** if needed
-5. **Submit a pull request** to the `develop` branch
+We actively welcome your pull requests:
+
+1. **Fork the repo** and create your branch from `main`
+2. **Make your changes** with clear commit messages
+3. **Add tests** if you've added code that should be tested
+4. **Ensure tests pass**: `npm test && cd src-tauri && cargo test`
+5. **Sign the CLA** (see below)
+6. **Submit your pull request**!
+
+## Contributor License Agreement (CLA)
+
+To preserve our ability to maintain Clypra long-term, all contributors must sign a Contributor License Agreement. This:
+
+- **Grants us a license** to use your contribution in Clypra (open source and commercial versions)
+- **Doesn't transfer ownership** - you retain copyright to your work
+- **Ensures legal clarity** - we can license Clypra under MIT without legal uncertainty
+- **Protects the project** - we can defend against patent/copyright claims
+
+### How to Sign
+
+When you submit your first pull request, a bot will comment with a link to sign the CLA. It takes 60 seconds:
+
+1. Click the CLA link in the PR comment
+2. Sign in with GitHub
+3. Review and accept the agreement
+4. The bot will update your PR status
+
+### What You're Agreeing To
+
+The CLA grants Clypra maintainers:
+
+- **Copyright license**: Right to use, modify, and distribute your contribution
+- **Patent license**: Right to use any patents you hold that are necessary for your contribution
+- **Attribution**: Your name will be preserved in git history and CONTRIBUTORS.md
+
+The CLA does NOT:
+
+- Transfer ownership of your work to us
+- Prevent you from using your contribution elsewhere
+- Remove your name from git history
+- Change the MIT License on the open source code
+
+This is the same CLA model used by major open source projects like Kubernetes, Apache projects, and .NET Foundation.
+
+### Benefits for Contributors
+
+Active contributors (3+ merged PRs in the last 12 months) receive:
+
+- **Free Pro Tier Access** ($10/month value) - unlimited AI features
+- **Recognition** in CONTRIBUTORS.md and on clypra.com
+- **Direct communication** with core maintainers via private Discord channel
+- **Early access** to new features and beta releases
+- **Speaking opportunities** at community calls and virtual meetups
 
 ## Development Setup
 
 ### Prerequisites
 
-- **Node.js** 20 or later
-- **Rust** 1.70 or later
-- **FFmpeg** development libraries
-- **Platform-specific dependencies** (see below)
+- Node.js 18+ with npm
+- Rust 1.70+ ([install via rustup](https://rustup.rs/))
+- FFmpeg 6.0+ with development libraries
+- Platform-specific tools (see README.md)
 
-### macOS Setup
+### Quick Start
 
 ```bash
-# Install Homebrew if you haven't
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/clypra.git
+cd clypra
+
+# Add upstream remote
+git remote add upstream https://github.com/AIEraDev/clypra.git
 
 # Install dependencies
-brew install node rust ffmpeg
-
-# Clone the repo
-git clone https://github.com/AIEraDev/Clypra.git
-cd Clypra
-
-# Install npm dependencies
 npm install
 
-# Run in development mode
+# Configure environment
+cp .env.example .env
+# Add your Clypra API key if testing text effects
+
+# Start development
 npm run tauri dev
 ```
 
-### Windows Setup
+### Running Tests
 
 ```bash
-# Install Node.js from nodejs.org
-# Install Rust from rustup.rs
+# Frontend tests (Vitest)
+npm test
 
-# Install FFmpeg via vcpkg
-git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-cd C:\vcpkg
-.\bootstrap-vcpkg.bat
-.\vcpkg integrate install
-.\vcpkg install ffmpeg:x64-windows-static-md
+# Backend tests (Cargo)
+cd src-tauri && cargo test
 
-# Clone the repo
-git clone https://github.com/AIEraDev/Clypra.git
-cd Clypra
+# Specific test file
+npm test -- src/lib/__tests__/timelineUtils.test.ts
 
-# Install npm dependencies
-npm install
-
-# Run in development mode
-npm run tauri dev
+# With coverage
+npm test -- --coverage
 ```
 
-### Linux Setup
+### Code Quality
+
+Before submitting a PR, ensure:
 
 ```bash
-# Install dependencies (Ubuntu/Debian)
-sudo apt-get update
-sudo apt-get install -y \
-  nodejs npm \
-  curl \
-  libavcodec-dev \
-  libavformat-dev \
-  libavutil-dev \
-  libswscale-dev \
-  libswresample-dev \
-  pkg-config \
-  libwebkit2gtk-4.1-dev \
-  build-essential \
-  wget \
-  file \
-  libxdo-dev \
-  libssl-dev \
-  libayatana-appindicator3-dev \
-  librsvg2-dev
+# TypeScript type checking
+npx tsc --noEmit
 
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Rust linting
+cd src-tauri && cargo clippy -- -D warnings
 
-# Clone the repo
-git clone https://github.com/AIEraDev/Clypra.git
-cd Clypra
-
-# Install npm dependencies
-npm install
-
-# Run in development mode
-npm run tauri dev
+# Format code
+npm run format
+cd src-tauri && cargo fmt
 ```
 
 ## Project Structure
 
 ```
-clypra/
-├── src/                    # Frontend React code
-│   ├── components/         # React components
-│   ├── core/              # Core engine (evaluation, rendering)
-│   ├── store/             # Zustand state management
-│   └── types/             # TypeScript types
-├── src-tauri/             # Rust backend
-│   ├── src/               # Rust source code
-│   └── Cargo.toml         # Rust dependencies
-├── public/                # Static assets
-└── docs/                  # Documentation
+src/
+├── components/          # React components
+│   ├── editor/         # Timeline, Preview, Filmstrip
+│   ├── screens/        # Launch, Settings screens
+│   └── ui/             # Reusable UI components
+├── store/               # Zustand state stores
+│   ├── timelineStore.ts # Timeline structure
+│   ├── playbackStore.ts # Playback state
+│   └── projectStore.ts  # Project metadata
+├── core/                # Core engine logic
+│   ├── runtime/        # ProjectSession lifecycle
+│   ├── scheduler/      # Frame scheduler
+│   └── render/         # Canvas compositing
+├── lib/                 # Shared utilities
+│   ├── platform/       # Tauri IPC wrappers
+│   └── monitoring/     # Performance monitoring
+└── App.tsx              # Application entry
+
+src-tauri/
+├── src/
+│   ├── commands/       # Tauri command handlers
+│   │   ├── thumbnail.rs # Video decode
+│   │   └── export.rs    # Export pipeline
+│   └── thumbnail_engine/# FFmpeg decoder pool
+└── Cargo.toml          # Rust dependencies
 ```
 
 ## Coding Standards
 
-### TypeScript/React
+### TypeScript
 
-- Use TypeScript strict mode
-- Follow existing code style (Prettier configured)
-- Write JSDoc comments for public APIs
-- Prefer functional components with hooks
-- Use Zustand for state management
-- Keep components small and focused
+- Use **strict mode** (enabled in tsconfig.json)
+- **Functional components** with hooks (no class components)
+- **Named exports** over default exports
+- **JSDoc comments** for public APIs
+- **Descriptive variable names** (no single-letter vars except loops)
+
+```typescript
+// Good
+export function calculateClipDuration(clip: Clip, timelinePosition: number): number {
+  // Implementation
+}
+
+// Bad
+export default function calc(c: any, t: any): any {
+  // Implementation
+}
+```
 
 ### Rust
 
-- Follow Rust standard style (rustfmt)
-- Write doc comments for public APIs
-- Use `cargo clippy` and fix all warnings
-- Write tests for new functionality
-- Handle errors properly (no unwrap in production code)
+- Follow `cargo fmt` formatting
+- Pass `cargo clippy` with no warnings
+- Use **descriptive names** and **doc comments**
+- Prefer **Result** over **panic** for error handling
+- Write **unit tests** for public functions
 
-### Git Commit Messages
+```rust
+// Good
+/// Decodes a video frame at the specified timestamp.
+///
+/// # Arguments
+/// * `video_path` - Path to the video file
+/// * `timestamp_ms` - Timestamp in milliseconds
+///
+/// # Returns
+/// The decoded frame as RGB24 data, or an error if decode fails
+pub fn decode_frame(
+    video_path: &Path,
+    timestamp_ms: i64,
+) -> Result<FrameData, DecodeError> {
+    // Implementation
+}
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-feat: add transitions panel
-fix: resolve audio sync issue
-docs: update installation guide
-refactor: simplify timeline rendering
-test: add tests for text rendering
-chore: update dependencies
-```
-
-## Testing
-
-### Frontend Tests
-
-```bash
-npm test                    # Run all tests
-npm test -- --watch        # Watch mode
-npm run test:coverage      # Coverage report
-```
-
-### Rust Tests
-
-```bash
-cd src-tauri
-cargo test                 # Run all tests
-cargo test -- --nocapture  # Show output
+// Bad
+pub fn decode(p: &str, t: i64) -> Vec<u8> {
+    // Implementation with unwrap()
+}
 ```
 
-### Manual Testing Checklist
+### Git Commits
 
-Before submitting a PR, test:
+Use [Conventional Commits](https://www.conventionalcommits.org/):
 
-- [ ] Import various file formats
-- [ ] Trim and split clips
-- [ ] Text rendering
-- [ ] Export to MP4
-- [ ] Save and load project
-- [ ] Undo/redo
-- [ ] No console errors
-- [ ] No memory leaks (leave app open for 10 minutes)
+```
+feat: add keyboard shortcuts for timeline navigation
+fix: resolve audio sync drift during export
+docs: update FFmpeg installation instructions
+perf: optimize decoder pool eviction strategy
+test: add tests for clip trimming edge cases
+refactor: extract timeline calculations to utility
+```
 
-## Finding Issues to Work On
+## Areas for Contribution
 
-Look for issues labeled:
+### Good First Issues
 
-- `good first issue` - Good for newcomers
-- `help wanted` - We need help with these
-- `bug` - Bug fixes needed
-- `enhancement` - New features
+Look for issues labeled `good first issue`:
 
-## Pull Request Process
+- Documentation improvements
+- UI polish and accessibility
+- Test coverage improvements
+- Bug fixes with clear reproduction steps
 
-1. **Create a branch** from `develop`:
+### High-Impact Areas
 
-   ```bash
-   git checkout develop
-   git pull origin develop
-   git checkout -b feature/your-feature-name
-   ```
+- **Performance**: Optimize decoder pool, filmstrip generation, export pipeline
+- **Mobile**: iOS/Android Capacitor integration and mobile UI
+- **Effects**: New video effects, transitions, filters
+- **Accessibility**: Keyboard shortcuts, screen reader support, high contrast themes
+- **i18n**: Internationalization and localization
 
-2. **Make your changes** and commit:
+### What We're NOT Looking For
 
-   ```bash
-   git add .
-   git commit -m "feat: add your feature"
-   ```
+- AI features (proprietary, not open source)
+- Cloud sync (planned as commercial feature)
+- Major architecture changes without prior discussion
+- Features that bloat the core editor
 
-3. **Push to your fork**:
+## Getting Help
 
-   ```bash
-   git push origin feature/your-feature-name
-   ```
+- **Questions**: Use [GitHub Discussions](https://github.com/AIEraDev/clypra/discussions)
+- **Bugs**: Open an [Issue](https://github.com/AIEraDev/clypra/issues)
+- **Chat**: Join our [Discord](https://discord.gg/clypra) (community channel)
+- **Security**: Email security@clypra.com (do not open public issues)
 
-4. **Create a Pull Request** on GitHub:
-   - Target the `develop` branch
-   - Fill out the PR template
-   - Link related issues
-   - Add screenshots if UI change
+## Recognition
 
-5. **Address review feedback**:
-   - Make requested changes
-   - Push new commits
-   - Respond to comments
+All contributors are recognized in:
 
-6. **Merge**: Once approved, a maintainer will merge your PR
+- Git history (your commits are permanently preserved)
+- [CONTRIBUTORS.md](./CONTRIBUTORS.md) (name + contribution summary)
+- GitHub's Contributors graph
+- Annual community call shoutouts
 
-## Release Process
-
-Releases are managed by maintainers:
-
-1. Create release branch from `develop`
-2. Update version numbers
-3. Update CHANGELOG.md
-4. Test on all platforms
-5. Merge to `master`
-6. Tag release: `git tag v0.1.0`
-7. Push tag: `git push origin v0.1.0`
-8. GitHub Actions builds and creates release
-
-## What We Need Most
-
-Current priorities for v0.1.0:
-
-- [ ] Bug reports with clear reproduction steps
-- [ ] Testing on Windows and Linux
-- [ ] Documentation improvements
-- [ ] UI/UX feedback
-- [ ] Performance testing with large projects
-
-## Questions?
-
-- **Discord**: Join our [Discord server](https://discord.gg/clypra)
-- **Discussions**: Use [GitHub Discussions](https://github.com/AIEraDev/Clypra/discussions)
-- **Email**: clypra@example.com
+Top contributors may be invited to join the core maintainer team.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project (see [LICENSE](LICENSE)).
+By contributing, you agree that your contributions will be licensed under the MIT License, the same license covering the open source Clypra editor. Your contribution will be subject to the Contributor License Agreement.
 
 ---
 
-Thank you for contributing to Clypra! 🎬
+**Thank you for making Clypra better!** 🎬✨
+
+If you have questions about contributing, reach out in Discussions or Discord. We're here to help!
