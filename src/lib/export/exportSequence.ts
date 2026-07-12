@@ -12,6 +12,8 @@ import { VideoElementPool } from "../../core/resources/VideoElementPool";
 import { resolveClipSourceTime } from "../../core/timeline/sourceTime";
 import { evaluateTimelineSceneCached } from "../../core/evaluation/evaluator";
 import type { Clip, Track, MediaAsset, Project, TransitionTimelineItem } from "../../types";
+import { ALL_TRANSITIONS } from "@clypra-studio/engine";
+import { resolveTransitionDefinition, mergeTransitionParams } from "../../core/render/utils/transitionResolver";
 
 /**
  * Image sequence export options.
@@ -153,6 +155,27 @@ export async function exportSequence(options: ExportSequenceOptions): Promise<Ex
   // FIX (BUG-C1): Wait for WebGL context to be fully initialized before rendering.
   // Without this, composeFrame() returns early (isReady=false) producing blank frames.
   await pixiHandle.compositor.waitForReady();
+
+  // Pre-warm transition shaders before the render loop starts.
+  // This avoids compile-time hiccups/stalls during sequence export.
+  if (transitions && transitions.length > 0) {
+    for (const transition of transitions) {
+      const resolved = resolveTransitionDefinition(
+        transition.type,
+        ALL_TRANSITIONS,
+        transition.renderer
+      );
+      if (resolved) {
+        const { definition, params } = resolved;
+        const runtimeParams = {
+          easing: transition.easing,
+          ...(transition.metadata?.params as Record<string, any> || {}),
+        };
+        const mergedParams = mergeTransitionParams(definition.params, params, runtimeParams);
+        pixiHandle.compositor.prewarmTransitionShader(definition, mergedParams);
+      }
+    }
+  }
 
   const videoPool = new VideoElementPool({
     maxConcurrent: 10,
