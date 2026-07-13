@@ -35,17 +35,20 @@ export interface ExportAudioClip {
  */
 export interface ExportProgress {
   /** Current frame number */
-  currentFrame: number;
+  currentFrame?: number;
 
   /** Total frames to export */
-  totalFrames: number;
+  totalFrames?: number;
 
-  /** Progress (0.0 - 1.0) */
+  /** Progress percentage (0 - 100) */
   progress: number;
 
   /** Estimated time remaining in seconds */
-  etaSeconds: number;
+  etaSeconds?: number;
 
   /** Current FPS (frames per second) */
-  fps: number;
+  fps?: number;
+
+  /** Status text (for mobile/cloud custom steps) */
+  status?: string;
 }
