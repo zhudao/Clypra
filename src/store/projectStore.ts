@@ -24,6 +24,7 @@
  */
 
 import { create } from "zustand";
+import { platform } from "@/core/platform";
 import type { Project, MediaAsset, TransitionTimelineItem } from "@/types";
 import { MAX_PROJECT_NAME_LENGTH } from "@/types";
 import { toRustProject } from "@/types/serialization";
@@ -496,8 +497,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   renameProject: async (projectId, newName) => {
     const sanitizedName = sanitizeProjectName(newName);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("rename_project", { projectId, newName: sanitizedName });
+      await platform.renameProject(projectId, sanitizedName);
 
       // Update in recent projects list
       set((state) => ({
@@ -521,8 +521,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   deleteProject: async (projectId) => {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("delete_project", { projectId });
+      await platform.deleteProject(projectId);
 
       // Remove from recent projects list
       set((state) => ({
@@ -560,10 +559,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           // Convert camelCase to snake_case using centralized serialization
           const rustProject = toRustProject(project, { tracks, clips, transitions, gaps, markers, mediaAssets });
 
-          const { invoke } = await import("@tauri-apps/api/core");
-          await invoke("save_project", {
-            projectData: JSON.stringify(rustProject),
-          });
+          await platform.saveProject(JSON.stringify(rustProject));
 
           get().showToast("Project saved");
         } catch (error) {
@@ -662,10 +658,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         // Convert camelCase to snake_case using centralized serialization
         const rustProject = toRustProject(project, { tracks, clips, transitions, gaps, markers, mediaAssets });
 
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("save_project", {
-          projectData: JSON.stringify(rustProject),
-        });
+        await platform.saveProject(JSON.stringify(rustProject));
         get().showToast("Project saved");
 
         // ── Crash recovery snapshot ──────────────────────────────────────
