@@ -353,7 +353,13 @@ export const MobileEditorLayout: React.FC = () => {
   const hasSelectedClip = selectedClipIds.length > 0;
 
   return (
-    <div className="w-full h-full flex flex-col app-shell overflow-hidden p-1  pt-0">
+    <div
+      className="w-full h-full flex flex-col app-shell overflow-hidden p-1 pt-0"
+      style={{
+        paddingTop: "calc(0.25rem + var(--safe-area-top, 0px))",
+        paddingBottom: "calc(0.25rem + var(--safe-area-bottom, 0px))",
+      }}
+    >
       <TopBar />
 
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden gap-1">

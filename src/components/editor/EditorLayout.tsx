@@ -28,11 +28,8 @@ interface EditorLayoutProps {
 }
 
 export const EditorLayout: React.FC<EditorLayoutProps> = ({ onRequestClose }) => {
+  // Call all hooks first before any conditional returns (Rules of Hooks)
   const { width } = useWindowSize();
-
-  if (width < 768) {
-    return <MobileEditorLayout />;
-  }
 
   // Only subscribe to actions, not state - prevents re-renders when clips/tracks change
   const addClip = useTimelineStore((s) => s.addClip);
@@ -492,6 +489,11 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({ onRequestClose }) =>
       useProjectStore.getState().showToast(`Added ${item.name} effect`);
     }
   };
+
+  // Mobile check after all hooks are called (Rules of Hooks)
+  if (width < 768) {
+    return <MobileEditorLayout />;
+  }
 
   return (
     <div className="w-full h-full flex flex-col app-shell overflow-hidden p-1 pt-0">
