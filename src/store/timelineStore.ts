@@ -22,7 +22,7 @@
  */
 
 import { create } from "zustand";
-import type { Track, TrackType, Clip, TextClip, TransitionTimelineItem, TransitionType } from "@/types";
+import type { Track, TrackType, Clip, TextClip, TransitionTimelineItem, TransitionType, TimelineMarker } from "@/types";
 import type { Gap } from "@/types/gap";
 import { generateId, getCounter } from "@/lib/utils/id";
 import { detectGaps, createGap, insertGapWithRipple, removeGapWithRipple, resizeGap, packTrack, mergeAdjacentGaps, validateGap } from "@/lib/timeline/gapEngine";
@@ -69,7 +69,7 @@ interface TimelineStore {
   /** Increment epoch (for cache invalidation) */
   incrementEpoch: () => void;
   /** Hydrate timeline state from project load (atomic operation) */
-  hydrateFromProject: (payload: { tracks?: any[]; clips?: any[]; transitions?: TransitionTimelineItem[]; gaps?: Gap[] }) => void;
+  hydrateFromProject: (payload: { tracks?: any[]; clips?: any[]; transitions?: TransitionTimelineItem[]; gaps?: Gap[]; markers?: TimelineMarker[] }) => void;
   addTrack: (type: TrackType) => void;
   /** Inserts a track at index (clamped); returns the new track id. */
   insertTrackAt: (type: TrackType, index: number) => string;
@@ -107,6 +107,11 @@ interface TimelineStore {
   toggleGapProtection: (gapId: string) => void;
   detectAndSyncGaps: (trackId?: string) => void;
   packTrackGaps: (trackId: string) => void;
+  // Marker operations
+  markers: TimelineMarker[];
+  addMarker: (time: number, name?: string, color?: string) => string;
+  removeMarker: (markerId: string) => void;
+  updateMarker: (markerId: string, updates: Partial<TimelineMarker>) => void;
 }
 
 const trackHeights: Record<string, number> = {
@@ -213,6 +218,7 @@ export const useTimelineStore = create<TimelineStore>(
     clips: [],
     gaps: [], // NEW: Initialize empty gaps array
     transitions: [],
+    markers: [],
     mainVideoTrackId: null,
     epoch: 0,
     zoomLevel: TIMELINE_ZOOM_DEFAULT,
@@ -259,6 +265,7 @@ export const useTimelineStore = create<TimelineStore>(
       const finalClipsRaw = payload?.clips ?? [];
       const finalTransitions = payload?.transitions ?? [];
       const finalGaps = (payload as any)?.gaps ?? []; // Load gaps from project
+      const finalMarkers: TimelineMarker[] = (payload as any)?.markers ?? [];
 
       // Normalize clip timing with media asset data
       const mediaAssets = useProjectStore.getState().mediaAssets;
@@ -277,6 +284,7 @@ export const useTimelineStore = create<TimelineStore>(
         clips: normalizedClips,
         gaps: finalGaps, // Load gaps from project
         transitions: finalTransitions,
+        markers: finalMarkers,
         scrollLeft: 0,
         zoomLevel: TIMELINE_ZOOM_DEFAULT,
         pixelsPerSecond: TIMELINE_ZOOM_DEFAULT * TIMELINE_PPS_PER_ZOOM,
@@ -1315,6 +1323,34 @@ export const useTimelineStore = create<TimelineStore>(
 
         return next;
       });
+    },
+
+    // ─── Marker actions ──────────────────────────────────────────────────────
+
+    addMarker: (time, name = "Marker", color = "purple") => {
+      const id = generateId("marker");
+      const marker: TimelineMarker = { id, time, name, color };
+      set((state) => ({
+        markers: [...state.markers, marker].sort((a, b) => a.time - b.time),
+        epoch: state.epoch + 1,
+      }));
+      return id;
+    },
+
+    removeMarker: (markerId) => {
+      set((state) => ({
+        markers: state.markers.filter((m) => m.id !== markerId),
+        epoch: state.epoch + 1,
+      }));
+    },
+
+    updateMarker: (markerId, updates) => {
+      set((state) => ({
+        markers: state.markers
+          .map((m) => (m.id === markerId ? { ...m, ...updates } : m))
+          .sort((a, b) => a.time - b.time),
+        epoch: state.epoch + 1,
+      }));
     },
   })),
 );

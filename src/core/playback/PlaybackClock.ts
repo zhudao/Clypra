@@ -64,6 +64,11 @@ export class PlaybackClock {
   // Generation counter to prevent stale RAF ticks
   private _generation: number = 0;
 
+  // Stall compensation — tracks AudioContext time at the start of a synchronous
+  // blocking operation (e.g. GPU shader compilation) so we can offset
+  // _playStartAudioTime on resume and prevent a spurious clock jump.
+  private _stallStartAudioTime: number | null = null;
+
   // Listeners (for UI snapshots only, not every frame)
   private _listeners = new Set<PlaybackClockListener>();
   private _lastNotifyTime: number = 0;
@@ -379,6 +384,41 @@ export class PlaybackClock {
 
     // Continue loop with generation check
     this._rafId = requestAnimationFrame(() => this._tickWithGeneration(generation));
+  }
+
+  // ─── Stall Compensation ────────────────────────────────────────────────────
+
+  /**
+   * Record the AudioContext time just before a synchronous blocking operation
+   * (e.g. GPU shader compilation via mountTransition).
+   *
+   * Must be paired with compensateStall() after the operation completes.
+   * Safe to call when not playing — becomes a no-op.
+   */
+  recordStallStart(): void {
+    if (this._state !== "playing" || !this._audioContext) return;
+    this._stallStartAudioTime = this._audioContext.currentTime;
+  }
+
+  /**
+   * Compensate for the wall-clock time consumed by a synchronous blocking
+   * operation started with recordStallStart().
+   *
+   * Adjusts _playStartAudioTime forward by the duration of the stall so the
+   * clock does not jump ahead, preventing the post-stall drift-recovery seek.
+   *
+   * Safe to call even if recordStallStart() was never called — becomes a no-op.
+   */
+  compensateStall(): void {
+    if (this._stallStartAudioTime === null || !this._audioContext) {
+      this._stallStartAudioTime = null;
+      return;
+    }
+    const stallDuration = this._audioContext.currentTime - this._stallStartAudioTime;
+    if (stallDuration > 0 && this._state === "playing") {
+      this._playStartAudioTime += stallDuration;
+    }
+    this._stallStartAudioTime = null;
   }
 
   // ─── Subscription (For UI snapshots only) ──────────────────────────────────

@@ -86,6 +86,7 @@ export interface Project {
   frameRate: 24 | 30 | 60;
   duration: number;
   mediaAssets?: MediaAsset[];
+  markers?: TimelineMarker[];
   /** Timeline schema version for forward-compatible project migrations. */
   timelineSchemaVersion?: number;
 }
@@ -181,6 +182,10 @@ export interface Clip {
   conform?: import("@clypra-studio/engine").ClipConform;
   /** Audio volume (0.0 to 1.0, default 1.0) */
   volume?: number;
+  /** Audio fade in duration in seconds */
+  fadeIn?: number;
+  /** Audio fade out duration in seconds */
+  fadeOut?: number;
   kind?: ClipKind; // Optional for backward compatibility
   /** Video overlays (actual video files like smoke, fire, light leaks) */
   overlays?: ClipOverlay[];
@@ -483,4 +488,11 @@ export interface TransformConstraints {
   canvasHeight: number;
   snapToGrid?: boolean;
   snapThreshold?: number;
+}
+
+export interface TimelineMarker {
+  id: string;
+  time: number;
+  name: string;
+  color: string;
 }

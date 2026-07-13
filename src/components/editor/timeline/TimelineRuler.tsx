@@ -1,5 +1,7 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from "react";
 import { usePlaybackClock } from "@/hooks/usePlaybackClock";
+import { useTimelineStore } from "@/store/timelineStore";
+import type { TimelineMarker } from "@/types";
 
 interface TimelineRulerProps {
   pixelsPerSecond: number;
@@ -7,40 +9,302 @@ interface TimelineRulerProps {
 }
 
 /**
- * CapCut-style timeline ruler.
+ * CapCut-style timeline ruler with Timeline Marker support.
  *
- * Design principles:
- *   1. Labels never overlap — minimum ~80px between major labels
- *   2. Clean hierarchy: major ticks (tall + label) → minor ticks (short, no label)
- *   3. Labels use 00:00 format (zero-padded MM:SS)
- *   4. Ticks hang from the top of the ruler
- *   5. Smooth zoom transitions via a "nice number" interval table
- *
- * Zoom range follows SRP: 25–400 px/s
+ * Markers:
+ *   - Press M to add at playhead
+ *   - Double-click ruler to add at that position
+ *   - Drag marker pin horizontally to reposition
+ *   - Click pin to open popover (rename, recolor, delete)
  */
 
 // ── Interval table ──────────────────────────────────────────────────────
-// [majorInterval in seconds, number of minor divisions between majors]
-// The ruler picks the first entry where majorInterval × pps ≥ MIN_LABEL_GAP_PX.
 const INTERVAL_TABLE: [number, number][] = [
-  [60, 6], // 1min major, 10s minor
-  [30, 6], // 30s major,  5s minor
-  [15, 5], // 15s major,  3s minor
-  [10, 5], // 10s major,  2s minor
-  [5, 5], // 5s major,   1s minor
-  [3, 3], // 3s major,   1s minor   ← CapCut uses this at ~27-50 pps
-  [2, 4], // 2s major,   0.5s minor ← CapCut uses this at ~50-80 pps
-  [1, 5], // 1s major,   0.2s minor (smallest — labels always whole seconds)
+  [60, 6],
+  [30, 6],
+  [15, 5],
+  [10, 5],
+  [5, 5],
+  [3, 3],
+  [2, 4],
+  [1, 5],
 ];
 
-/** Minimum pixel gap between major (labelled) ticks */
 const MIN_LABEL_GAP_PX = 80;
+
+const MARKER_COLORS: { label: string; value: string; css: string }[] = [
+  { label: "Purple", value: "purple", css: "#a855f7" },
+  { label: "Blue",   value: "blue",   css: "#3b82f6" },
+  { label: "Green",  value: "green",  css: "#22c55e" },
+  { label: "Yellow", value: "yellow", css: "#eab308" },
+  { label: "Red",    value: "red",    css: "#ef4444" },
+];
+
+function markerCss(color: string): string {
+  return MARKER_COLORS.find((c) => c.value === color)?.css ?? "#a855f7";
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+// ── Marker Pin ──────────────────────────────────────────────────────────
+
+interface MarkerPinProps {
+  marker: TimelineMarker;
+  pixelsPerSecond: number;
+  scrollLeft: number;
+  onSelect: (markerId: string) => void;
+  onDragEnd: (markerId: string, newTime: number) => void;
+  selected: boolean;
+}
+
+const MarkerPin: React.FC<MarkerPinProps> = ({
+  marker,
+  pixelsPerSecond,
+  scrollLeft,
+  onSelect,
+  onDragEnd,
+  selected,
+}) => {
+  const color = markerCss(marker.color);
+  const x = Math.round(marker.time * pixelsPerSecond) - scrollLeft;
+
+  // Drag logic
+  const dragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartTime = useRef(0);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      dragging.current = true;
+      dragStartX.current = e.clientX;
+      dragStartTime.current = marker.time;
+
+      const onMove = (ev: MouseEvent) => {
+        if (!dragging.current) return;
+        const dx = ev.clientX - dragStartX.current;
+        const dt = dx / pixelsPerSecond;
+        const newTime = Math.max(0, dragStartTime.current + dt);
+        // Live visual update via a CSS custom property on the element
+        pin.current?.style.setProperty("--dx", `${Math.round(newTime * pixelsPerSecond) - scrollLeft}px`);
+      };
+
+      const onUp = (ev: MouseEvent) => {
+        if (!dragging.current) return;
+        dragging.current = false;
+        const dx = ev.clientX - dragStartX.current;
+        const dt = dx / pixelsPerSecond;
+        const newTime = Math.max(0, dragStartTime.current + dt);
+        onDragEnd(marker.id, newTime);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [marker.id, marker.time, pixelsPerSecond, scrollLeft, onDragEnd],
+  );
+
+  const pin = useRef<HTMLDivElement>(null);
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      onSelect(marker.id);
+    },
+    [marker.id, onSelect],
+  );
+
+  return (
+    <div
+      ref={pin}
+      onMouseDown={handleMouseDown}
+      onClick={handleClick}
+      title={marker.name}
+      style={{
+        position: "absolute",
+        left: x,
+        top: 0,
+        transform: "translateX(-50%)",
+        cursor: "grab",
+        zIndex: selected ? 20 : 10,
+        userSelect: "none",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        pointerEvents: "auto",
+      }}
+    >
+      {/* Diamond flag head */}
+      <div
+        style={{
+          width: 10,
+          height: 10,
+          background: color,
+          transform: "rotate(45deg)",
+          borderRadius: 2,
+          boxShadow: selected ? `0 0 0 2px white, 0 0 0 3px ${color}` : `0 1px 3px rgba(0,0,0,0.4)`,
+          transition: "box-shadow 0.1s",
+        }}
+      />
+      {/* Stem */}
+      <div
+        style={{
+          width: 1.5,
+          height: 14,
+          background: color,
+          opacity: 0.85,
+        }}
+      />
+    </div>
+  );
+};
+
+// ── Marker Popover ─────────────────────────────────────────────────────
+
+interface MarkerPopoverProps {
+  marker: TimelineMarker;
+  x: number; // ruler-relative left px
+  onClose: () => void;
+  onUpdate: (updates: Partial<TimelineMarker>) => void;
+  onDelete: () => void;
+}
+
+const MarkerPopover: React.FC<MarkerPopoverProps> = ({ marker, x, onClose, onUpdate, onDelete }) => {
+  const [name, setName] = useState(marker.name);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  // Click-outside to close
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [onClose]);
+
+  const commitName = () => {
+    if (name.trim() && name.trim() !== marker.name) {
+      onUpdate({ name: name.trim() });
+    }
+  };
+
+  // Keep popover from overflowing the right edge — clamp to 220px card width
+  const CARD_W = 220;
+  const adjustedX = Math.max(0, Math.min(x - CARD_W / 2, (window.innerWidth || 1200) - CARD_W - 8));
+
+  return (
+    <div
+      ref={popoverRef}
+      onMouseDown={(e) => e.stopPropagation()}
+      style={{
+        position: "absolute",
+        top: 28,
+        left: adjustedX,
+        width: CARD_W,
+        zIndex: 50,
+        background: "var(--color-surface, #1a1a2e)",
+        border: "1px solid rgba(255,255,255,0.12)",
+        borderRadius: 8,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+        padding: "10px 12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        pointerEvents: "auto",
+      }}
+    >
+      {/* Time label */}
+      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontVariantNumeric: "tabular-nums", letterSpacing: "0.04em" }}>
+        {formatTime(marker.time)}
+      </div>
+
+      {/* Name input */}
+      <input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={commitName}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { commitName(); onClose(); }
+          if (e.key === "Escape") onClose();
+          e.stopPropagation();
+        }}
+        placeholder="Marker name…"
+        style={{
+          background: "rgba(255,255,255,0.07)",
+          border: "1px solid rgba(255,255,255,0.14)",
+          borderRadius: 5,
+          color: "#fff",
+          fontSize: 12,
+          padding: "4px 7px",
+          outline: "none",
+          width: "100%",
+          boxSizing: "border-box",
+        }}
+      />
+
+      {/* Color palette */}
+      <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+        {MARKER_COLORS.map((c) => (
+          <button
+            key={c.value}
+            onClick={() => onUpdate({ color: c.value })}
+            title={c.label}
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: "50%",
+              background: c.css,
+              border: marker.color === c.value ? "2px solid #fff" : "2px solid transparent",
+              cursor: "pointer",
+              flexShrink: 0,
+              transition: "transform 0.1s",
+              transform: marker.color === c.value ? "scale(1.2)" : "scale(1)",
+            }}
+          />
+        ))}
+        <div style={{ flex: 1 }} />
+        {/* Delete */}
+        <button
+          onClick={onDelete}
+          title="Delete marker"
+          style={{
+            background: "rgba(239,68,68,0.15)",
+            border: "1px solid rgba(239,68,68,0.35)",
+            color: "#ef4444",
+            borderRadius: 4,
+            fontSize: 10,
+            padding: "2px 7px",
+            cursor: "pointer",
+            fontWeight: 600,
+          }}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ── Main component ──────────────────────────────────────────────────────
 
 export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, scrollLeft }) => {
   const clockState = usePlaybackClock();
   const frameRate = clockState.frameRate;
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewportWidth, setViewportWidth] = useState(1200);
+  const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
+
+  const { markers, addMarker, removeMarker, updateMarker } = useTimelineStore();
 
   useEffect(() => {
     const el = containerRef.current;
@@ -52,25 +316,22 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
     return () => ro.disconnect();
   }, []);
 
-  // ── Format label (CapCut style: always 00:SS) ──────────────────────────────
+  // ── Format label (00:SS) ────────────────────────────────────────────────
   const formatLabel = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   }, []);
 
-  // ── Memoized tick generation ─────────────────────────────────────────────────
+  // ── Memoized tick generation ─────────────────────────────────────────────
   const ticks = useMemo(() => {
     const validPPS = typeof pixelsPerSecond === "number" && !isNaN(pixelsPerSecond) && pixelsPerSecond > 0 ? pixelsPerSecond : 50;
     const validScrollLeft = typeof scrollLeft === "number" && !isNaN(scrollLeft) ? scrollLeft : 0;
     const validViewportWidth = typeof viewportWidth === "number" && !isNaN(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1200;
 
-    // Pick best interval
     let majorInterval = INTERVAL_TABLE[INTERVAL_TABLE.length - 1][0];
     let minorDivisions = INTERVAL_TABLE[INTERVAL_TABLE.length - 1][1];
 
-    // Iterate smallest → largest: pick the smallest interval that still
-    // guarantees ≥ MIN_LABEL_GAP_PX between labels (no overlap).
     for (let i = INTERVAL_TABLE.length - 1; i >= 0; i--) {
       const [interval, divisions] = INTERVAL_TABLE[i];
       if (interval * validPPS >= MIN_LABEL_GAP_PX) {
@@ -81,13 +342,10 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
     }
 
     const minorInterval = majorInterval / minorDivisions;
-
-    // Visible time range
     const padPx = 60;
     const startTime = Math.max(0, (validScrollLeft - padPx) / validPPS);
     const endTime = (validScrollLeft + validViewportWidth + padPx) / validPPS;
 
-    // Generate ticks
     const result: { time: number; isMajor: boolean }[] = [];
     const firstTick = Math.floor(startTime / minorInterval) * minorInterval;
 
@@ -96,9 +354,9 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
       for (let t = firstTick; t <= endTime && count < 2000; t += minorInterval) {
         const time = Math.round(t * 10000) / 10000;
         if (time < 0) continue;
-
-        const isMajor = Math.abs(time % majorInterval) < minorInterval * 0.01 || Math.abs((time % majorInterval) - majorInterval) < minorInterval * 0.01;
-
+        const isMajor =
+          Math.abs(time % majorInterval) < minorInterval * 0.01 ||
+          Math.abs((time % majorInterval) - majorInterval) < minorInterval * 0.01;
         result.push({ time, isMajor });
         count++;
       }
@@ -107,11 +365,40 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
     return result;
   }, [pixelsPerSecond, scrollLeft, viewportWidth]);
 
-  // ── Render ─────────────────────────────────────────────────────────────
+  // ── Double-click ruler to add marker ────────────────────────────────────
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const clickX = e.clientX - rect.left + scrollLeft;
+      const time = Math.max(0, clickX / pixelsPerSecond);
+      addMarker(time);
+    },
+    [pixelsPerSecond, scrollLeft, addMarker],
+  );
+
+  // ── Close popover when clicking background ────────────────────────────────
+  const handleBackgroundClick = useCallback(() => {
+    setSelectedMarkerId(null);
+  }, []);
+
+  const selectedMarker = markers.find((m) => m.id === selectedMarkerId);
+
   return (
-    <div ref={containerRef} className="relative h-6 select-none overflow-hidden" style={{ background: "var(--color-timeline-ruler-bg)" }}>
+    <div
+      ref={containerRef}
+      className="relative select-none overflow-visible"
+      style={{
+        height: 24,
+        background: "var(--color-timeline-ruler-bg)",
+        zIndex: 5,
+      }}
+      onDoubleClick={handleDoubleClick}
+      onClick={handleBackgroundClick}
+    >
+      {/* ── Tick marks ── */}
       {ticks.map(({ time, isMajor }) => {
-        const x = Math.round(time * pixelsPerSecond);
+        const x = Math.round(time * pixelsPerSecond) - scrollLeft;
         return (
           <div
             key={time}
@@ -119,9 +406,9 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
               position: "absolute",
               left: x,
               top: 0,
+              pointerEvents: "none",
             }}
           >
-            {/* Tick line — hangs from top */}
             <div
               style={{
                 width: 1,
@@ -129,7 +416,6 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
                 backgroundColor: isMajor ? "var(--color-timeline-ruler-tick-major)" : "var(--color-timeline-ruler-tick-minor)",
               }}
             />
-            {/* Label — CapCut places it right after the tick */}
             {isMajor && (
               <span
                 style={{
@@ -153,6 +439,34 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({ pixelsPerSecond, s
           </div>
         );
       })}
+
+      {/* ── Marker pins ── */}
+      {markers.map((marker) => (
+        <MarkerPin
+          key={marker.id}
+          marker={marker}
+          pixelsPerSecond={pixelsPerSecond}
+          scrollLeft={scrollLeft}
+          selected={selectedMarkerId === marker.id}
+          onSelect={(id) => setSelectedMarkerId((prev) => (prev === id ? null : id))}
+          onDragEnd={(id, newTime) => updateMarker(id, { time: newTime })}
+        />
+      ))}
+
+      {/* ── Marker popover ── */}
+      {selectedMarker && (
+        <MarkerPopover
+          key={selectedMarker.id}
+          marker={selectedMarker}
+          x={Math.round(selectedMarker.time * pixelsPerSecond) - scrollLeft}
+          onClose={() => setSelectedMarkerId(null)}
+          onUpdate={(updates) => updateMarker(selectedMarker.id, updates)}
+          onDelete={() => {
+            removeMarker(selectedMarker.id);
+            setSelectedMarkerId(null);
+          }}
+        />
+      )}
     </div>
   );
 };

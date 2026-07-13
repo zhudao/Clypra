@@ -37,6 +37,8 @@ import { useTimelineStore } from "../../store/timelineStore";
 import { PreviewPlaybackScheduler, type MediaAction, type MediaElementState } from "../playback/PreviewPlaybackScheduler";
 import { VideoTextureManager } from "../render/VideoTextureManager";
 import { getTraceCollector } from "../monitoring/PerformanceTraceCollector";
+import { ALL_TRANSITIONS } from "@clypra-studio/engine";
+import { resolveTransitionDefinition, mergeTransitionParams } from "../render/utils/transitionResolver";
 
 export interface PreviewSyncState {
   /** Current playback time (seconds) */
@@ -255,6 +257,11 @@ export class PreviewMediaPool {
   private traceCollector = getTraceCollector();
   private frameStartTime: number = 0;
 
+  // Optional compositor reference for transition shader pre-warming.
+  // Set via setCompositor() after the PixiSceneCompositor is initialised.
+  // Using a loose type to avoid a circular dependency between resource and render layers.
+  private _compositor: { prewarmTransitionShader: (definition: any, params?: Record<string, any>) => void } | null = null;
+
   constructor(projectId?: string, sessionId?: string) {
     this._projectId = projectId ?? null;
     this._sessionId = sessionId ?? null;
@@ -288,6 +295,13 @@ export class PreviewMediaPool {
       (window as any).__previewMediaPools.push(this);
     }
     // ───────────────────────────────────────────────────────────────────────
+  }
+
+  /**
+   * Set the compositor instance for transition shader prewarming.
+   */
+  setCompositor(compositor: { prewarmTransitionShader: (definition: any, params?: Record<string, any>) => void } | null): void {
+    this._compositor = compositor;
   }
 
   /**
@@ -619,6 +633,7 @@ export class PreviewMediaPool {
       // Lookahead prewarming: Initialize upcoming clips before they become active
       if (syncState.state === "playing") {
         this.prewarmUpcomingClips(clips, assets, syncState.time, syncState.frameRate);
+        this.prewarmUpcomingTransitions(useTimelineStore.getState().transitions, syncState.time);
       }
 
       // ─── SCHEDULER INTEGRATION ────────────────────────────────────────────────
@@ -691,6 +706,42 @@ export class PreviewMediaPool {
       }
 
       this.prewarmVideoElement(cacheKey, clip.id, clip.mediaId, sourcePath, normalizedTrimIn);
+    }
+  }
+
+  /**
+   * Prewarm upcoming transition shaders within the lookahead window during playback.
+   * Compiles the transition shaders off-screen before the playhead reaches them.
+   */
+  private prewarmUpcomingTransitions(transitions: TransitionTimelineItem[], currentTime: number): void {
+    if (!this._compositor) return;
+
+    const lookaheadTime = currentTime + this.LOOKAHEAD_WINDOW_SECONDS;
+
+    for (const transition of transitions) {
+      // If the transition starts in the future, but within our lookahead window
+      if (transition.placement.startTime <= currentTime || transition.placement.startTime > lookaheadTime) {
+        continue;
+      }
+
+      // Resolve the transition type using transitionResolver
+      const resolved = resolveTransitionDefinition(
+        transition.type,
+        ALL_TRANSITIONS,
+        transition.renderer
+      );
+
+      if (resolved) {
+        const { definition, params } = resolved;
+        const runtimeParams = {
+          easing: transition.easing,
+          ...(transition.metadata?.params as Record<string, any> || {}),
+        };
+        const mergedParams = mergeTransitionParams(definition.params, params, runtimeParams);
+        
+        // Trigger off-screen compile
+        this._compositor.prewarmTransitionShader(definition, mergedParams);
+      }
     }
   }
 

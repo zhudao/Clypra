@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Check, Palette, SlidersHorizontal, Info, Paintbrush, RotateCcw, Copy, Download, Upload, HardDrive, Captions, RefreshCw } from "lucide-react";
+import { Check, Palette, SlidersHorizontal, Info, Paintbrush, RotateCcw, Copy, Download, Upload, HardDrive, Captions, RefreshCw, Keyboard } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Modal } from "./Modal";
 import { useSettingsStore, Theme, FontFamily, THEME_META, FONT_META, getThemeColors, getBaseThemeForCustomization, getThemeColorKeys } from "@/store/settingsStore";
@@ -7,6 +7,7 @@ import { useProjectStore } from "@/store/projectStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { CacheSettings } from "@/components/settings/CacheSettings";
 import { WhisperSettings } from "@/components/settings/WhisperSettings";
+import { KeyboardShortcutsSettings } from "@/components/settings/KeyboardShortcutsSettings";
 import { refitClipsForCanvasChange } from "@/lib/timeline/refitClips";
 import { checkAppUpdate, installAndRelaunchUpdate, isTauriDesktop } from "@/services/updaterService";
 
@@ -15,11 +16,12 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "appearance" | "editor" | "captions" | "cache" | "about";
+type Tab = "appearance" | "editor" | "shortcuts" | "captions" | "cache" | "about";
 
 const TABS: { id: Tab; label: string; icon: React.FC<{ className?: string }> }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "editor", label: "Editor", icon: SlidersHorizontal },
+  { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
   { id: "captions", label: "Auto-Captions", icon: Captions },
   { id: "cache", label: "Storage & Cache", icon: HardDrive },
   { id: "about", label: "About", icon: Info },
@@ -555,7 +557,7 @@ function AboutTab() {
         <p className="text-xs text-text-muted mt-1">Version 1.0.1</p>
       </div>
       <p className="text-xs text-text-muted max-w-[280px] leading-relaxed">A modern, native video editor built with Tauri, React, and FFmpeg. Designed for speed and creative freedom.</p>
-      
+
       {/* Auto-updater card */}
       <div className="w-full max-w-[340px] bg-gradient-to-b from-white/[0.04] to-white/[0.01] border border-white/10 rounded-2xl p-5 flex flex-col items-center gap-4 shadow-xl backdrop-blur-md">
         <div className="flex items-center gap-2 w-full justify-between pb-3 border-b border-white/5">
@@ -581,10 +583,7 @@ function AboutTab() {
               {updateStatus === "idle" && (
                 <>
                   <p className="text-[11px] text-text-muted mb-2">Keep Clypra running at peak performance.</p>
-                  <button
-                    onClick={handleCheckUpdate}
-                    className="flex items-center gap-1.5 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-text-primary rounded-xl text-xs font-semibold cursor-pointer shadow-sm transition-all duration-200 active:scale-95"
-                  >
+                  <button onClick={handleCheckUpdate} className="flex items-center gap-1.5 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-text-primary rounded-xl text-xs font-semibold cursor-pointer shadow-sm transition-all duration-200 active:scale-95">
                     <RefreshCw className="w-3.5 h-3.5" />
                     Check for Updates
                   </button>
@@ -607,10 +606,7 @@ function AboutTab() {
                   </div>
                   <p className="text-xs text-green-400 font-medium">Clypra is up to date</p>
                   <p className="text-[10px] text-text-muted">You are currently running the latest version.</p>
-                  <button
-                    onClick={handleCheckUpdate}
-                    className="mt-2 text-[10px] text-text-muted hover:text-text-primary transition-colors hover:underline cursor-pointer"
-                  >
+                  <button onClick={handleCheckUpdate} className="mt-2 text-[10px] text-text-muted hover:text-text-primary transition-colors hover:underline cursor-pointer">
                     Check again
                   </button>
                 </div>
@@ -622,20 +618,15 @@ function AboutTab() {
                     <p className="text-xs text-text-primary font-bold">New Version Available</p>
                     <p className="text-[10px] text-accent font-semibold">v{updateInfo.version}</p>
                   </div>
-                  
+
                   {updateInfo.body && (
                     <div className="w-full text-left">
                       <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wider mb-1">Release Notes</p>
-                      <div className="text-[10px] text-text-muted max-h-20 overflow-y-auto px-2.5 py-2 w-full leading-normal border border-white/5 bg-white/[0.02] rounded-xl scrollbar-thin">
-                        {updateInfo.body}
-                      </div>
+                      <div className="text-[10px] text-text-muted max-h-20 overflow-y-auto px-2.5 py-2 w-full leading-normal border border-white/5 bg-white/[0.02] rounded-xl scrollbar-thin">{updateInfo.body}</div>
                     </div>
                   )}
-                  
-                  <button
-                    onClick={handleInstallUpdate}
-                    className="w-full py-2 bg-gradient-to-r from-accent to-violet-500 hover:from-accent-hover hover:to-violet-600 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-[0_0_15px_rgba(96,165,250,0.2)] hover:shadow-[0_0_20px_rgba(96,165,250,0.4)] transition-all duration-200 active:scale-[0.98]"
-                  >
+
+                  <button onClick={handleInstallUpdate} className="w-full py-2 bg-gradient-to-r from-accent to-violet-500 hover:from-accent-hover hover:to-violet-600 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-[0_0_15px_rgba(96,165,250,0.2)] hover:shadow-[0_0_20px_rgba(96,165,250,0.4)] transition-all duration-200 active:scale-[0.98]">
                     Download & Install Update
                   </button>
                 </div>
@@ -648,10 +639,7 @@ function AboutTab() {
                     <span className="font-semibold text-accent">{downloadProgress}%</span>
                   </div>
                   <div className="w-full bg-white/5 border border-white/5 h-2 rounded-full overflow-hidden p-[1px]">
-                    <div
-                      className="bg-gradient-to-r from-accent to-violet-500 h-full rounded-full transition-all duration-300"
-                      style={{ width: `${downloadProgress}%` }}
-                    ></div>
+                    <div className="bg-gradient-to-r from-accent to-violet-500 h-full rounded-full transition-all duration-300" style={{ width: `${downloadProgress}%` }}></div>
                   </div>
                   <p className="text-[9px] text-text-muted">The application will automatically restart once complete.</p>
                 </div>
@@ -663,13 +651,8 @@ function AboutTab() {
                     <span className="text-red-400 text-sm font-bold">!</span>
                   </div>
                   <p className="text-xs text-red-400 font-medium">Update Check Failed</p>
-                  <p className="text-[10px] text-text-muted max-w-[260px] leading-normal line-clamp-2">
-                    {updateError || "An unknown error occurred."}
-                  </p>
-                  <button
-                    onClick={handleCheckUpdate}
-                    className="mt-1 flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-text-primary rounded-xl text-xs font-semibold cursor-pointer transition-all duration-200 active:scale-95"
-                  >
+                  <p className="text-[10px] text-text-muted max-w-[260px] leading-normal line-clamp-2">{updateError || "An unknown error occurred."}</p>
+                  <button onClick={handleCheckUpdate} className="mt-1 flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-text-primary rounded-xl text-xs font-semibold cursor-pointer transition-all duration-200 active:scale-95">
                     <RefreshCw className="w-3 h-3" />
                     Try Again
                   </button>
@@ -727,6 +710,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         <main className="flex-1 p-5 overflow-y-auto">
           {activeTab === "appearance" && <AppearanceTab />}
           {activeTab === "editor" && <EditorTab />}
+          {activeTab === "shortcuts" && <KeyboardShortcutsSettings />}
           {activeTab === "captions" && <WhisperSettings />}
           {activeTab === "cache" && <CacheSettings />}
           {activeTab === "about" && <AboutTab />}

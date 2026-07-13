@@ -33,4 +33,7 @@ Thumbs.db
 .env
 .env.local
 *.env.*
+
+/clypra_next_releases.md
+/custom_gpu_rendering_plan.md
 ```

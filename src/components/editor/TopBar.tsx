@@ -1,5 +1,5 @@
 import React, { useState, lazy, Suspense } from "react";
-import { Film, Upload, Home, Settings } from "lucide-react";
+import { Film, Upload, Home, Settings, Undo2, Redo2 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { useProjectStore } from "@/store/projectStore";
 import { useUIStore } from "@/store/uiStore";
@@ -17,7 +17,7 @@ interface TopBarProps {
 export const TopBar: React.FC<TopBarProps> = ({ onRequestClose }) => {
   const { project, closeProject } = useProjectStore();
   const { toggleSettingsModal } = useUIStore();
-  const { state: historyState } = useHistoryStore();
+  const { state: historyState, undo, redo } = useHistoryStore();
   const [showExportDialog, setShowExportDialog] = useState(false);
 
   const { isFullscreen } = useTauriFullscreen();
@@ -48,17 +48,16 @@ export const TopBar: React.FC<TopBarProps> = ({ onRequestClose }) => {
 
         {/* Right side - actions */}
         <div className="flex items-center gap-1.5">
-          {/* Undo/Redo indicator */}
-          {(historyState.canUndo || historyState.canRedo) && (
-            <div className="hidden sm:flex items-center gap-1 text-[10px] text-text-muted mr-1">
-              <span title={`${historyState.position + 1} undo actions available`}>{historyState.position + 1} undo</span>
-              {historyState.canRedo && (
-                <>
-                  <span>•</span>
-                  <span title={`${historyState.size - historyState.position - 1} redo actions available`}>{historyState.size - historyState.position - 1} redo</span>
-                </>
-              )}
-            </div>
+          {/* Undo/Redo buttons with action-specific tooltips */}
+          {historyState.canUndo && (
+            <Button variant="ghost" size="icon-sm" onClick={undo} title={historyState.undoLabel ? `Undo ${historyState.undoLabel}` : "Undo"} style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
+              <Undo2 className="w-3.5 h-3.5" />
+            </Button>
+          )}
+          {historyState.canRedo && (
+            <Button variant="ghost" size="icon-sm" onClick={redo} title={historyState.redoLabel ? `Redo ${historyState.redoLabel}` : "Redo"} style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
+              <Redo2 className="w-3.5 h-3.5" />
+            </Button>
           )}
 
           <Button variant="ghost" size="icon-sm" onClick={toggleSettingsModal} title="Settings" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>

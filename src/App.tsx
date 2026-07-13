@@ -17,6 +17,8 @@ import { lifecycleMonitor } from "@/lib/monitoring/LifecycleMonitor";
 import { useRecordingStore } from "@/store/recordingStore";
 import { FloatingWidget } from "@/components/ui/FloatingWidget";
 import { ScreenRecordingPreviewModal } from "@/components/ui/ScreenRecordingPreviewModal";
+import { useAutoUpdater } from "@/hooks/useAutoUpdater";
+import { UpdateBanner } from "@/components/ui/UpdateBanner";
 
 // const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
 
@@ -29,6 +31,7 @@ const App = () => {
   const [isClosingProject, setIsClosingProject] = useState(false);
   const [projectNameBeforeClose, setProjectNameBeforeClose] = useState<string>("");
   const { isRecording, previewRecording, setPreviewRecording } = useRecordingStore();
+  const autoUpdater = useAutoUpdater();
 
   useEffect(() => {
     const initializeApp = async () => {
@@ -407,6 +410,9 @@ const App = () => {
 
       {/* ── Crash Recovery Dialog ────────────────────────────────────────── */}
       <CrashRecoveryDialog isOpen={!!pendingRecovery && !project} snapshot={pendingRecovery} isRestoring={isRestoring} onRestore={handleRestoreSession} onDiscard={handleDiscardRecovery} />
+
+      {/* ── Auto-Update Banner ───────────────────────────────────────────── */}
+      <UpdateBanner updater={autoUpdater} />
     </ErrorBoundary>
   );
 };

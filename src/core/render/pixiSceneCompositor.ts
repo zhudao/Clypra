@@ -9,6 +9,8 @@ import { clearFilterCache } from "./filterCache.js";
 import { extractVisualMediaLayers, calculateMaxTrackIndex, calculateLayerZIndex } from "./utils/zIndexCalculator.js";
 import { resolveMediaSource } from "./utils/mediaResolver.js";
 import { resolveTransitionDefinition, mergeTransitionParams } from "./utils/transitionResolver.js";
+import { TransitionShaderCache } from "./TransitionShaderCache.js";
+import { getPlaybackClock } from "../playback/PlaybackClock.js";
 
 // Service and manager imports
 import { ConformCaptureService } from "./services/ConformCaptureService.js";
@@ -30,6 +32,11 @@ export class PixiSceneCompositor {
   private contextLostHandler: ((event: Event) => void) | null = null;
   private contextRestoredHandler: ((event: Event) => void) | null = null;
 
+  // Stub render textures used for off-screen pre-warming (1×1 px).
+  // Allocated once and reused for all prewarm calls to avoid GC pressure.
+  private prewarmFromTex: RenderTexture | null = null;
+  private prewarmToTex: RenderTexture | null = null;
+
   // Services and managers for code organization
   private mediaPool: PreviewMediaPool;
   private conformCapture: ConformCaptureService;
@@ -48,6 +55,16 @@ export class PixiSceneCompositor {
 
     // Handle WebGL context loss
     this.setupContextLossHandlers(canvas);
+  }
+
+  get isReady(): boolean {
+    return this.renderer?.isReady || false;
+  }
+
+  async waitForReady(): Promise<void> {
+    while (!this.renderer?.isReady) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   private setupContextLossHandlers(canvas: HTMLCanvasElement): void {
@@ -290,6 +307,50 @@ export class PixiSceneCompositor {
     this.renderer.render();
   }
 
+  /**
+   * Pre-warm a transition shader off-screen.
+   *
+   * Calls mountTransition() on tiny 1×1 stub textures to force GLSL compilation
+   * and WebGL program linking BEFORE the playhead reaches the transition. After
+   * compilation the transition is immediately unmounted so nothing appears on screen.
+   *
+   * The PlaybackClock stall compensation brackets the blocking GPU call so the
+   * AudioContext-derived clock does not jump forward during compilation, preventing
+   * a post-stall drift-recovery seek from hammering the video decoders.
+   *
+   * This method is idempotent — calling it multiple times for the same definition
+   * is a no-op after the first successful compile.
+   *
+   * @param definition  - GPU transition definition object (from ALL_TRANSITIONS)
+   * @param params      - Transition parameters (used to compile the right shader variant)
+   */
+  prewarmTransitionShader(definition: any, params: Record<string, any> = {}): void {
+    if (TransitionShaderCache.has(definition.id)) return; // already warm
+    if (!this.renderer?.isReady) return; // WebGL not initialised yet
+
+    // Lazily allocate 1×1 stub textures (reused for all prewarm calls)
+    if (!this.prewarmFromTex) {
+      this.prewarmFromTex = RenderTexture.create({ width: 1, height: 1 });
+    }
+    if (!this.prewarmToTex) {
+      this.prewarmToTex = RenderTexture.create({ width: 1, height: 1 });
+    }
+
+    // Bracket the blocking GPU compile with clock stall compensation
+    const clock = getPlaybackClock();
+    clock.recordStallStart();
+
+    try {
+      this.renderer.mountTransition(definition, this.prewarmFromTex, this.prewarmToTex, params);
+      this.renderer.unmountTransition();
+      TransitionShaderCache.markWarm(definition.id);
+    } catch (err) {
+      console.warn("[PixiSceneCompositor] prewarmTransitionShader failed for", definition.id, err);
+    } finally {
+      clock.compensateStall();
+    }
+  }
+
   private async composeActiveTransition(transition: EvaluatedTransition, definition: any, scene: EvaluatedScene, baseMediaContainer: Container, renderOrder: number, videoElements: Map<string, HTMLVideoElement>, resourceHandleMap?: Map<string, any>): Promise<void> {
     const outgoingLayer = scene.visualLayers.find((l) => l.layerId === transition.outgoingLayer) as EvaluatedMediaLayer;
     const incomingLayer = scene.visualLayers.find((l) => l.layerId === transition.incomingLayer) as EvaluatedMediaLayer;
@@ -306,7 +367,21 @@ export class PixiSceneCompositor {
 
     const activeId = this.renderer.getActiveTransitionId();
     if (activeId !== definition.id) {
-      this.renderer.mountTransition(definition, fromTex, toTex, transitionParams);
+      if (!TransitionShaderCache.has(definition.id)) {
+        // Cold path — shader not prewarmed yet. Bracket with stall compensation so
+        // the AudioContext clock doesn't jump forward during GLSL compilation.
+        const clock = getPlaybackClock();
+        clock.recordStallStart();
+        try {
+          this.renderer.mountTransition(definition, fromTex, toTex, transitionParams);
+          TransitionShaderCache.markWarm(definition.id);
+        } finally {
+          clock.compensateStall();
+        }
+      } else {
+        // Warm path — GLSL already compiled, this is purely a texture rebind (fast).
+        this.renderer.mountTransition(definition, fromTex, toTex, transitionParams);
+      }
     }
     this.renderer.updateTransitionProgress(definition.id, transition.progress, transitionParams);
 
@@ -417,6 +492,19 @@ export class PixiSceneCompositor {
     this.canvas = null;
 
     clearFilterCache();
+
+    // Clear shader cache so the next WebGL context recompiles from scratch
+    TransitionShaderCache.clear();
+
+    // Destroy prewarm stub textures
+    if (this.prewarmFromTex) {
+      this.prewarmFromTex.destroy(true);
+      this.prewarmFromTex = null;
+    }
+    if (this.prewarmToTex) {
+      this.prewarmToTex.destroy(true);
+      this.prewarmToTex = null;
+    }
 
     // Clean up offscreen textures
     for (const texture of this.transitionRenderTextures.values()) {

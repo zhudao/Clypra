@@ -6,6 +6,7 @@ import { useTimelineStore } from "@/store/timelineStore";
 import { useUIStore } from "@/store/uiStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useHistoryStore } from "@/store/historyStore";
+import { useShortcutStore } from "@/store/shortcutStore";
 import { EditingActions } from "@/core/interactions";
 import { generateId } from "@/lib/utils/id";
 import { useAnchoredTimelineZoom } from "./useAnchoredTimelineZoom";
@@ -31,7 +32,7 @@ let copiedClipsClipboard: Array<{
 export const useKeyboardShortcuts = () => {
   const { play, pause, seek, setActiveContext } = useTransportControls();
   const { state: transportState, time: transportTime, speed } = useTransportSnapshot();
-  const { swapClips, rippleEditEnabled, toggleRippleEdit } = useTimelineStore();
+  const { swapClips, rippleEditEnabled, toggleRippleEdit, addMarker } = useTimelineStore();
   const { selectedClipIds, selectClip, selectTrack, previewMode, exitSourceMode, markSourceIn, markSourceOut } = useUIStore();
   const { project } = useProjectStore();
   const { undo, redo } = useHistoryStore();
@@ -457,6 +458,16 @@ export const useKeyboardShortcuts = () => {
 
         // Select the new track
         useUIStore.getState().selectTrack(newTrackId);
+      } else if (e.key === "m" && !isMeta && !e.altKey) {
+        e.preventDefault();
+        // M: Add marker at playhead position
+        const liveTime = getPlaybackClock().time;
+        const mins = Math.floor(liveTime / 60);
+        const secs = Math.floor(liveTime % 60);
+        const timeLabel = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+        addMarker(liveTime);
+        setToastMessage(`Marker added at ${timeLabel}`);
+        setTimeout(() => setToastMessage(null), 2000);
       } else if (e.key === "s" && !isMeta) {
         e.preventDefault();
         const results = EditingActions.splitAtPlayhead();
@@ -499,7 +510,7 @@ export const useKeyboardShortcuts = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPlaying, transportTime, frameRate, selectedClipIds, previewMode, rippleEditEnabled, play, pause, seek, setActiveContext, zoomByStep, selectClip, selectTrack, exitSourceMode, markSourceIn, markSourceOut, swapClips, toggleRippleEdit, undo, redo]);
+  }, [isPlaying, transportTime, frameRate, selectedClipIds, previewMode, rippleEditEnabled, play, pause, seek, setActiveContext, zoomByStep, selectClip, selectTrack, exitSourceMode, markSourceIn, markSourceOut, swapClips, toggleRippleEdit, addMarker, undo, redo]);
 
   return { toastMessage };
 };

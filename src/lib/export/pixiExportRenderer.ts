@@ -29,6 +29,8 @@
 
 import { PixiSceneCompositor } from "@/core/render/pixiSceneCompositor";
 import type { EvaluatedScene } from "@/core/evaluation/types";
+import { clearAllTextBridges } from "@/core/render/textBridge";
+import { clearAllStickerBridges } from "@/core/render/stickerBridge";
 
 // ── Minimal pool adapter for export ──────────────────────────────────────────
 // The real PreviewMediaPool tracks frame callbacks from requestVideoFrameCallback
@@ -51,6 +53,8 @@ export interface PixiExportCompositor {
   readbackCanvas: HTMLCanvasElement;
   readbackCtx: CanvasRenderingContext2D;
   container: HTMLDivElement;
+  width: number;
+  height: number;
 }
 
 /**
@@ -64,6 +68,10 @@ export interface PixiExportCompositor {
  * @returns      - Handle to the compositor and its supporting resources
  */
 export function createPixiExportCompositor(width: number, height: number): PixiExportCompositor {
+  // Clear any cached bridges from preview so they are not shared or stolen
+  clearAllTextBridges();
+  clearAllStickerBridges();
+
   // Create an invisible DOM container — browsers suspend GPU decoding for
   // completely offscreen elements, so we keep it at 1×1 visible size.
   const container = document.createElement("div");
@@ -86,17 +94,48 @@ export function createPixiExportCompositor(width: number, height: number): PixiE
     throw new Error("[PixiExportRenderer] Failed to create 2D readback context");
   }
 
-  // Cast: PixiSceneCompositor's private field `canvas` is typed as
-  // `HTMLCanvasElement | null`, and the constructor accepts `HTMLCanvasElement`.
-  // The ALWAYS_DIRTY_POOL satisfies the structural PreviewMediaPool interface.
-  const compositor = new PixiSceneCompositor(
-    canvas,
-    width,
-    height,
-    ALWAYS_DIRTY_POOL as any,
-  );
+  // Temporarily override window.devicePixelRatio to 1 during export initialization
+  // so the headless compositor renders at exactly 1x resolution (no Retina upscale).
+  // This avoids rendering 4x more pixels and matches readback Canvas size exactly.
+  const originalDPR = window.devicePixelRatio;
+  const dprDescriptor = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+  
+  try {
+    Object.defineProperty(window, "devicePixelRatio", {
+      value: 1.0,
+      configurable: true,
+      writable: true,
+    });
+  } catch (e) {
+    // Fallback if defineProperty fails
+  }
 
-  return { compositor, canvas, readbackCanvas, readbackCtx, container };
+  let compositor: PixiSceneCompositor;
+  try {
+    compositor = new PixiSceneCompositor(
+      canvas,
+      width,
+      height,
+      ALWAYS_DIRTY_POOL as any,
+    );
+  } finally {
+    // Restore original window.devicePixelRatio
+    try {
+      if (dprDescriptor) {
+        Object.defineProperty(window, "devicePixelRatio", dprDescriptor);
+      } else {
+        Object.defineProperty(window, "devicePixelRatio", {
+          value: originalDPR,
+          configurable: true,
+          writable: true,
+        });
+      }
+    } catch (e) {
+      // Fallback
+    }
+  }
+
+  return { compositor, canvas, readbackCanvas, readbackCtx, container, width, height };
 }
 
 /**
@@ -109,6 +148,9 @@ export function destroyPixiExportCompositor(handle: PixiExportCompositor): void 
   } catch (err) {
     console.error("[PixiExportRenderer] Compositor destroy error:", err);
   }
+  // Clear bridges again so the preview pipeline doesn't try to reuse destroyed sprites
+  clearAllTextBridges();
+  clearAllStickerBridges();
   handle.container.remove();
 }
 
@@ -125,17 +167,26 @@ export async function renderFrameWithPixi(
   scene: EvaluatedScene,
   videoElements: Map<string, HTMLVideoElement>,
 ): Promise<ImageData> {
-  const { compositor, canvas, readbackCanvas, readbackCtx } = handle;
+  const { compositor, canvas, readbackCanvas, readbackCtx, width, height } = handle;
 
-  // Unit viewport: scale=1, no pan offset, pixel ratio=1.
-  // For export we always render at the project's native resolution.
+  // Resolve native project size. We must scale the layout if exporting at a resolution
+  // different from the project's canonical design canvas dimensions. This ensures
+  // text size, positions, templates, and effects conform perfectly at any quality tier.
+  const projectWidth = scene.metadata.canvasWidth ?? width;
+  const projectHeight = scene.metadata.canvasHeight ?? height;
+
+  const scale = width / projectWidth;
+
+  // Set projectWidth and projectHeight dynamically relative to the scale factor.
+  // This guarantees that projectW * scale evaluates exactly to target width and height
+  // without 1-pixel rounding errors or resizing, while allowing text/stickers to scale correctly.
   const viewport = {
-    scale: 1,
+    scale,
     offsetX: 0,
     offsetY: 0,
     pixelRatio: 1,
-    projectWidth: scene.metadata.canvasWidth ?? canvas.width,
-    projectHeight: scene.metadata.canvasHeight ?? canvas.height,
+    projectWidth: width / scale,
+    projectHeight: height / scale,
   };
 
   await compositor.composeFrame(
@@ -146,12 +197,24 @@ export async function renderFrameWithPixi(
     new Map(),  // bodyMasks (no body segmentation during export)
   );
 
+  // Defensive guard — if canvas dimensions have somehow diverged despite the above,
+  // fail loudly and immediately rather than silently cropping the frame.
+  if (canvas.width !== readbackCanvas.width || canvas.height !== readbackCanvas.height) {
+    throw new Error(
+      `[ExportRenderer] Canvas dimension mismatch before readback: ` +
+      `WebGL ${canvas.width}x${canvas.height} vs ` +
+      `Readback ${readbackCanvas.width}x${readbackCanvas.height} — ` +
+      `aborting to prevent silent cropping`
+    );
+  }
+
   // Blit WebGL canvas → 2D canvas and read pixels.
   // drawImage() from a WebGL canvas works because preserveDrawingBuffer=true
   // is set on the PixiRenderer Application — without it the canvas would be
   // cleared after each render call and the readback would return black pixels.
+  // We use the 5-argument drawImage call to dynamically support physical scaling (DPR).
   readbackCtx.clearRect(0, 0, readbackCanvas.width, readbackCanvas.height);
-  readbackCtx.drawImage(canvas, 0, 0);
+  readbackCtx.drawImage(canvas, 0, 0, readbackCanvas.width, readbackCanvas.height);
 
-  return readbackCtx.getImageData(0, 0, readbackCanvas.width, readbackCanvas.height);
+  return readbackCtx.getImageData(0, 0, width, height);
 }
