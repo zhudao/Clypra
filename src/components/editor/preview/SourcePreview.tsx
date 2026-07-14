@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { Plus, X, RotateCcw, Play, Loader2 } from "lucide-react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { platform } from "@/core/platform";
 import { useUIStore } from "@/store/uiStore";
 import { usePreviewMode } from "@/hooks/usePreviewMode";
 import { getInsertIndexForNewTrack, useTimelineStore } from "@/store/timelineStore";
@@ -386,8 +386,8 @@ export const SourcePreview: React.FC = () => {
       const cachedSticker = useStickersStore.getState().getCachedSticker(stickerId);
       // Stickers are Lottie-only, use thumbnail for timeline
       if (cachedSticker && cachedSticker.localImagePath) {
-        const appCache = await import("@tauri-apps/api/path").then((m) => m.appCacheDir());
-        const absoluteImagePath = await import("@tauri-apps/api/path").then((m) => m.join(appCache, cachedSticker.localImagePath!));
+        const appCache = await platform.appCacheDir();
+        const absoluteImagePath = await platform.joinPaths(appCache, cachedSticker.localImagePath!);
         mediaAsset = {
           ...mediaAsset,
           path: absoluteImagePath,
@@ -460,7 +460,7 @@ export const SourcePreview: React.FC = () => {
   const hasMarks = sourceInPoint !== null || sourceOutPoint !== null;
   const hasCompleteMarks = sourceInPoint !== null && sourceOutPoint !== null;
 
-  const sourcePath = sourceAsset.path ? (isExternalOrDataUrl(sourceAsset.path) ? sourceAsset.path : convertFileSrc(sourceAsset.path)) : "";
+  const sourcePath = sourceAsset.path ? (isExternalOrDataUrl(sourceAsset.path) ? sourceAsset.path : platform.convertFileSrc(sourceAsset.path)) : "";
   const mediaLabel = sourceAsset.type === "video" ? "video" : sourceAsset.type === "audio" ? "audio" : sourceAsset.type === "text" ? "text" : "image";
 
   return (

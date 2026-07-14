@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-13
+
+### 🐛 Bug Fixes
+
+**API Error Handling**
+
+- Added comprehensive error handling and logging to all API clients (transitions, filters, stickers, audio, text effects, video effects)
+- API errors now include HTTP status codes and full error messages for better debugging
+- Added API key configuration logging on module load to help diagnose authentication issues
+- Improved error messages shown to users with actionable information
+
+### ⚡ Performance Improvements
+
+**API Caching**
+
+- Removed `cache: "reload"` from all API fetch calls to enable proper browser caching
+- Reduces unnecessary network requests for frequently accessed resources
+- Improves load times for media tabs (transitions, filters, stickers, etc.)
+
+### 🔍 Developer Experience
+
+**Debugging**
+
+- All API requests now log detailed information to browser console
+- Successful API responses log item counts for verification
+- Failed requests show full error context including status codes and error text
+- API key presence is verified and logged on application startup
+
+## [1.1.0] - 2026-07-13
+
 ## [0.1.0-alpha.1] - 2026-05-11
 
 ### 🎉 First Alpha Release

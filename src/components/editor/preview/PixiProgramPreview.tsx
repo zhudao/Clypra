@@ -161,7 +161,7 @@ export const PixiProgramPreview: React.FC = () => {
 
   const handlePreviewPointerDownCapture = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 && e.pointerType === "mouse") return;
       if (isPanning || spacePressed) return;
       const target = e.target as HTMLElement | null;
       if (!target) return;

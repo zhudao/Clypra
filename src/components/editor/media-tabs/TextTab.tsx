@@ -2,7 +2,6 @@ import React, { useState, useEffect } from "react";
 import { Sparkles, MessageSquare, Loader2, CheckCircle2, AlertCircle, Cloud, CloudOff } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
-import { invoke } from "@tauri-apps/api/core";
 import { TemplateDefinition, TemplateCustomization, TEMPLATE_CATEGORIES } from "@/features/text-templates/types";
 import type { TabProps } from "./types";
 import { TemplateCard } from "@/components/ui/TemplateCard";
@@ -136,6 +135,7 @@ export const TextTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
         const isTauri = typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__;
 
         if (isTauri) {
+          const { invoke } = await import("@tauri-apps/api/core");
           // ─── 1. AUDIO EXTRACTION ───
           setCaptioningState("analyzing");
           setCaptioningProgress(25);

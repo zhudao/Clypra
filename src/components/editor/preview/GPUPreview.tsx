@@ -25,7 +25,6 @@ import { GPUTextureCache } from "@/lib/cache/gpuTextureCache";
 import { globalGPUCache } from "@/lib/cache/globalGPUCache";
 import { performanceMetrics } from "@/lib/utils/performanceMetrics";
 import { generateId } from "@/lib/utils/id";
-import { invoke } from "@tauri-apps/api/core";
 import { normalizePathForTauriInvoke } from "@/lib/platform/tauri";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -193,6 +192,7 @@ export function GPUPreview({ videoPath, currentTime, isPlaying, width, height, d
     // Decode and upload new frame
     try {
       const decodeStart = performance.now();
+      const { invoke } = await import("@tauri-apps/api/core");
 
       const rgbaBytes = await invoke<number[]>("decode_frame_gpu", {
         videoPath: normalizePathForTauriInvoke(videoPath),

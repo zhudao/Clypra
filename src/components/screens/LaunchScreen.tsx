@@ -462,15 +462,17 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onProjectCreate, onP
                   <Plus className="mr-1" />
                   New Project
                 </Button>
-                <Button
-                  variant="secondary"
-                  size="lg"
-                  onClick={openRecordModal}
-                  className="py-2 px-4 text-base font-semibold rounded-xl transition-all cursor-pointer border border-red-500/40 text-red-400 hover:bg-red-500/10 hover:border-red-500/70 hover:text-red-300"
-                >
-                  <Video className="mr-1.5 w-4 h-4" />
-                  Record Screen & Camera
-                </Button>
+                {!platform.isCapacitor() && (
+                  <Button
+                    variant="secondary"
+                    size="lg"
+                    onClick={openRecordModal}
+                    className="py-2 px-4 text-base font-semibold rounded-xl transition-all cursor-pointer border border-red-500/40 text-red-400 hover:bg-red-500/10 hover:border-red-500/70 hover:text-red-300"
+                  >
+                    <Video className="mr-1.5 w-4 h-4" />
+                    Record Screen & Camera
+                  </Button>
+                )}
               </div>
             </div>
           </div>

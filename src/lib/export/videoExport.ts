@@ -9,7 +9,7 @@
  *   Timeline → evaluateTimelineSceneCached → PixiSceneCompositor → RGBA Frames → FFmpeg → MP4/MOV
  */
 
-import { invoke, Channel, convertFileSrc } from "@tauri-apps/api/core";
+import { platform } from "../../core/platform";
 import { evaluateTimelineSceneCached, clearEvaluationCache } from "../../core/evaluation/evaluator";
 import { createPixiExportCompositor, destroyPixiExportCompositor, renderFrameWithPixi } from "./pixiExportRenderer";
 import { VideoElementPool } from "../../core/resources/VideoElementPool";
@@ -118,7 +118,17 @@ export interface VideoExportResult {
  * @param config - Export configuration
  * @returns Export result
  */
+export function isWebCodecsSupported(): boolean {
+  return typeof VideoEncoder !== "undefined" && typeof AudioEncoder !== "undefined";
+}
+
 export async function exportVideo(config: VideoExportConfig): Promise<VideoExportResult> {
+  if (platform.isCapacitor()) {
+    const { exportVideoMobile } = await import("./mobileExport");
+    return exportVideoMobile(config);
+  }
+
+  const { invoke, Channel } = await import("@tauri-apps/api/core");
   const { clips, tracks, transitions = [], assets, project, epoch, startTime, endTime, outputPath, frameRate = project?.frameRate || 30, width = project?.canvasWidth || 1920, height = project?.canvasHeight || 1080, codec = "h264", preset = "medium", crf = 23, pixelFormat = "yuv420p", onProgress, onSessionReady } = config;
 
   const startTimeMs = Date.now();
@@ -287,7 +297,7 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
           });
 
           // Resolve path for Tauri webview context
-          const resolvedPath = asset.path.startsWith("asset://") ? asset.path : convertFileSrc(asset.path);
+          const resolvedPath = asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path);
 
           // Acquire video element at exact frame time
           const key = `${clip.id}-${clip.mediaId}`;
@@ -385,6 +395,7 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
  */
 export async function checkFFmpegAvailable(): Promise<boolean> {
   try {
+    const { invoke } = await import("@tauri-apps/api/core");
     return await invoke<boolean>("check_ffmpeg_available");
   } catch {
     return false;
@@ -397,6 +408,7 @@ export async function checkFFmpegAvailable(): Promise<boolean> {
  * @returns FFmpeg version string
  */
 export async function getFFmpegVersion(): Promise<string> {
+  const { invoke } = await import("@tauri-apps/api/core");
   return await invoke<string>("get_ffmpeg_version");
 }
 

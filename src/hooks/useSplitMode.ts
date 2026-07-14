@@ -78,7 +78,7 @@ export const useSplitMode = ({ enabled, onSplit, onMessage }: UseSplitModeOption
     };
 
     const handlePointerDown = (e: PointerEvent) => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 && e.pointerType === "mouse") return;
       const target = e.target as HTMLElement | null;
       if (!target) return;
       const clipElement = target.closest("[data-clip-id]") as HTMLElement | null;

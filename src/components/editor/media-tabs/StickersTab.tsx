@@ -6,6 +6,7 @@ import { useUIStore } from "@/store/uiStore";
 import type { MediaAsset } from "@/types";
 import type { TabProps } from "./types";
 import { STICKER_CATEGORIES, StickersApi, type StickerCategory, type StickerItem } from "@/features/stickers/api/stickersApi";
+import { platform } from "@/core/platform";
 
 export const StickersTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const [searchQuery, setSearchQuery] = useState("");
@@ -178,9 +179,9 @@ const StickerCard: React.FC<{ sticker: StickerItem; onAddToTimeline?: (item: any
         throw new Error("Cached sticker not found after download");
       }
 
-      const appCache = await import("@tauri-apps/api/path").then((m) => m.appCacheDir());
-      const absoluteImagePath = cached.localImagePath ? await import("@tauri-apps/api/path").then((m) => m.join(appCache, cached.localImagePath)) : "";
-      const absoluteAnimationPath = cached.localAnimationPath ? await import("@tauri-apps/api/path").then((m) => m.join(appCache, cached.localAnimationPath)) : "";
+      const appCache = await platform.appCacheDir();
+      const absoluteImagePath = cached.localImagePath ? await platform.joinPaths(appCache, cached.localImagePath) : "";
+      const absoluteAnimationPath = cached.localAnimationPath ? await platform.joinPaths(appCache, cached.localAnimationPath) : "";
 
       const mediaAsset: MediaAsset = {
         id: `sticker-${sticker.id}`,

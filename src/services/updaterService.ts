@@ -45,9 +45,19 @@ export async function checkAppUpdate(): Promise<UpdateCheckResult> {
     return { hasUpdate: false };
   } catch (error: any) {
     console.error("Failed to check for updates:", error);
+
+    // Provide more helpful error messages
+    let errorMessage = error?.message || String(error);
+
+    if (errorMessage.includes("Could not fetch a valid release JSON")) {
+      errorMessage = "No published releases available. Auto-updates will work once the first release is published on GitHub.";
+    } else if (errorMessage.includes("network") || errorMessage.includes("fetch")) {
+      errorMessage = "Unable to connect to update server. Please check your internet connection.";
+    }
+
     return {
       hasUpdate: false,
-      error: error?.message || String(error),
+      error: errorMessage,
     };
   }
 }
@@ -57,17 +67,14 @@ export async function checkAppUpdate(): Promise<UpdateCheckResult> {
  * @param updateObject The update object returned from checkAppUpdate
  * @param onProgress Callback to monitor download progress
  */
-export async function installAndRelaunchUpdate(
-  updateObject: any,
-  onProgress?: (progress: DownloadProgress) => void
-): Promise<void> {
+export async function installAndRelaunchUpdate(updateObject: any, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
   if (!updateObject) {
     throw new Error("No update object provided");
   }
 
   try {
     let downloaded = 0;
-    
+
     // Download and install
     await updateObject.downloadAndInstall((event: any) => {
       if (!onProgress) return;

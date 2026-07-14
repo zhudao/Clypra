@@ -7,6 +7,7 @@ import { useAudioLibraryStore } from "@/features/audio-library/store/audioLibrar
 import { useUIStore } from "@/store/uiStore";
 import type { TabProps } from "./types";
 import type { MediaAsset } from "@/types";
+import { platform } from "@/core/platform";
 
 export const AudioTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
   const [searchQuery, setSearchQuery] = useState("");
@@ -143,8 +144,8 @@ const AudioItem: React.FC<AudioItemProps> = ({ item, onAddToTimeline }) => {
 
       // Convert relative cache path to absolute path for the webview
       // cachedFile.localPath is relative to AppCache (e.g., "audio-library/filename.wav")
-      const appCache = await import("@tauri-apps/api/path").then((m) => m.appCacheDir());
-      const absolutePath = await import("@tauri-apps/api/path").then((m) => m.join(appCache, cachedFile.localPath));
+      const appCache = await platform.appCacheDir();
+      const absolutePath = await platform.joinPaths(appCache, cachedFile.localPath);
 
       // Create MediaAsset from cached file
       const mediaAsset: MediaAsset = {

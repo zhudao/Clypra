@@ -9,6 +9,7 @@ import { useUIStore } from "@/store/uiStore";
 import { createTextClip } from "@/lib/text/textClip";
 import { parseSubtitles, serializeSubtitles, formatSubtitleTime } from "@/features/subtitles/parser";
 import { invoke } from "@tauri-apps/api/core";
+import { platform } from "@/core/platform";
 import type { TabProps } from "./types";
 import type { TextClip } from "@/types";
 
@@ -199,6 +200,11 @@ export const CaptionsTab: React.FC<TabProps> = ({ onAddToTimeline }) => {
     }
 
     console.log(`[CaptionsTab] Found ${mediaClips.length} media clips to process`);
+
+    if (platform.isCapacitor()) {
+      setErrorMsg("Local auto-captions are only supported on Clypra Desktop.");
+      return;
+    }
 
     setErrorMsg(null);
     setIsGenerating(true);

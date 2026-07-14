@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useMemo } from "react";
 import { CloudUpload } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { platform } from "@/core/platform";
 
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -57,9 +56,9 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
 
           // Import new asset
           if (type === "video" || type === "audio") {
-            const metadata: VideoMetadata = await invoke("get_video_metadata", { path: filePath });
-            // Use extract_poster_frame_command which extracts at 10% of duration (avoids black frames at 0s)
-            const posterFrame: string | undefined = type === "video" ? ((await invoke("extract_poster_frame_command", { videoPath: filePath, duration: metadata.duration, dpr: window.devicePixelRatio || 1.0 }).catch(() => undefined)) as string | undefined) : undefined;
+            const metadata = await platform.getMediaMetadata(filePath);
+            // Use extractPosterFrame which is implemented on both platform adapters
+            const posterFrame: string | undefined = type === "video" ? await platform.extractPosterFrame(filePath, metadata.duration, window.devicePixelRatio || 1.0).catch(() => undefined) : undefined;
 
             const asset = {
               id: generateId("asset"),
@@ -70,7 +69,7 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
               width: metadata.width,
               height: metadata.height,
               posterFrame,
-              size: metadata.size,
+              size: metadata.size || 0,
             };
 
             addMediaAsset(asset);
@@ -82,7 +81,7 @@ export const MediaTab: React.FC<MediaTabProps> = ({ onAddToTimeline }) => {
               type: "image" as const,
               duration: 0,
               size: 0,
-              posterFrame: convertFileSrc(filePath),
+              posterFrame: platform.convertFileSrc(filePath),
             };
 
             addMediaAsset(asset);
