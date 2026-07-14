@@ -229,8 +229,8 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
   }
 
   // PERFORMANCE OPTIMIZATION: Batch frame writes to reduce IPC overhead
-  // Batch size of 30-60 frames balances latency with throughput
-  const BATCH_SIZE = 45; // 1.5 seconds at 30fps, 0.75s at 60fps
+  // Batch size of 30 frames reduces memory spikes while keeping IPC overhead negligible
+  const BATCH_SIZE = 30; // 1 second at 30fps
   const frameBuffer: Uint8Array[] = [];
   const frameSize = width * height * 4; // RGBA
 
@@ -238,28 +238,27 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
    * Flush accumulated frames to backend in a single batch.
    * Reduces IPC overhead by 90% compared to per-frame writes.
    */
-  async function flushFrameBatch() {
-    if (frameBuffer.length === 0) return;
+  async function flushFrameBatch(batch: Uint8Array[]) {
+    if (batch.length === 0) return;
 
     // Concatenate all frames into single buffer
-    const batchSize = frameBuffer.length * frameSize;
+    const batchSize = batch.length * frameSize;
     const batchBuffer = new Uint8Array(batchSize);
 
-    for (let i = 0; i < frameBuffer.length; i++) {
-      batchBuffer.set(frameBuffer[i], i * frameSize);
+    for (let i = 0; i < batch.length; i++) {
+      batchBuffer.set(batch[i], i * frameSize);
     }
 
     // Send batch with frame count in header
     await invoke("write_export_frames_batch", batchBuffer, {
       headers: {
         "session-id": sessionId,
-        "frame-count": frameBuffer.length.toString(),
+        "frame-count": batch.length.toString(),
       },
     });
-
-    // Clear buffer for next batch
-    frameBuffer.length = 0;
   }
+
+  let inFlightWritePromise: Promise<void> | null = null;
 
   try {
     // Render and write frames
@@ -281,60 +280,65 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
         // Pre-load and seek all video elements for this frame
         const videoElements = new Map<string, HTMLVideoElement>();
 
-        // Find all video clips active at this time
-        for (const clip of clips) {
+        // Find all active video clips at this time
+        const activeVideoClips = clips.filter((clip) => {
           const asset = assets.find((a) => a.id === clip.mediaId);
-          if (asset?.type !== "video") continue;
+          if (asset?.type !== "video") return false;
 
-          // Check if clip is active at this time
           const clipEnd = clip.startTime + clip.duration;
-          if (time < clip.startTime || time >= clipEnd) continue;
+          return time >= clip.startTime && time < clipEnd;
+        });
 
-          // Replaced inline calculation with resolveClipSourceTime utility to ensure consistency
+        // Seek all active video elements in parallel
+        const acquirePromises = activeVideoClips.map(async (clip) => {
+          const asset = assets.find((a) => a.id === clip.mediaId)!;
           const { sourceTime } = resolveClipSourceTime(clip, time, {
             clampToRange: true,
             frameRate,
           });
 
-          // Resolve path for Tauri webview context
           const resolvedPath = asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path);
-
-          // Acquire video element at exact frame time
           const key = `${clip.id}-${clip.mediaId}`;
-          try {
-            const video = await videoPool.acquire(resolvedPath, sourceTime);
+
+          const video = await videoPool.acquire(resolvedPath, sourceTime);
+          frameVideoElements.push(video); // Ensure it is tracked immediately for cleanup
+          return { key, video };
+        });
+
+        try {
+          const acquired = await Promise.all(acquirePromises);
+          for (const { key, video } of acquired) {
             videoElements.set(key, video);
-            frameVideoElements.push(video);
-          } catch (error) {
-            // CRITICAL FIX: Fail export if video acquisition fails to prevent silent data corruption
-            // Releasing already-acquired elements before throwing
-            for (const vid of frameVideoElements) {
-              videoPool.releaseElement(vid);
-            }
-            throw new Error(`Failed to acquire video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
           }
+        } catch (error) {
+          // Releasing already-acquired elements before throwing
+          for (const vid of frameVideoElements) {
+            videoPool.releaseElement(vid);
+          }
+          throw new Error(`Failed to acquire video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
         }
 
         // Evaluate scene for this frame using the canonical evaluator
         const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
 
         // Render frame through the Pixi WebGL compositor.
-        // All 21 GPU transitions render correctly here (16 of them were broken on
-        // the previous Canvas 2D / FrameScheduler path).
-        const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
-
-        // Add frame to batch buffer.
-        // CRITICAL: Must copy the data — the readback canvas is reused for the next frame
-        // so its ImageData buffer will be overwritten. Without this copy, up to
-        // BATCH_SIZE-1 frames get corrupted per flush cycle.
-        const frameBytes = new Uint8Array(imageData.data);
+        // Direct WebGL readback: true. Returns a Uint8Array with raw pixel bytes directly.
+        const frameBytes = await renderFrameWithPixi(pixiHandle, scene, videoElements, true) as Uint8Array;
         frameBuffer.push(frameBytes);
 
         completedFrames++;
 
-        // Flush batch when full or at end of export
+        // Flush batch when full or at end of export (double-buffering)
         if (frameBuffer.length >= BATCH_SIZE || i === frameTimes.length - 1) {
-          await flushFrameBatch();
+          const batchToFlush = [...frameBuffer];
+          frameBuffer.length = 0;
+
+          // Await previous in-flight write batch to complete before launching the next one
+          if (inFlightWritePromise) {
+            await inFlightWritePromise;
+          }
+
+          inFlightWritePromise = flushFrameBatch(batchToFlush);
         }
       } finally {
         // This prevents resource leaks when export fails mid-frame
@@ -342,6 +346,11 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
           videoPool.releaseElement(video);
         }
       }
+    }
+
+    // Wait for the last in-flight batch write to complete
+    if (inFlightWritePromise) {
+      await inFlightWritePromise;
     }
 
     if (!cancelled) {

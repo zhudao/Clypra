@@ -174,7 +174,7 @@ export async function exportVideoMobile(config: VideoExportConfig): Promise<Vide
         }
 
         const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
-        const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
+        const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements) as ImageData;
 
         const timestampUs = Math.round((i / frameRate) * 1_000_000);
         await encoder.encodeFrame(imageData, timestampUs);

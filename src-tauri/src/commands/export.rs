@@ -224,7 +224,9 @@ pub async fn start_video_export(
     cmd.env("PATH", augmented_path());
     
     // Input 0: raw RGBA frames from stdin
-    cmd.arg("-f")
+    cmd.arg("-thread_queue_size")
+        .arg("8")
+        .arg("-f")
         .arg("rawvideo")
         .arg("-pixel_format")
         .arg("rgba")
@@ -262,6 +264,9 @@ pub async fn start_video_export(
     if !valid_audio_clips.is_empty() {
         let mut filter_complex = String::new();
         
+        // Apply vertical flip to the input video stream (since WebGL readPixels is bottom-left oriented)
+        filter_complex.push_str("[0:v]vflip[v];");
+
         // Generate a silent audio track matching the exact video duration.
         // This serves as a duration anchor. When mixed with duration=longest,
         // it ensures that the mixed audio stream has the exact same duration
@@ -314,8 +319,8 @@ pub async fn start_video_export(
         
         cmd.arg("-filter_complex").arg(filter_complex);
         
-        // Map streams explicitly: input 0 video, mixed audio
-        cmd.arg("-map").arg("0:v");
+        // Map streams explicitly: vflipped video [v], mixed audio [a]
+        cmd.arg("-map").arg("[v]");
         cmd.arg("-map").arg("[a]");
         
         // Configure AAC audio codec with explicit sample rate for consistency
@@ -323,7 +328,8 @@ pub async fn start_video_export(
         cmd.arg("-ar").arg("48000"); // Lock output sample rate
         cmd.arg("-b:a").arg("128k");
     } else {
-        // Map only the video stream from input 0
+        // Map only the video stream from input 0, and apply vflip
+        cmd.arg("-vf").arg("vflip");
         cmd.arg("-map").arg("0:v");
     }
     

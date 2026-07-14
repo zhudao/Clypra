@@ -166,7 +166,8 @@ export async function renderFrameWithPixi(
   handle: PixiExportCompositor,
   scene: EvaluatedScene,
   videoElements: Map<string, HTMLVideoElement>,
-): Promise<ImageData> {
+  directWebGLReadback = false,
+): Promise<ImageData | Uint8Array> {
   const { compositor, canvas, readbackCanvas, readbackCtx, width, height } = handle;
 
   // Resolve native project size. We must scale the layout if exporting at a resolution
@@ -196,6 +197,18 @@ export async function renderFrameWithPixi(
     undefined,  // resourceHandleMap (unused during export)
     new Map(),  // bodyMasks (no body segmentation during export)
   );
+
+  if (directWebGLReadback) {
+    const gl = canvas.getContext("webgl2") || (canvas.getContext("webgl") as any);
+    if (!gl) {
+      throw new Error("[ExportRenderer] Failed to get WebGL context for direct readback");
+    }
+    // Bind default framebuffer (null) to guarantee reading from the screen render target
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const frameBytes = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, frameBytes);
+    return frameBytes;
+  }
 
   // Defensive guard — if canvas dimensions have somehow diverged despite the above,
   // fail loudly and immediately rather than silently cropping the frame.
