@@ -62,6 +62,7 @@ pub fn run() {
             // Native FFmpeg decoder commands (fast path for thumbnails)
             decode_frame,
             decode_frame_gpu,
+            decode_export_frame,
             decode_frames_streaming,
             release_video_decoder,
             prewarm_decoders,

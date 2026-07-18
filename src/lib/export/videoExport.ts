@@ -12,7 +12,10 @@
 import { platform } from "../../core/platform";
 import { evaluateTimelineSceneCached, clearEvaluationCache } from "../../core/evaluation/evaluator";
 import { createPixiExportCompositor, destroyPixiExportCompositor, renderFrameWithPixi } from "./pixiExportRenderer";
-import { VideoElementPool } from "../../core/resources/VideoElementPool";
+import {
+  fitNativeFrameDimensions,
+  NativeExportFramePool,
+} from "./nativeExportFramePool";
 import { getResourceCache } from "../../core/resources/ResourceCache";
 import { resolveClipSourceTime } from "../../core/timeline/sourceTime";
 import { getActiveAudioClips } from "../../core/timeline/audioClips";
@@ -148,11 +151,10 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
     throw new Error("No frames to export");
   }
 
-  // Create headless video element pool for export
-  const videoPool = new VideoElementPool({
-    maxConcurrent: 10,
-    debug: false,
-  });
+  // Decode export frames through the native sequential FFmpeg decoder. The
+  // previous HTMLVideoElement path performed a paused WebKit seek for every
+  // frame and collapsed to roughly 1 fps on macOS.
+  const nativeFramePool = new NativeExportFramePool();
 
   // Create headless Pixi compositor for this export session.
   // All 21 GPU transitions render correctly on this path.
@@ -274,73 +276,71 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
 
       const time = frameTimes[i];
 
-      // Track ALL acquired video elements for this frame (released in finally)
-      const frameVideoElements: HTMLVideoElement[] = [];
+      // Decode active video layers into stable canvas-backed Pixi sources.
+      const videoElements = new Map<string, HTMLCanvasElement>();
 
-      try {
-        // Pre-load and seek all video elements for this frame
-        const videoElements = new Map<string, HTMLVideoElement>();
+      // Find all video clips active at this time
+      for (const clip of clips) {
+        const asset = assets.find((a) => a.id === clip.mediaId);
+        if (asset?.type !== "video") continue;
 
-        // Find all video clips active at this time
-        for (const clip of clips) {
-          const asset = assets.find((a) => a.id === clip.mediaId);
-          if (asset?.type !== "video") continue;
+        // Check if clip is active at this time
+        const clipEnd = clip.startTime + clip.duration;
+        if (time < clip.startTime || time >= clipEnd) continue;
 
-          // Check if clip is active at this time
-          const clipEnd = clip.startTime + clip.duration;
-          if (time < clip.startTime || time >= clipEnd) continue;
+        // Replaced inline calculation with resolveClipSourceTime utility to ensure consistency
+        const { sourceTime } = resolveClipSourceTime(clip, time, {
+          clampToRange: true,
+          frameRate,
+        });
 
-          // Replaced inline calculation with resolveClipSourceTime utility to ensure consistency
-          const { sourceTime } = resolveClipSourceTime(clip, time, {
-            clampToRange: true,
-            frameRate,
+        const key = `${clip.id}-${clip.mediaId}`;
+        try {
+          const projectWidth = project?.canvasWidth || width;
+          const projectHeight = project?.canvasHeight || height;
+          const decodeBoundsWidth =
+            (clip.width || asset.width || projectWidth) * (width / projectWidth);
+          const decodeBoundsHeight =
+            (clip.height || asset.height || projectHeight) * (height / projectHeight);
+          const decodeSize = fitNativeFrameDimensions(
+            decodeBoundsWidth,
+            decodeBoundsHeight,
+            asset.width,
+            asset.height,
+          );
+          const canvas = await nativeFramePool.acquire({
+            key,
+            videoPath: asset.path,
+            timeSecs: sourceTime,
+            width: decodeSize.width,
+            height: decodeSize.height,
           });
-
-          // Resolve path for Tauri webview context
-          const resolvedPath = asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path);
-
-          // Acquire video element at exact frame time
-          const key = `${clip.id}-${clip.mediaId}`;
-          try {
-            const video = await videoPool.acquire(resolvedPath, sourceTime);
-            videoElements.set(key, video);
-            frameVideoElements.push(video);
-          } catch (error) {
-            // CRITICAL FIX: Fail export if video acquisition fails to prevent silent data corruption
-            // Releasing already-acquired elements before throwing
-            for (const vid of frameVideoElements) {
-              videoPool.releaseElement(vid);
-            }
-            throw new Error(`Failed to acquire video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
-          }
+          videoElements.set(key, canvas);
+        } catch (error) {
+          throw new Error(`Failed to decode video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
         }
+      }
 
-        // Evaluate scene for this frame using the canonical evaluator
-        const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
+      // Evaluate scene for this frame using the canonical evaluator
+      const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
 
-        // Render frame through the Pixi WebGL compositor.
-        // All 21 GPU transitions render correctly here (16 of them were broken on
-        // the previous Canvas 2D / FrameScheduler path).
-        const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
+      // Render frame through the Pixi WebGL compositor.
+      // All 21 GPU transitions render correctly here (16 of them were broken on
+      // the previous Canvas 2D / FrameScheduler path).
+      const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
 
-        // Add frame to batch buffer.
-        // CRITICAL: Must copy the data — the readback canvas is reused for the next frame
-        // so its ImageData buffer will be overwritten. Without this copy, up to
-        // BATCH_SIZE-1 frames get corrupted per flush cycle.
-        const frameBytes = new Uint8Array(imageData.data);
-        frameBuffer.push(frameBytes);
+      // Add frame to batch buffer.
+      // CRITICAL: Must copy the data — the readback canvas is reused for the next frame
+      // so its ImageData buffer will be overwritten. Without this copy, up to
+      // BATCH_SIZE-1 frames get corrupted per flush cycle.
+      const frameBytes = new Uint8Array(imageData.data);
+      frameBuffer.push(frameBytes);
 
-        completedFrames++;
+      completedFrames++;
 
-        // Flush batch when full or at end of export
-        if (frameBuffer.length >= BATCH_SIZE || i === frameTimes.length - 1) {
-          await flushFrameBatch();
-        }
-      } finally {
-        // This prevents resource leaks when export fails mid-frame
-        for (const video of frameVideoElements) {
-          videoPool.releaseElement(video);
-        }
+      // Flush batch when full or at end of export
+      if (frameBuffer.length >= BATCH_SIZE || i === frameTimes.length - 1) {
+        await flushFrameBatch();
       }
     }
 
@@ -363,8 +363,8 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
       throw error;
     }
   } finally {
-    // Always clean up video pool and Pixi compositor
-    videoPool.clear();
+    // Always clean up native frame sources and Pixi compositor
+    nativeFramePool.clear();
     destroyPixiExportCompositor(pixiHandle);
 
     // Release global image bitmaps and evaluated frames to free up memory
