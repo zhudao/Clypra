@@ -74,6 +74,9 @@ pub fn run() {
             write_export_frames_batch,
             finalize_video_export,
             cancel_video_export,
+            start_native_timeline_export,
+            finalize_native_timeline_export,
+            cancel_native_timeline_export,
             check_ffmpeg_available,
             get_ffmpeg_version,
             // Whisper model management commands

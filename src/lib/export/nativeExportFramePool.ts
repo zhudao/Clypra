@@ -2,6 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type ExportVideoSource = HTMLVideoElement | HTMLCanvasElement;
 
+interface NativeFrameSurface {
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+  imageData: ImageData;
+}
+
 interface NativeFrameRequest {
   key: string;
   videoPath: string;
@@ -46,23 +52,40 @@ function toUint8Array(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {
  * the Pixi texture stable while avoiding WebKit's slow paused-video seek path.
  */
 export class NativeExportFramePool {
-  private readonly canvases = new Map<string, HTMLCanvasElement>();
+  private readonly surfaces = new Map<string, NativeFrameSurface>();
+  private readonly videoPaths = new Set<string>();
 
   async acquire(request: NativeFrameRequest): Promise<HTMLCanvasElement> {
     const width = Math.max(1, Math.round(request.width));
     const height = Math.max(1, Math.round(request.height));
-    let canvas = this.canvases.get(request.key);
+    let surface = this.surfaces.get(request.key);
 
-    if (!canvas) {
-      canvas = document.createElement("canvas");
-      this.canvases.set(request.key, canvas);
-    }
-
-    if (canvas.width !== width || canvas.height !== height) {
+    if (!surface) {
+      const canvas = document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
+      const context = canvas.getContext("2d");
+
+      if (!context) {
+        throw new Error("Unable to create native export frame canvas");
+      }
+
+      surface = {
+        canvas,
+        context,
+        imageData: context.createImageData(width, height),
+      };
+      this.surfaces.set(request.key, surface);
+    } else if (
+      surface.canvas.width !== width ||
+      surface.canvas.height !== height
+    ) {
+      surface.canvas.width = width;
+      surface.canvas.height = height;
+      surface.imageData = surface.context.createImageData(width, height);
     }
 
+    this.videoPaths.add(request.videoPath);
     const response = await invoke<ArrayBuffer | Uint8Array | number[]>(
       "decode_export_frame",
       {
@@ -81,18 +104,20 @@ export class NativeExportFramePool {
       );
     }
 
-    const context = canvas.getContext("2d");
-    if (!context) {
-      throw new Error("Unable to create native export frame canvas");
-    }
-
-    const imageData = context.createImageData(width, height);
-    imageData.data.set(rgba);
-    context.putImageData(imageData, 0, 0);
-    return canvas;
+    surface.imageData.data.set(rgba);
+    surface.context.putImageData(surface.imageData, 0, 0);
+    return surface.canvas;
   }
 
-  clear(): void {
-    this.canvases.clear();
+  async clear(): Promise<void> {
+    for (const path of this.videoPaths) {
+      await invoke("release_video_decoder", { videoPath: path }).catch(() => {});
+    }
+    for (const surface of this.surfaces.values()) {
+      surface.canvas.width = 0;
+      surface.canvas.height = 0;
+    }
+    this.videoPaths.clear();
+    this.surfaces.clear();
   }
 }

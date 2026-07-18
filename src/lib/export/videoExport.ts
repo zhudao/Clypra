@@ -16,6 +16,11 @@ import {
   fitNativeFrameDimensions,
   NativeExportFramePool,
 } from "./nativeExportFramePool";
+import { calculateExportBatchSize } from "./frameBatching";
+import {
+  analyzeNativeTimelineExport,
+  runNativeTimelineExport,
+} from "./nativeTimelineExport";
 import { getResourceCache } from "../../core/resources/ResourceCache";
 import { resolveClipSourceTime } from "../../core/timeline/sourceTime";
 import { getActiveAudioClips } from "../../core/timeline/audioClips";
@@ -151,6 +156,40 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
     throw new Error("No frames to export");
   }
 
+  const nativeTimeline = analyzeNativeTimelineExport({
+    clips,
+    tracks,
+    transitions,
+    assets,
+    project,
+    startTime,
+    endTime,
+    outputPath,
+    width,
+    height,
+    frameRate,
+    codec,
+    preset,
+    crf,
+    pixelFormat,
+  });
+  if (nativeTimeline.eligible) {
+    const nativeResult = await runNativeTimelineExport(nativeTimeline.plan, {
+      onProgress,
+      onSessionReady,
+    });
+    return {
+      outputPath,
+      totalFrames: nativeResult.completedFrames,
+      totalTimeMs: nativeResult.totalTimeMs,
+      avgTimePerFrameMs:
+        nativeResult.completedFrames > 0
+          ? nativeResult.totalTimeMs / nativeResult.completedFrames
+          : 0,
+      cancelled: nativeResult.cancelled,
+    };
+  }
+
   // Decode export frames through the native sequential FFmpeg decoder. The
   // previous HTMLVideoElement path performed a paused WebKit seek for every
   // frame and collapsed to roughly 1 fps on macOS.
@@ -221,46 +260,42 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
   // starts so the UI can kill FFmpeg when the user presses Cancel. Setting isCancelled
   // causes the frame loop to break cleanly on the next iteration.
   let isCancelled = false;
+  let resolveCleanup: () => void = () => {};
+  const cleanupComplete = new Promise<void>((resolve) => {
+    resolveCleanup = resolve;
+  });
   if (onSessionReady) {
     onSessionReady(async () => {
       isCancelled = true;
       await invoke("cancel_video_export", { sessionId }).catch(() => {
         // Ignore — process may have already exited
       });
+      await cleanupComplete;
     });
   }
 
-  // PERFORMANCE OPTIMIZATION: Batch frame writes to reduce IPC overhead
-  // Batch size of 30-60 frames balances latency with throughput
-  const BATCH_SIZE = 45; // 1.5 seconds at 30fps, 0.75s at 60fps
-  const frameBuffer: Uint8Array[] = [];
   const frameSize = width * height * 4; // RGBA
+  const BATCH_SIZE = calculateExportBatchSize(frameSize);
+  const frameBuffer = new Uint8Array(frameSize * BATCH_SIZE);
+  let bufferedFrames = 0;
 
   /**
    * Flush accumulated frames to backend in a single batch.
    * Reduces IPC overhead by 90% compared to per-frame writes.
    */
   async function flushFrameBatch() {
-    if (frameBuffer.length === 0) return;
-
-    // Concatenate all frames into single buffer
-    const batchSize = frameBuffer.length * frameSize;
-    const batchBuffer = new Uint8Array(batchSize);
-
-    for (let i = 0; i < frameBuffer.length; i++) {
-      batchBuffer.set(frameBuffer[i], i * frameSize);
-    }
+    if (bufferedFrames === 0) return;
+    const payload = frameBuffer.subarray(0, bufferedFrames * frameSize);
 
     // Send batch with frame count in header
-    await invoke("write_export_frames_batch", batchBuffer, {
+    await invoke("write_export_frames_batch", payload, {
       headers: {
         "session-id": sessionId,
-        "frame-count": frameBuffer.length.toString(),
+        "frame-count": bufferedFrames.toString(),
       },
     });
 
-    // Clear buffer for next batch
-    frameBuffer.length = 0;
+    bufferedFrames = 0;
   }
 
   try {
@@ -329,17 +364,13 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
       // the previous Canvas 2D / FrameScheduler path).
       const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
 
-      // Add frame to batch buffer.
-      // CRITICAL: Must copy the data — the readback canvas is reused for the next frame
-      // so its ImageData buffer will be overwritten. Without this copy, up to
-      // BATCH_SIZE-1 frames get corrupted per flush cycle.
-      const frameBytes = new Uint8Array(imageData.data);
-      frameBuffer.push(frameBytes);
+      frameBuffer.set(imageData.data, bufferedFrames * frameSize);
+      bufferedFrames++;
 
       completedFrames++;
 
       // Flush batch when full or at end of export
-      if (frameBuffer.length >= BATCH_SIZE || i === frameTimes.length - 1) {
+      if (bufferedFrames >= BATCH_SIZE || i === frameTimes.length - 1) {
         await flushFrameBatch();
       }
     }
@@ -364,7 +395,7 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
     }
   } finally {
     // Always clean up native frame sources and Pixi compositor
-    nativeFramePool.clear();
+    await nativeFramePool.clear();
     destroyPixiExportCompositor(pixiHandle);
 
     // Release global image bitmaps and evaluated frames to free up memory
@@ -373,6 +404,8 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
       clearEvaluationCache();
     } catch (e) {
       console.warn("[videoExport] Failed to clear post-export caches:", e);
+    } finally {
+      resolveCleanup();
     }
   }
 
