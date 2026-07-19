@@ -16,6 +16,25 @@ mod thumbnail_engine_proptest;
 #[cfg(test)]
 mod decoder_pool_stress_test;
 
+#[tauri::command]
+fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(menu) = app.menu() {
+        let labels = if language == "zh-TW" {
+            ["Clypra", "檔案", "編輯", "顯示方式", "視窗", "輔助說明"]
+        } else {
+            ["Clypra", "File", "Edit", "View", "Window", "Help"]
+        };
+
+        for (item, label) in menu.items().map_err(|error| error.to_string())?.into_iter().zip(labels) {
+            if let tauri::menu::MenuItemKind::Submenu(submenu) = item {
+                submenu.set_text(label).map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -83,6 +102,7 @@ pub fn run() {
             verify_whisper_model_exists,
             // Screen recording commands
             trim_video,
+            set_menu_language,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
