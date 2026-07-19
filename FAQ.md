@@ -34,12 +34,4 @@ Furthermore, because the core editor and packages are under the MIT license, you
 
 Because the entire core editor and studio effects packages are MIT-licensed and hosted publicly, the project cannot be deleted or paywalled retrospectively. If the founding team ever stops developing Clypra, the community can immediately fork the repository and continue its development under the same terms. Your project files, presets, and customized setups will always remain yours.
 
----
 
-### Why do I need to sign a CLA?
-
-A Contributor License Agreement (CLA) is standard for many open-core and open-source projects (like Kubernetes or VS Code). It does **not** transfer copyright ownership to us—you still own the code you write. 
-
-Instead, the CLA grants Clypra the necessary license rights to distribute your contribution under the MIT license and protects the project from patent or copyright litigation. This ensures we can maintain the codebase securely and protect all users and contributors.
-
-Active contributors are rewarded with free access to the Pro AI features tier as a thank you!

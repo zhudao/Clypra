@@ -44,45 +44,9 @@ We actively welcome your pull requests:
 2. **Make your changes** with clear commit messages
 3. **Add tests** if you've added code that should be tested
 4. **Ensure tests pass**: `npm test && cd src-tauri && cargo test`
-5. **Sign the CLA** (see below)
-6. **Submit your pull request**!
+5. **Submit your pull request**!
 
-## Contributor License Agreement (CLA)
-
-To preserve our ability to maintain Clypra long-term, all contributors must sign a Contributor License Agreement. This:
-
-- **Grants us a license** to use your contribution in Clypra (open source and commercial versions)
-- **Doesn't transfer ownership** - you retain copyright to your work
-- **Ensures legal clarity** - we can license Clypra under MIT without legal uncertainty
-- **Protects the project** - we can defend against patent/copyright claims
-
-### How to Sign
-
-When you submit your first pull request, a bot will comment with a link to sign the CLA. It takes 60 seconds:
-
-1. Click the CLA link in the PR comment
-2. Sign in with GitHub
-3. Review and accept the agreement
-4. The bot will update your PR status
-
-### What You're Agreeing To
-
-The CLA grants Clypra maintainers:
-
-- **Copyright license**: Right to use, modify, and distribute your contribution
-- **Patent license**: Right to use any patents you hold that are necessary for your contribution
-- **Attribution**: Your name will be preserved in git history and CONTRIBUTORS.md
-
-The CLA does NOT:
-
-- Transfer ownership of your work to us
-- Prevent you from using your contribution elsewhere
-- Remove your name from git history
-- Change the MIT License on the open source code
-
-This is the same CLA model used by major open source projects like Kubernetes, Apache projects, and .NET Foundation.
-
-### Benefits for Contributors
+## Benefits for Contributors
 
 Active contributors (3+ merged PRs in the last 12 months) receive:
 
@@ -296,7 +260,7 @@ Top contributors may be invited to join the core maintainer team.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License, the same license covering the open source Clypra editor. Your contribution will be subject to the Contributor License Agreement.
+By contributing, you agree that your contributions will be licensed under the MIT License, the same license covering the open source Clypra editor.
 
 ---
 
