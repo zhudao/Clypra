@@ -42,6 +42,9 @@ export interface VideoElementPoolConfig {
 
   /** Enable debug logging */
   debug?: boolean;
+
+  /** Enable fast-path seek resolver for headless export */
+  isExport?: boolean;
 }
 
 interface PooledVideo {
@@ -59,6 +62,7 @@ export class VideoElementPool {
     this.config = {
       maxConcurrent: config.maxConcurrent ?? 10,
       debug: config.debug ?? false,
+      isExport: config.isExport ?? false,
     };
   }
 
@@ -242,6 +246,11 @@ export class VideoElementPool {
           };
 
           const onSeeked = () => {
+            if (this.config.isExport) {
+              settle();
+              return;
+            }
+
             // 'seeked' = seek scheduled, NOT frame in compositor.
             // On M1/VideoToolbox there is a GPU upload step after this.
             // requestVideoFrameCallback() is the only reliable signal that

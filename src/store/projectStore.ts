@@ -397,6 +397,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             transitions: payload?.transitions ?? [],
             gaps: (payload as any)?.gaps ?? [],
             markers: (payload as any)?.markers ?? [],
+            cleanEmptyTracks: true,
           });
           console.log("  ✅ Timeline hydrated");
         } catch (err) {

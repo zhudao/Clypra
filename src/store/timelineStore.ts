@@ -69,7 +69,7 @@ interface TimelineStore {
   /** Increment epoch (for cache invalidation) */
   incrementEpoch: () => void;
   /** Hydrate timeline state from project load (atomic operation) */
-  hydrateFromProject: (payload: { tracks?: any[]; clips?: any[]; transitions?: TransitionTimelineItem[]; gaps?: Gap[]; markers?: TimelineMarker[] }) => void;
+  hydrateFromProject: (payload: { tracks?: any[]; clips?: any[]; transitions?: TransitionTimelineItem[]; gaps?: Gap[]; markers?: TimelineMarker[]; cleanEmptyTracks?: boolean }) => void;
   addTrack: (type: TrackType) => void;
   /** Inserts a track at index (clamped); returns the new track id. */
   insertTrackAt: (type: TrackType, index: number) => string;
@@ -261,11 +261,22 @@ export const useTimelineStore = create<TimelineStore>(
     },
 
     hydrateFromProject: (payload) => {
-      const finalTracks = payload?.tracks ?? [];
+      const finalTracksRaw = payload?.tracks ?? [];
       const finalClipsRaw = payload?.clips ?? [];
       const finalTransitions = payload?.transitions ?? [];
       const finalGaps = (payload as any)?.gaps ?? []; // Load gaps from project
       const finalMarkers: TimelineMarker[] = (payload as any)?.markers ?? [];
+
+      // Clean up empty tracks (tracks with no clips) when cleanEmptyTracks is enabled
+      let finalTracks = finalTracksRaw;
+      if (payload?.cleanEmptyTracks) {
+        const clipTrackIds = new Set(finalClipsRaw.map((c: any) => c.trackId));
+        const hasClips = finalClipsRaw.length > 0;
+        finalTracks = finalTracksRaw.filter((track: any) => {
+          if (!hasClips) return true;
+          return clipTrackIds.has(track.id);
+        });
+      }
 
       // Normalize clip timing with media asset data
       const mediaAssets = useProjectStore.getState().mediaAssets;

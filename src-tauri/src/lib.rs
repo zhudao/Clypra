@@ -16,6 +16,25 @@ mod thumbnail_engine_proptest;
 #[cfg(test)]
 mod decoder_pool_stress_test;
 
+#[tauri::command]
+fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(menu) = app.menu() {
+        let labels = if language == "zh-TW" {
+            ["Clypra", "檔案", "編輯", "顯示方式", "視窗", "輔助說明"]
+        } else {
+            ["Clypra", "File", "Edit", "View", "Window", "Help"]
+        };
+
+        for (item, label) in menu.items().map_err(|error| error.to_string())?.into_iter().zip(labels) {
+            if let tauri::menu::MenuItemKind::Submenu(submenu) = item {
+                submenu.set_text(label).map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -62,6 +81,7 @@ pub fn run() {
             // Native FFmpeg decoder commands (fast path for thumbnails)
             decode_frame,
             decode_frame_gpu,
+            decode_export_frame,
             decode_frames_streaming,
             release_video_decoder,
             prewarm_decoders,
@@ -73,6 +93,9 @@ pub fn run() {
             write_export_frames_batch,
             finalize_video_export,
             cancel_video_export,
+            start_native_timeline_export,
+            finalize_native_timeline_export,
+            cancel_native_timeline_export,
             check_ffmpeg_available,
             get_ffmpeg_version,
             // Whisper model management commands
@@ -83,6 +106,7 @@ pub fn run() {
             verify_whisper_model_exists,
             // Screen recording commands
             trim_video,
+            set_menu_language,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

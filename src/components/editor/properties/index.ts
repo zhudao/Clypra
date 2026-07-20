@@ -9,6 +9,7 @@ export { EmptyPropertiesState } from "./EmptyPropertiesState";
 export { TextStyleSection } from "./TextStyleSection";
 export { TransformSection } from "./TransformSection";
 export { AudioSection } from "./AudioSection";
+export { AdjustmentsSection } from "./AdjustmentsSection";
 export { TextAnimationControls } from "./TextAnimationControls";
 export { EffectsFiltersSection } from "./EffectsFiltersSection";
 export { TextModeSelector } from "./TextModeSelector";

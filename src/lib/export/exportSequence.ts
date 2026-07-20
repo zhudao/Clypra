@@ -180,6 +180,7 @@ export async function exportSequence(options: ExportSequenceOptions): Promise<Ex
   const videoPool = new VideoElementPool({
     maxConcurrent: 10,
     debug: false,
+    isExport: true,
   });
 
   let completedFrames = 0;

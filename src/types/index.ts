@@ -203,6 +203,7 @@ export interface Clip {
   stickerImagePath?: string;
   /** Text template ID for text clips */
   templateId?: string;
+  adjustments?: import("@clypra-studio/engine").ColorAdjustments;
 }
 
 /** Video overlay applied to a clip (actual video file) */

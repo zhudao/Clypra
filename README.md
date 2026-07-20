@@ -8,7 +8,7 @@
 
 A modern video editor built on Tauri v2, React 19, and Rust. Hardware-accelerated processing, cross-platform (desktop + mobile), with optional AI-powered features.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md) [![GitHub issues](https://img.shields.io/github/issues/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/issues) [![GitHub stars](https://img.shields.io/github/stars/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md) [![GitHub issues](https://img.shields.io/github/issues/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/issues) [![GitHub stars](https://img.shields.io/github/stars/AIEraDev/clypra)](https://github.com/AIEraDev/clypra/stargazers) [![GitHub Sponsors](https://img.shields.io/github/sponsors/AIEraDev?label=Sponsors&logo=githubsponsors&color=EA4AAA)](https://github.com/sponsors/AIEraDev)
 
 [Features](#features) • [Architecture](#architecture) • [Installation](#installation) • [Development](#development) • [Contributing](#contributing) • [Open Core](#open-core-model)
 
@@ -438,6 +438,32 @@ Binary releases include FFmpeg under LGPL. If you build with GPL components, ens
 
 ---
 
+## 💖 Sponsors
+
+Clypra is **free and open-source forever**. Sponsorship is what makes that sustainable.
+
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor%20on-GitHub%20Sponsors-EA4AAA?logo=githubsponsors&logoColor=white&style=for-the-badge)](https://github.com/sponsors/AIEraDev)
+[![Patreon](https://img.shields.io/badge/Support%20on-Patreon-FF424D?logo=patreon&logoColor=white&style=for-the-badge)](https://www.patreon.com/AIEraDev)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a-Coffee-FFDD00?logo=buy-me-a-coffee&logoColor=black&style=for-the-badge)](https://buymeacoffee.com/AIEraDev)
+
+### Sponsorship Tiers
+
+| Tier | Price | Perks |
+|---|---|---|
+| ☕ **Supporter** | $5 / mo | Name in contributors list, sponsors Discord channel |
+| 🚀 **Backer** | $20 / mo | Name in README, priority issue responses, beta access, roadmap vote |
+| 🏢 **Bronze Sponsor** | $50 / mo | Logo in README + website, release note mention |
+| 💎 **Silver Sponsor** | $200 / mo | Larger logo placement, monthly mentions, direct feedback channel |
+| 🌟 **Gold / Enterprise** | Custom | Custom placement, dedicated support, invoice billing, co-design sessions |
+
+> See [SPONSORS.md](./SPONSORS.md) for full details and perks.
+
+### 🏅 Current Sponsors
+
+*Be the first! [Sponsor Clypra →](https://github.com/sponsors/AIEraDev)*
+
+---
+
 ## Acknowledgments
 
 - **Tauri**: Cross-platform native application framework
@@ -449,6 +475,9 @@ Binary releases include FFmpeg under LGPL. If you build with GPL components, ens
 
 ## Support
 
+- **GitHub Sponsors**: [github.com/sponsors/AIEraDev](https://github.com/sponsors/AIEraDev) — tiered monthly sponsorship
+- **Patreon**: [patreon.com/AIEraDev](https://www.patreon.com/AIEraDev) — monthly support
+- **Buy Me a Coffee**: [buymeacoffee.com/AIEraDev](https://buymeacoffee.com/AIEraDev) — one-time contribution
 - **Issues**: [GitHub Issues](https://github.com/AIEraDev/clypra/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/AIEraDev/clypra/discussions)
 - **Documentation**: [Project Wiki](https://github.com/AIEraDev/clypra/wiki)

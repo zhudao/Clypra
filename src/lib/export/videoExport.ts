@@ -12,7 +12,15 @@
 import { platform } from "../../core/platform";
 import { evaluateTimelineSceneCached, clearEvaluationCache } from "../../core/evaluation/evaluator";
 import { createPixiExportCompositor, destroyPixiExportCompositor, renderFrameWithPixi } from "./pixiExportRenderer";
-import { VideoElementPool } from "../../core/resources/VideoElementPool";
+import {
+  fitNativeFrameDimensions,
+  NativeExportFramePool,
+} from "./nativeExportFramePool";
+import { calculateExportBatchSize } from "./frameBatching";
+import {
+  analyzeNativeTimelineExport,
+  runNativeTimelineExport,
+} from "./nativeTimelineExport";
 import { getResourceCache } from "../../core/resources/ResourceCache";
 import { resolveClipSourceTime } from "../../core/timeline/sourceTime";
 import { getActiveAudioClips } from "../../core/timeline/audioClips";
@@ -152,7 +160,45 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
   const videoPool = new VideoElementPool({
     maxConcurrent: 10,
     debug: false,
+    isExport: true,
+  const nativeTimeline = analyzeNativeTimelineExport({
+    clips,
+    tracks,
+    transitions,
+    assets,
+    project,
+    startTime,
+    endTime,
+    outputPath,
+    width,
+    height,
+    frameRate,
+    codec,
+    preset,
+    crf,
+    pixelFormat,
   });
+  if (nativeTimeline.eligible) {
+    const nativeResult = await runNativeTimelineExport(nativeTimeline.plan, {
+      onProgress,
+      onSessionReady,
+    });
+    return {
+      outputPath,
+      totalFrames: nativeResult.completedFrames,
+      totalTimeMs: nativeResult.totalTimeMs,
+      avgTimePerFrameMs:
+        nativeResult.completedFrames > 0
+          ? nativeResult.totalTimeMs / nativeResult.completedFrames
+          : 0,
+      cancelled: nativeResult.cancelled,
+    };
+  }
+
+  // Decode export frames through the native sequential FFmpeg decoder. The
+  // previous HTMLVideoElement path performed a paused WebKit seek for every
+  // frame and collapsed to roughly 1 fps on macOS.
+  const nativeFramePool = new NativeExportFramePool();
 
   // Create headless Pixi compositor for this export session.
   // All 21 GPU transitions render correctly on this path.
@@ -219,46 +265,77 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
   // starts so the UI can kill FFmpeg when the user presses Cancel. Setting isCancelled
   // causes the frame loop to break cleanly on the next iteration.
   let isCancelled = false;
+  let resolveCleanup: () => void = () => {};
+  const cleanupComplete = new Promise<void>((resolve) => {
+    resolveCleanup = resolve;
+  });
   if (onSessionReady) {
     onSessionReady(async () => {
       isCancelled = true;
       await invoke("cancel_video_export", { sessionId }).catch(() => {
         // Ignore — process may have already exited
       });
+      await cleanupComplete;
     });
   }
 
   // PERFORMANCE OPTIMIZATION: Batch frame writes to reduce IPC overhead
-  // Batch size of 30-60 frames balances latency with throughput
-  const BATCH_SIZE = 45; // 1.5 seconds at 30fps, 0.75s at 60fps
+  // Batch size of 30 frames reduces memory spikes while keeping IPC overhead negligible
+  const BATCH_SIZE = 30; // 1 second at 30fps
   const frameBuffer: Uint8Array[] = [];
   const frameSize = width * height * 4; // RGBA
+  const BATCH_SIZE = calculateExportBatchSize(frameSize);
+  const frameBuffer = new Uint8Array(frameSize * BATCH_SIZE);
+  let bufferedFrames = 0;
 
   /**
    * Flush accumulated frames to backend in a single batch.
    * Reduces IPC overhead by 90% compared to per-frame writes.
    */
-  async function flushFrameBatch() {
-    if (frameBuffer.length === 0) return;
+  async function flushFrameBatch(batch: Uint8Array[]) {
+    if (batch.length === 0) return;
 
     // Concatenate all frames into single buffer
-    const batchSize = frameBuffer.length * frameSize;
+    const batchSize = batch.length * frameSize;
     const batchBuffer = new Uint8Array(batchSize);
 
-    for (let i = 0; i < frameBuffer.length; i++) {
-      batchBuffer.set(frameBuffer[i], i * frameSize);
+    for (let i = 0; i < batch.length; i++) {
+      batchBuffer.set(batch[i], i * frameSize);
     }
+  async function flushFrameBatch() {
+    if (bufferedFrames === 0) return;
+    const payload = frameBuffer.subarray(0, bufferedFrames * frameSize);
 
     // Send batch with frame count in header
-    await invoke("write_export_frames_batch", batchBuffer, {
+    await invoke("write_export_frames_batch", payload, {
       headers: {
         "session-id": sessionId,
-        "frame-count": frameBuffer.length.toString(),
+        "frame-count": batch.length.toString(),
+        "frame-count": bufferedFrames.toString(),
       },
     });
+  }
 
-    // Clear buffer for next batch
-    frameBuffer.length = 0;
+  let inFlightWritePromise: Promise<void> | null = null;
+
+  // Create an AudioContext and play a silent loop to prevent background throttling
+  let audioCtx: AudioContext | null = null;
+  let oscillator: OscillatorNode | null = null;
+  let gainNode: GainNode | null = null;
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioContextClass) {
+      audioCtx = new AudioContextClass();
+      oscillator = audioCtx.createOscillator();
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = 0.001; // Extremely quiet but active to register as audio activity
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      oscillator.start();
+    }
+  } catch (e) {
+    console.warn("[videoExport] Failed to start silent audio context for background keep-alive:", e);
+    bufferedFrames = 0;
   }
 
   try {
@@ -281,67 +358,130 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
         // Pre-load and seek all video elements for this frame
         const videoElements = new Map<string, HTMLVideoElement>();
 
-        // Find all video clips active at this time
-        for (const clip of clips) {
+        // Find all active video clips at this time
+        const activeVideoClips = clips.filter((clip) => {
           const asset = assets.find((a) => a.id === clip.mediaId);
-          if (asset?.type !== "video") continue;
+          if (asset?.type !== "video") return false;
 
-          // Check if clip is active at this time
           const clipEnd = clip.startTime + clip.duration;
-          if (time < clip.startTime || time >= clipEnd) continue;
+          return time >= clip.startTime && time < clipEnd;
+        });
 
-          // Replaced inline calculation with resolveClipSourceTime utility to ensure consistency
+        // Seek all active video elements in parallel
+        const acquirePromises = activeVideoClips.map(async (clip) => {
+          const asset = assets.find((a) => a.id === clip.mediaId)!;
           const { sourceTime } = resolveClipSourceTime(clip, time, {
             clampToRange: true,
             frameRate,
           });
 
-          // Resolve path for Tauri webview context
           const resolvedPath = asset.path.startsWith("asset://") ? asset.path : platform.convertFileSrc(asset.path);
-
-          // Acquire video element at exact frame time
           const key = `${clip.id}-${clip.mediaId}`;
-          try {
-            const video = await videoPool.acquire(resolvedPath, sourceTime);
-            videoElements.set(key, video);
-            frameVideoElements.push(video);
-          } catch (error) {
-            // CRITICAL FIX: Fail export if video acquisition fails to prevent silent data corruption
-            // Releasing already-acquired elements before throwing
-            for (const vid of frameVideoElements) {
-              videoPool.releaseElement(vid);
-            }
-            throw new Error(`Failed to acquire video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
-          }
-        }
 
-        // Evaluate scene for this frame using the canonical evaluator
-        const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
+          const video = await videoPool.acquire(resolvedPath, sourceTime);
+          frameVideoElements.push(video); // Ensure it is tracked immediately for cleanup
+          return { key, video };
+        });
+
+        try {
+          const acquired = await Promise.all(acquirePromises);
+          for (const { key, video } of acquired) {
+            videoElements.set(key, video);
+          }
+        } catch (error) {
+          // Releasing already-acquired elements before throwing
+          for (const vid of frameVideoElements) {
+            videoPool.releaseElement(vid);
+          }
+          throw new Error(`Failed to acquire video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
+      // Decode active video layers into stable canvas-backed Pixi sources.
+      const videoElements = new Map<string, HTMLCanvasElement>();
+
+      // Find all video clips active at this time
+      for (const clip of clips) {
+        const asset = assets.find((a) => a.id === clip.mediaId);
+        if (asset?.type !== "video") continue;
+
+        // Check if clip is active at this time
+        const clipEnd = clip.startTime + clip.duration;
+        if (time < clip.startTime || time >= clipEnd) continue;
+
+        // Replaced inline calculation with resolveClipSourceTime utility to ensure consistency
+        const { sourceTime } = resolveClipSourceTime(clip, time, {
+          clampToRange: true,
+          frameRate,
+        });
+
+        const key = `${clip.id}-${clip.mediaId}`;
+        try {
+          const projectWidth = project?.canvasWidth || width;
+          const projectHeight = project?.canvasHeight || height;
+          const decodeBoundsWidth =
+            (clip.width || asset.width || projectWidth) * (width / projectWidth);
+          const decodeBoundsHeight =
+            (clip.height || asset.height || projectHeight) * (height / projectHeight);
+          const decodeSize = fitNativeFrameDimensions(
+            decodeBoundsWidth,
+            decodeBoundsHeight,
+            asset.width,
+            asset.height,
+          );
+          const canvas = await nativeFramePool.acquire({
+            key,
+            videoPath: asset.path,
+            timeSecs: sourceTime,
+            width: decodeSize.width,
+            height: decodeSize.height,
+          });
+          videoElements.set(key, canvas);
+        } catch (error) {
+          throw new Error(`Failed to decode video for clip at time ${time}s: ${error}. Export aborted to prevent corrupted output.`);
+        }
+      }
+
+      // Evaluate scene for this frame using the canonical evaluator
+      const scene = evaluateTimelineSceneCached(time, clips, tracks, assets, project, epoch, transitions);
 
         // Render frame through the Pixi WebGL compositor.
-        // All 21 GPU transitions render correctly here (16 of them were broken on
-        // the previous Canvas 2D / FrameScheduler path).
-        const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
-
-        // Add frame to batch buffer.
-        // CRITICAL: Must copy the data — the readback canvas is reused for the next frame
-        // so its ImageData buffer will be overwritten. Without this copy, up to
-        // BATCH_SIZE-1 frames get corrupted per flush cycle.
-        const frameBytes = new Uint8Array(imageData.data);
+        // Direct WebGL readback: true. Returns a Uint8Array with raw pixel bytes directly.
+        const frameBytes = await renderFrameWithPixi(pixiHandle, scene, videoElements, true) as Uint8Array;
         frameBuffer.push(frameBytes);
+      // Render frame through the Pixi WebGL compositor.
+      // All 21 GPU transitions render correctly here (16 of them were broken on
+      // the previous Canvas 2D / FrameScheduler path).
+      const imageData = await renderFrameWithPixi(pixiHandle, scene, videoElements);
 
-        completedFrames++;
+      frameBuffer.set(imageData.data, bufferedFrames * frameSize);
+      bufferedFrames++;
 
-        // Flush batch when full or at end of export
+      completedFrames++;
+
+        // Flush batch when full or at end of export (double-buffering)
         if (frameBuffer.length >= BATCH_SIZE || i === frameTimes.length - 1) {
-          await flushFrameBatch();
+          const batchToFlush = [...frameBuffer];
+          frameBuffer.length = 0;
+
+          // Await previous in-flight write batch to complete before launching the next one
+          if (inFlightWritePromise) {
+            await inFlightWritePromise;
+          }
+
+          inFlightWritePromise = flushFrameBatch(batchToFlush);
         }
       } finally {
         // This prevents resource leaks when export fails mid-frame
         for (const video of frameVideoElements) {
           videoPool.releaseElement(video);
         }
+      // Flush batch when full or at end of export
+      if (bufferedFrames >= BATCH_SIZE || i === frameTimes.length - 1) {
+        await flushFrameBatch();
       }
+    }
+
+    // Wait for the last in-flight batch write to complete
+    if (inFlightWritePromise) {
+      await inFlightWritePromise;
     }
 
     if (!cancelled) {
@@ -363,8 +503,25 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
       throw error;
     }
   } finally {
+    if (oscillator) {
+      try {
+        oscillator.stop();
+      } catch (e) {
+        // ignore
+      }
+    }
+    if (audioCtx) {
+      try {
+        audioCtx.close();
+      } catch (e) {
+        // ignore
+      }
+    }
+
     // Always clean up video pool and Pixi compositor
     videoPool.clear();
+    // Always clean up native frame sources and Pixi compositor
+    await nativeFramePool.clear();
     destroyPixiExportCompositor(pixiHandle);
 
     // Release global image bitmaps and evaluated frames to free up memory
@@ -373,6 +530,8 @@ export async function exportVideo(config: VideoExportConfig): Promise<VideoExpor
       clearEvaluationCache();
     } catch (e) {
       console.warn("[videoExport] Failed to clear post-export caches:", e);
+    } finally {
+      resolveCleanup();
     }
   }
 

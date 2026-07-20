@@ -77,6 +77,7 @@ export async function exportFrame(options: ExportFrameOptions): Promise<Blob> {
   const videoPool = new VideoElementPool({
     maxConcurrent: 10,
     debug: false,
+    isExport: true,
   });
 
   const frameVideoElements: HTMLVideoElement[] = [];

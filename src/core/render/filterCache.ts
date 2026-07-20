@@ -1,7 +1,7 @@
 import { Filter, BlurFilter } from "pixi.js";
 import { AdjustmentFilter } from "pixi-filters";
 import { createGPUPixelateFilter, createGPUScanlinesFilter, createGPURGBSplitFilter, createGPUFilmGrainFilter, createGPUVignetteFilter } from "./gpuFilters.js";
-import { applyBodyEffectMask, createGPUBodyOutlineFilter, createGPUBodyGlowFilter, createGPUBodyParticlesFilter, ColorAdjustmentsEffect } from "@clypra-studio/engine";
+import { applyBodyEffectMask, createGPUBodyOutlineFilter, createGPUBodyGlowFilter, createGPUBodyParticlesFilter, ColorAdjustmentsEffect, mergeGradingParams, GradingParams } from "@clypra-studio/engine";
 import type { EvaluatedMediaLayer } from "../evaluation/types.js";
 import { filterCacheManager } from "../../features/filters/cache/filterCache.js";
 
@@ -36,8 +36,11 @@ function hexToRgbNormalized(hex: string): [number, number, number] {
 
 function buildStructuralKey(mediaLayer: EvaluatedMediaLayer, bodyMasks: Map<string, any>): string {
   const parts: string[] = [];
-  if (mediaLayer.filter && mediaLayer.filter.intensity > 0.001) {
-    parts.push(`filter:${mediaLayer.filter.id}`);
+  const hasPreset = !!mediaLayer.filter && mediaLayer.filter.intensity > 0.001;
+  const hasManualAdjustments = !!mediaLayer.adjustments && Object.keys(mediaLayer.adjustments).length > 0;
+
+  if (hasPreset || hasManualAdjustments) {
+    parts.push(`color_filter:${hasPreset ? mediaLayer.filter!.id : "none"}`);
   }
   for (const effect of mediaLayer.effects || []) {
     if (effect.intensity <= 0.001) continue;
@@ -81,24 +84,13 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
     const filters: Filter[] = [];
     const filterMap = new Map<string, Filter>();
 
-    if (mediaLayer.filter && mediaLayer.filter.intensity > 0.001) {
+    const hasPreset = !!mediaLayer.filter && mediaLayer.filter.intensity > 0.001;
+    const hasManualAdjustments = !!mediaLayer.adjustments && Object.keys(mediaLayer.adjustments).length > 0;
+
+    if (hasPreset || hasManualAdjustments) {
       const filter = ColorAdjustmentsEffect.filterSpec!.create({}) as Filter;
       filters.push(filter);
       filterMap.set("__color_filter", filter);
-
-      // Create blur filter if needed (since Blur is multi-pass in WebGL)
-      const cached = filterCacheManager.getCached(mediaLayer.filter.id);
-      const asset = cached?.filter;
-      let hasBlur = false;
-      if (asset?.gradingParams?.blur && asset.gradingParams.blur > 0.001) {
-        hasBlur = true;
-      }
-
-      if (hasBlur) {
-        const blurFilter = new BlurFilter({ strength: 0 });
-        filters.push(blurFilter);
-        filterMap.set("__color_filter_blur", blurFilter);
-      }
     }
 
     for (const effect of mediaLayer.effects || []) {
@@ -152,109 +144,149 @@ export function getOrUpdateFilters(mediaLayer: EvaluatedMediaLayer, width: numbe
 }
 
 function applyLiveParams(entry: FilterCacheEntry, mediaLayer: EvaluatedMediaLayer, width: number, height: number, bodyMasks: Map<string, any>): void {
-  if (mediaLayer.filter) {
+  const hasPreset = !!mediaLayer.filter && mediaLayer.filter.intensity > 0.001;
+  const hasManualAdjustments = !!mediaLayer.adjustments && Object.keys(mediaLayer.adjustments).length > 0;
+
+  if (hasPreset || hasManualAdjustments) {
     const filter = entry.filterMap.get("__color_filter");
 
     if (filter) {
-      const cached = filterCacheManager.getCached(mediaLayer.filter.id);
-      const asset = cached?.filter;
-      const params: Record<string, number> = {};
+      const intensity = hasPreset ? mediaLayer.filter!.intensity : 1.0;
+      let presetParams: GradingParams | undefined;
 
-      if (asset?.gradingParams) {
-        const gp = asset.gradingParams as any; // Type has all advanced grading params
-        const intensity = mediaLayer.filter.intensity;
-
-        // Standard color adjustments
-        params.exposure = (gp.exposure ?? 0.0) * intensity;
-        params.brightness = (gp.brightness ?? 0.0) * intensity;
-        params.contrast = (gp.contrast ?? 0.0) * intensity;
-        params.saturation = (gp.saturation ?? 0.0) * intensity;
-        params.temperature = (gp.temperature ?? 0.0) * intensity;
-        params.tint = (gp.tint ?? 0.0) * intensity;
-        params.sepia = (gp.sepia ?? 0.0) * intensity;
-        params.grayscale = (gp.grayscale ?? 0.0) * intensity;
-        params.hueRotate = (gp.hueRotate ?? 0.0) * intensity;
-        params.invert = (gp.invert ?? 0.0) * intensity;
-        params.vignette = (gp.vignette ?? 0.0) * intensity;
-        params.lift = (gp.lift ?? 0.0) * intensity;
-
-        // Channel mix (for B&W with custom channel weights)
-        if (gp.channelMix) {
-          params.channelMixR = gp.channelMix.r ?? 0.0;
-          params.channelMixG = gp.channelMix.g ?? 0.0;
-          params.channelMixB = gp.channelMix.b ?? 0.0;
-          params.useChannelMix = 1.0; // Enable channel mix
-        } else {
-          params.useChannelMix = 0.0;
-        }
-
-        // Film grain
-        if (gp.grain) {
-          params.grainIntensity = (gp.grain.intensity ?? 0.0) * intensity;
-          params.grainSize = gp.grain.size ?? 1.0;
-        } else if (gp.grainIntensity !== undefined) {
-          // Fallback for flat grainIntensity/grainSize
-          params.grainIntensity = (gp.grainIntensity ?? 0.0) * intensity;
-          params.grainSize = gp.grainSize ?? 1.0;
-        }
-
-        // Split-toning
-        if (gp.shadowTint) {
-          params.shadowTintR = gp.shadowTint.r ?? 1.0;
-          params.shadowTintG = gp.shadowTint.g ?? 1.0;
-          params.shadowTintB = gp.shadowTint.b ?? 1.0;
-          params.shadowTintStrength = (gp.shadowTintStrength ?? 0.0) * intensity;
-        }
-        if (gp.highlightTint) {
-          params.highlightTintR = gp.highlightTint.r ?? 1.0;
-          params.highlightTintG = gp.highlightTint.g ?? 1.0;
-          params.highlightTintB = gp.highlightTint.b ?? 1.0;
-          params.highlightTintStrength = (gp.highlightTintStrength ?? 0.0) * intensity;
-        }
-        if (gp.splitBalance !== undefined) {
-          params.splitBalance = gp.splitBalance;
-        }
-
-        // Duotone
-        if (gp.duotoneDark) {
-          params.duotoneDarkR = gp.duotoneDark.r ?? 0.0;
-          params.duotoneDarkG = gp.duotoneDark.g ?? 0.0;
-          params.duotoneDarkB = gp.duotoneDark.b ?? 0.0;
-        }
-        if (gp.duotoneLight) {
-          params.duotoneLightR = gp.duotoneLight.r ?? 1.0;
-          params.duotoneLightG = gp.duotoneLight.g ?? 1.0;
-          params.duotoneLightB = gp.duotoneLight.b ?? 1.0;
-        }
-        if (gp.useDuotone !== undefined) {
-          params.useDuotone = gp.useDuotone;
-        }
-
-        // Vibrance
-        if (gp.vibranceAmount !== undefined) {
-          params.vibranceAmount = gp.vibranceAmount * intensity;
-        }
-        if (gp.vibranceProtectedHue) {
-          params.vibranceProtectedHueR = gp.vibranceProtectedHue.r ?? 0.91;
-          params.vibranceProtectedHueG = gp.vibranceProtectedHue.g ?? 0.69;
-          params.vibranceProtectedHueB = gp.vibranceProtectedHue.b ?? 0.55;
-        }
-
-        // Cross-process
-        if (gp.crossProcessAmount !== undefined) {
-          params.crossProcessAmount = gp.crossProcessAmount * intensity;
+      if (hasPreset) {
+        const cached = filterCacheManager.getCached(mediaLayer.filter!.id);
+        const asset = cached?.filter;
+        if (asset?.gradingParams) {
+          presetParams = asset.gradingParams;
         }
       }
 
-      ColorAdjustmentsEffect.filterSpec!.updateUniforms!(filter, params, 0);
-    }
+      const finalParams = mergeGradingParams(presetParams, mediaLayer.adjustments);
+      const params: Record<string, number> = {};
 
-    const blurFilter = entry.filterMap.get("__color_filter_blur") as BlurFilter | undefined;
-    if (blurFilter) {
-      const cached = filterCacheManager.getCached(mediaLayer.filter.id);
-      const asset = cached?.filter;
-      const blurAmount = asset?.gradingParams?.blur ?? 0;
-      blurFilter.strength = blurAmount * mediaLayer.filter.intensity;
+      const scaleIfPreset = (key: keyof GradingParams, manualVal: number | boolean | undefined, presetVal: number | undefined, defaultVal: number): number => {
+        if (manualVal !== undefined) {
+          return typeof manualVal === "boolean" ? (manualVal ? 1.0 : 0.0) : manualVal;
+        }
+        if (presetVal !== undefined) {
+          return presetVal * intensity;
+        }
+        return defaultVal;
+      };
+
+      params.exposure = scaleIfPreset("exposure", mediaLayer.adjustments?.exposure, presetParams?.exposure, 0.0);
+      params.brightness = scaleIfPreset("brightness", mediaLayer.adjustments?.brightness, presetParams?.brightness, 0.0);
+      params.contrast = scaleIfPreset("contrast", mediaLayer.adjustments?.contrast, presetParams?.contrast, 0.0);
+      params.saturation = scaleIfPreset("saturation", mediaLayer.adjustments?.saturation, presetParams?.saturation, 0.0);
+      params.temperature = scaleIfPreset("temperature", mediaLayer.adjustments?.temperature, presetParams?.temperature, 0.0);
+      params.tint = scaleIfPreset("tint", mediaLayer.adjustments?.tint, presetParams?.tint, 0.0);
+      params.sepia = scaleIfPreset("sepia", mediaLayer.adjustments?.sepia, presetParams?.sepia, 0.0);
+      params.grayscale = scaleIfPreset("grayscale", mediaLayer.adjustments?.grayscale, presetParams?.grayscale, 0.0);
+      params.hueRotate = scaleIfPreset("hueRotate", mediaLayer.adjustments?.hue !== undefined ? (mediaLayer.adjustments.hue * Math.PI) / 180 : undefined, presetParams?.hueRotate, 0.0);
+      params.vignette = scaleIfPreset("vignette", mediaLayer.adjustments?.vignette, presetParams?.vignette, 0.0);
+      params.invert = scaleIfPreset("invert", mediaLayer.adjustments?.invert, presetParams?.invert, 0.0);
+      params.lift = scaleIfPreset("lift", mediaLayer.adjustments?.lift, presetParams?.lift, 0.0);
+
+      // Channel mix (for B&W with custom channel weights)
+      if (presetParams?.channelMix) {
+        params.channelMixR = presetParams.channelMix.r ?? 0.0;
+        params.channelMixG = presetParams.channelMix.g ?? 0.0;
+        params.channelMixB = presetParams.channelMix.b ?? 0.0;
+        params.useChannelMix = 1.0; // Enable channel mix
+      } else {
+        params.useChannelMix = 0.0;
+      }
+
+      // Film grain
+      if (mediaLayer.adjustments?.grain) {
+        params.grainIntensity = mediaLayer.adjustments.grain.intensity;
+        params.grainSize = mediaLayer.adjustments.grain.size;
+      } else if (presetParams?.grain) {
+        params.grainIntensity = presetParams.grain.intensity * intensity;
+        params.grainSize = presetParams.grain.size;
+      } else {
+        params.grainIntensity = 0.0;
+        params.grainSize = 1.0;
+      }
+
+      // Split-toning
+      if (presetParams?.splitTone) {
+        const st = presetParams.splitTone;
+        const [sr, sg, sb] = hexToRgbNormalized(st.shadowColor);
+        const [hr, hg, hb] = hexToRgbNormalized(st.highlightColor);
+        params.shadowTintR = sr;
+        params.shadowTintG = sg;
+        params.shadowTintB = sb;
+        params.shadowTintStrength = st.shadowStrength * intensity;
+        params.highlightTintR = hr;
+        params.highlightTintG = hg;
+        params.highlightTintB = hb;
+        params.highlightTintStrength = st.highlightStrength * intensity;
+        params.splitBalance = st.balance;
+      } else {
+        params.shadowTintR = 1.0;
+        params.shadowTintG = 1.0;
+        params.shadowTintB = 1.0;
+        params.shadowTintStrength = 0.0;
+        params.highlightTintR = 1.0;
+        params.highlightTintG = 1.0;
+        params.highlightTintB = 1.0;
+        params.highlightTintStrength = 0.0;
+        params.splitBalance = 0.5;
+      }
+
+      // Duotone
+      if (presetParams?.duotone) {
+        const [dr, dg, db] = hexToRgbNormalized(presetParams.duotone.darkColor);
+        const [lr, lg, lb] = hexToRgbNormalized(presetParams.duotone.lightColor);
+        params.duotoneDarkR = dr;
+        params.duotoneDarkG = dg;
+        params.duotoneDarkB = db;
+        params.duotoneLightR = lr;
+        params.duotoneLightG = lg;
+        params.duotoneLightB = lb;
+        params.useDuotone = 1.0;
+      } else {
+        params.duotoneDarkR = 0.0;
+        params.duotoneDarkG = 0.0;
+        params.duotoneDarkB = 0.0;
+        params.duotoneLightR = 1.0;
+        params.duotoneLightG = 1.0;
+        params.duotoneLightB = 1.0;
+        params.useDuotone = 0.0;
+      }
+
+      // Vibrance
+      if (mediaLayer.adjustments?.vibrance) {
+        params.vibranceAmount = mediaLayer.adjustments.vibrance.amount;
+        const [vr, vg, vb] = hexToRgbNormalized(mediaLayer.adjustments.vibrance.protectedHue || "#E8B08C");
+        params.vibranceProtectedHueR = vr;
+        params.vibranceProtectedHueG = vg;
+        params.vibranceProtectedHueB = vb;
+      } else if (presetParams?.vibrance) {
+        params.vibranceAmount = presetParams.vibrance.amount * intensity;
+        const [vr, vg, vb] = hexToRgbNormalized(presetParams.vibrance.protectedHue || "#E8B08C");
+        params.vibranceProtectedHueR = vr;
+        params.vibranceProtectedHueG = vg;
+        params.vibranceProtectedHueB = vb;
+      } else {
+        params.vibranceAmount = 0.0;
+        params.vibranceProtectedHueR = 0.91;
+        params.vibranceProtectedHueG = 0.69;
+        params.vibranceProtectedHueB = 0.55;
+      }
+
+      // Cross-process
+      if (mediaLayer.adjustments?.crossProcess) {
+        params.crossProcessAmount = mediaLayer.adjustments.crossProcess.amount;
+      } else if (presetParams?.crossProcess) {
+        params.crossProcessAmount = presetParams.crossProcess.amount * intensity;
+      } else {
+        params.crossProcessAmount = 0.0;
+      }
+
+      ColorAdjustmentsEffect.filterSpec!.updateUniforms!(filter, params, 0);
     }
   }
 

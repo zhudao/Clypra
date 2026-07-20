@@ -19,6 +19,7 @@ import { EffectsFiltersSection } from "./properties/EffectsFiltersSection";
 import { TransitionSection } from "./properties/TransitionSection";
 import { StickerSettingsSection } from "./properties/StickerSettingsSection";
 import { TimelineEffectSection } from "./properties/TimelineEffectSection";
+import { AdjustmentsSection } from "./properties/AdjustmentsSection";
 
 export function buildClipPropertyTransform(clip: Clip, updates: Record<string, unknown>, canvasWidth: number, canvasHeight: number): { oldTransform: Record<string, unknown>; newTransform: Record<string, unknown> } {
   let newTransform = { ...updates };
@@ -39,6 +40,11 @@ export function buildClipPropertyTransform(clip: Clip, updates: Record<string, u
   const oldTransform: Record<string, unknown> = {};
   for (const key of Object.keys(newTransform)) {
     oldTransform[key] = (clip as unknown as Record<string, unknown>)[key];
+  }
+
+  if ("adjustments" in newTransform) {
+    oldTransform.adjustments = clip.adjustments ? JSON.parse(JSON.stringify(clip.adjustments)) : undefined;
+    newTransform.adjustments = newTransform.adjustments ? JSON.parse(JSON.stringify(newTransform.adjustments)) : undefined;
   }
 
   return { oldTransform, newTransform };
@@ -267,6 +273,9 @@ export const PropertiesPanel: React.FC = () => {
 
         {/* Transform (visual clips, or text clips on transform tab) */}
         {(isVisualClip || (isTextClip && activePropertyTab === "transform")) && <TransformSection selectedClip={selectedClip} isVisualClip={isVisualClip} handleUpdate={handleUpdate} handleUpdateMultiple={handleUpdateMultiple} handleApplyFit={handleApplyFit} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
+
+        {/* Color Adjustments */}
+        {isVisualClip && <AdjustmentsSection selectedClip={selectedClip} handleUpdate={handleUpdate} />}
 
         {/* Effects and Filters */}
         {isVisualClip && <EffectsFiltersSection selectedClip={selectedClip} handleUpdate={handleUpdate} />}

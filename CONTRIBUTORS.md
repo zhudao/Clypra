@@ -18,4 +18,4 @@ Below is a list of all contributors who have helped build and shape Clypra, Clyp
 
 We welcome contributions of all kinds: bug reports, feature requests, documentation improvements, shaders, effects, and core editor code. 
 
-Please see our [CONTRIBUTING.md](CONTRIBUTING.md) to get started and sign our Contributor License Agreement (CLA).
+Please see our [CONTRIBUTING.md](CONTRIBUTING.md) to get started.

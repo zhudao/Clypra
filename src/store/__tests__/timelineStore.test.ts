@@ -508,4 +508,42 @@ describe("timelineStore clip operations", () => {
       expect(useTimelineStore.getState().epoch).toBe(2);
     });
   });
+
+  describe("hydrateFromProject cleanEmptyTracks", () => {
+    const mockTracks = [
+      { id: "track-video-main", type: "video", name: "Main Video Track", muted: false, locked: false, visible: true, height: 68 },
+      { id: "track-video-empty", type: "video", name: "Empty Video Track", muted: false, locked: false, visible: true, height: 68 },
+      { id: "track-audio-empty", type: "audio", name: "Empty Audio Track", muted: false, locked: false, visible: true, height: 52 },
+    ];
+    const mockClips = [
+      {
+        id: "clip-main",
+        trackId: "track-video-main",
+        mediaId: "media-main",
+        startTime: 0,
+        duration: 5,
+        trimIn: 0,
+        trimOut: 5,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        opacity: 1,
+        rotation: 0,
+      },
+    ];
+
+    it("keeps all tracks when cleanEmptyTracks is false or omitted", () => {
+      const { hydrateFromProject } = useTimelineStore.getState();
+      hydrateFromProject({ tracks: mockTracks, clips: mockClips });
+      expect(useTimelineStore.getState().tracks).toHaveLength(3);
+    });
+
+    it("filters out empty tracks when cleanEmptyTracks is true", () => {
+      const { hydrateFromProject } = useTimelineStore.getState();
+      hydrateFromProject({ tracks: mockTracks, clips: mockClips, cleanEmptyTracks: true });
+      expect(useTimelineStore.getState().tracks).toHaveLength(1);
+      expect(useTimelineStore.getState().tracks[0].id).toBe("track-video-main");
+    });
+  });
 });

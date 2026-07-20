@@ -31,6 +31,7 @@ import { PixiSceneCompositor } from "@/core/render/pixiSceneCompositor";
 import type { EvaluatedScene } from "@/core/evaluation/types";
 import { clearAllTextBridges } from "@/core/render/textBridge";
 import { clearAllStickerBridges } from "@/core/render/stickerBridge";
+import type { VideoFrameSource } from "@/core/render/utils/mediaResolver";
 
 // ── Minimal pool adapter for export ──────────────────────────────────────────
 // The real PreviewMediaPool tracks frame callbacks from requestVideoFrameCallback
@@ -159,13 +160,16 @@ export function destroyPixiExportCompositor(handle: PixiExportCompositor): void 
  *
  * @param handle        - Compositor handle from createPixiExportCompositor
  * @param scene         - Evaluated scene for this frame (from evaluateTimelineSceneCached)
- * @param videoElements - Map of `${clipId}-${mediaId}` → HTMLVideoElement (pre-seeked)
+ * @param videoElements - Map of `${clipId}-${mediaId}` to a decoded video source
  * @returns             - ImageData containing RGBA pixels for this frame
  */
 export async function renderFrameWithPixi(
   handle: PixiExportCompositor,
   scene: EvaluatedScene,
   videoElements: Map<string, HTMLVideoElement>,
+  directWebGLReadback = false,
+): Promise<ImageData | Uint8Array> {
+  videoElements: Map<string, VideoFrameSource>,
 ): Promise<ImageData> {
   const { compositor, canvas, readbackCanvas, readbackCtx, width, height } = handle;
 
@@ -196,6 +200,18 @@ export async function renderFrameWithPixi(
     undefined,  // resourceHandleMap (unused during export)
     new Map(),  // bodyMasks (no body segmentation during export)
   );
+
+  if (directWebGLReadback) {
+    const gl = canvas.getContext("webgl2") || (canvas.getContext("webgl") as any);
+    if (!gl) {
+      throw new Error("[ExportRenderer] Failed to get WebGL context for direct readback");
+    }
+    // Bind default framebuffer (null) to guarantee reading from the screen render target
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const frameBytes = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, frameBytes);
+    return frameBytes;
+  }
 
   // Defensive guard — if canvas dimensions have somehow diverged despite the above,
   // fail loudly and immediately rather than silently cropping the frame.

@@ -149,7 +149,7 @@ static EXPORT_SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, ExportSe
 /// locations. Tauri apps on macOS launch with a stripped environment, so
 /// `ffmpeg` and `ffprobe` (typically in /opt/homebrew/bin or /usr/local/bin)
 /// may not be found with the default PATH.
-fn augmented_path() -> String {
+pub(crate) fn augmented_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
     let extra = "/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin";
     if current.is_empty() {
@@ -224,7 +224,9 @@ pub async fn start_video_export(
     cmd.env("PATH", augmented_path());
     
     // Input 0: raw RGBA frames from stdin
-    cmd.arg("-f")
+    cmd.arg("-thread_queue_size")
+        .arg("8")
+        .arg("-f")
         .arg("rawvideo")
         .arg("-pixel_format")
         .arg("rgba")
@@ -262,6 +264,9 @@ pub async fn start_video_export(
     if !valid_audio_clips.is_empty() {
         let mut filter_complex = String::new();
         
+        // Apply vertical flip to the input video stream (since WebGL readPixels is bottom-left oriented)
+        filter_complex.push_str("[0:v]vflip[v];");
+
         // Generate a silent audio track matching the exact video duration.
         // This serves as a duration anchor. When mixed with duration=longest,
         // it ensures that the mixed audio stream has the exact same duration
@@ -314,8 +319,8 @@ pub async fn start_video_export(
         
         cmd.arg("-filter_complex").arg(filter_complex);
         
-        // Map streams explicitly: input 0 video, mixed audio
-        cmd.arg("-map").arg("0:v");
+        // Map streams explicitly: vflipped video [v], mixed audio [a]
+        cmd.arg("-map").arg("[v]");
         cmd.arg("-map").arg("[a]");
         
         // Configure AAC audio codec with explicit sample rate for consistency
@@ -323,7 +328,8 @@ pub async fn start_video_export(
         cmd.arg("-ar").arg("48000"); // Lock output sample rate
         cmd.arg("-b:a").arg("128k");
     } else {
-        // Map only the video stream from input 0
+        // Map only the video stream from input 0, and apply vflip
+        cmd.arg("-vf").arg("vflip");
         cmd.arg("-map").arg("0:v");
     }
     
@@ -395,14 +401,23 @@ pub async fn start_video_export(
     // Log the full FFmpeg command for debugging
     eprintln!("[start_video_export] FFmpeg command: {:?}", cmd);
     
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn FFmpeg: {}", e))?;
+    super::native_export::acquire_export_slot()?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            super::native_export::release_export_slot();
+            return Err(format!("Failed to spawn FFmpeg: {}", error));
+        }
+    };
     
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to open stdin".to_string())?;
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.kill().await;
+            super::native_export::release_export_slot();
+            return Err("Failed to open stdin".to_string());
+        }
+    };
     
     // Create session
     let session = ExportSession {
@@ -714,14 +729,18 @@ pub async fn finalize_video_export(session_id: String) -> Result<(), String> {
     drop(session.stdin);
     
     // Wait for FFmpeg to finish
-    let output = session
-        .process
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("Failed to wait for FFmpeg: {}", e))?;
+    let output = match session.process.wait_with_output().await {
+        Ok(output) => output,
+        Err(error) => {
+            super::native_export::release_export_slot();
+            return Err(format!("Failed to wait for FFmpeg: {}", error));
+        }
+    };
     
     let elapsed = session.start_time.elapsed();
     
+    super::native_export::release_export_slot();
+
     if output.status.success() {
         eprintln!(
             "[finalize_video_export] Session {} completed successfully in {:.2}s ({} frames)",
@@ -786,6 +805,7 @@ pub async fn cancel_video_export(session_id: String) -> Result<(), String> {
         session_id, session.current_frame
     );
 
+    super::native_export::release_export_slot();
     Ok(())
 }
 
