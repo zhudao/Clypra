@@ -2,12 +2,13 @@ import { getSharedPixiRenderer, getOrCreateMediaSprite, applyMediaTransform, cle
 import { renderTextLayerBridged, beginTextFrame, endTextFrame } from "./textBridge.js";
 import { renderStickerLayerBridged, beginStickerFrame, endStickerFrame } from "./stickerBridge.js";
 import type { EvaluatedScene, EvaluatedMediaLayer, EvaluatedTextLayer, EvaluatedTransition } from "../evaluation/types.js";
-import { Container, RenderTexture } from "pixi.js";
+import { Container, RenderTexture, Sprite, Texture } from "pixi.js";
 import { clearFilterCache } from "./filterCache.js";
+import { drawCanvasBackground } from "./canvasBackground.js";
 
 // Utility imports
 import { extractVisualMediaLayers, calculateMaxTrackIndex, calculateLayerZIndex } from "./utils/zIndexCalculator.js";
-import { resolveMediaSource, type VideoFrameSource } from "./utils/mediaResolver.js";
+import { resolveMediaSource } from "./utils/mediaResolver.js";
 import { resolveTransitionDefinition, mergeTransitionParams } from "./utils/transitionResolver.js";
 import { TransitionShaderCache } from "./TransitionShaderCache.js";
 import { getPlaybackClock } from "../playback/PlaybackClock.js";
@@ -32,6 +33,11 @@ export class PixiSceneCompositor {
   private contextLostHandler: ((event: Event) => void) | null = null;
   private contextRestoredHandler: ((event: Event) => void) | null = null;
   private _isContextLost = false;
+  private backgroundCanvas: HTMLCanvasElement | null = null;
+  private backgroundContext: CanvasRenderingContext2D | null = null;
+  private backgroundTexture: Texture | null = null;
+  private backgroundSprite: Sprite | null = null;
+  private backgroundSignature = "";
 
   // Stub render textures used for off-screen pre-warming (1×1 px).
   // Allocated once and reused for all prewarm calls to avoid GC pressure.
@@ -132,7 +138,6 @@ export class PixiSceneCompositor {
       throw new Error("[PixiSceneCompositor] WebGL context lost during frame composition");
     }
 
-  async composeFrame(scene: EvaluatedScene, viewport: { scale: number; offsetX: number; offsetY: number; pixelRatio: number; projectWidth?: number; projectHeight?: number }, videoElements: Map<string, VideoFrameSource>, resourceHandleMap?: Map<string, any>, bodyMasks: Map<string, any> = new Map()): Promise<void> {
     if (!this.renderer.isReady) {
       return;
     }
@@ -185,10 +190,18 @@ export class PixiSceneCompositor {
     this.currentFrameId++;
     const frameId = this.currentFrameId;
 
-    const baseMediaContainer = this.renderer.getOverlayContainer() || this.renderer.getApp()?.stage;
+    const appStage = this.renderer.getApp()?.stage;
+    const backgroundContainer = this.renderer.getBaseMediaContainer?.() || appStage;
+    const baseMediaContainer = this.renderer.getOverlayContainer() || appStage;
     if (!baseMediaContainer) return;
 
-    // Scale the container to project viewport scale
+    // Scale both the dedicated background layer and the overlay layer to project viewport scale.
+    if (backgroundContainer) {
+      backgroundContainer.scale.set(viewport.scale);
+      backgroundContainer.position.set(0, 0);
+      backgroundContainer.sortableChildren = true;
+      this.renderCanvasBackground(scene, backgroundContainer);
+    }
     baseMediaContainer.scale.set(viewport.scale);
     baseMediaContainer.position.set(0, 0);
     baseMediaContainer.sortableChildren = true;
@@ -268,10 +281,6 @@ export class PixiSceneCompositor {
               }
             }
 
-            if (mediaLayer.mediaType === "video" && sourceElement instanceof HTMLCanvasElement) {
-              record.texture.source.update();
-            }
-
             // Capture video source dimensions using conform capture service
             if (mediaLayer.mediaType === "video" && sourceElement instanceof HTMLVideoElement && mediaLayer.conform) {
               this.conformCapture.captureVideoDimensions(mediaLayer.clipId, sourceElement, mediaLayer.conform);
@@ -322,6 +331,56 @@ export class PixiSceneCompositor {
     this.renderer.render();
   }
 
+  private renderCanvasBackground(scene: EvaluatedScene, container: Container): void {
+    const canvasWidth = scene.metadata.canvasWidth || 1920;
+    const canvasHeight = scene.metadata.canvasHeight || 1080;
+    const background = scene.metadata.canvasBackground;
+    const isTransparent = background?.isTransparent === true;
+
+    if (isTransparent) {
+      if (this.backgroundSprite) {
+        this.backgroundSprite.visible = false;
+      }
+      return;
+    }
+
+    if (!this.backgroundCanvas || !this.backgroundContext || this.backgroundCanvas.width !== canvasWidth || this.backgroundCanvas.height !== canvasHeight) {
+      if (this.backgroundSprite) {
+        this.backgroundSprite.parent?.removeChild(this.backgroundSprite);
+        this.backgroundSprite.destroy();
+        this.backgroundSprite = null;
+      }
+      this.backgroundCanvas = document.createElement("canvas");
+      this.backgroundCanvas.width = canvasWidth;
+      this.backgroundCanvas.height = canvasHeight;
+      this.backgroundContext = this.backgroundCanvas.getContext("2d");
+      this.backgroundTexture?.destroy(true);
+      this.backgroundTexture = Texture.from(this.backgroundCanvas);
+      this.backgroundSprite = new Sprite(this.backgroundTexture);
+      this.backgroundSignature = "";
+    }
+
+    if (!this.backgroundContext || !this.backgroundTexture || !this.backgroundSprite || !this.backgroundCanvas) return;
+
+    const signature = `${canvasWidth}x${canvasHeight}:${JSON.stringify(background ?? null)}:${background?.type === "shader" ? scene.metadata.time.toFixed(3) : "static"}`;
+    if (signature !== this.backgroundSignature) {
+      drawCanvasBackground(this.backgroundContext, background, canvasWidth, canvasHeight, scene.metadata.time);
+      (this.backgroundTexture.source as any)?.update?.();
+      this.backgroundSignature = signature;
+    }
+
+    if (this.backgroundSprite.parent !== container) {
+      this.backgroundSprite.parent?.removeChild(this.backgroundSprite);
+      container.addChild(this.backgroundSprite);
+    }
+
+    this.backgroundSprite.visible = true;
+    this.backgroundSprite.position.set(0, 0);
+    this.backgroundSprite.width = canvasWidth;
+    this.backgroundSprite.height = canvasHeight;
+    this.backgroundSprite.zIndex = -1_000_000;
+  }
+
   /**
    * Pre-warm a transition shader off-screen.
    *
@@ -367,7 +426,6 @@ export class PixiSceneCompositor {
   }
 
   private async composeActiveTransition(transition: EvaluatedTransition, definition: any, scene: EvaluatedScene, baseMediaContainer: Container, renderOrder: number, maxTrackIndex: number, videoElements: Map<string, HTMLVideoElement>, resourceHandleMap?: Map<string, any>): Promise<void> {
-  private async composeActiveTransition(transition: EvaluatedTransition, definition: any, scene: EvaluatedScene, baseMediaContainer: Container, renderOrder: number, videoElements: Map<string, VideoFrameSource>, resourceHandleMap?: Map<string, any>): Promise<void> {
     const outgoingLayer = scene.visualLayers.find((l) => l.layerId === transition.outgoingLayer) as EvaluatedMediaLayer;
     const incomingLayer = scene.visualLayers.find((l) => l.layerId === transition.incomingLayer) as EvaluatedMediaLayer;
     if (!outgoingLayer || !incomingLayer) return;
@@ -418,7 +476,7 @@ export class PixiSceneCompositor {
     }
   }
 
-  private renderToOffscreenTexture(slot: "from" | "to", layer: EvaluatedMediaLayer, scene: EvaluatedScene, videoElements: Map<string, VideoFrameSource>, resourceHandleMap?: Map<string, any>): RenderTexture {
+  private renderToOffscreenTexture(slot: "from" | "to", layer: EvaluatedMediaLayer, scene: EvaluatedScene, videoElements: Map<string, HTMLVideoElement>, resourceHandleMap?: Map<string, any>): RenderTexture {
     const app = this.renderer.getApp()!;
     const canvasWidth = scene.metadata.canvasWidth || 1920;
     const canvasHeight = scene.metadata.canvasHeight || 1080;
@@ -468,10 +526,6 @@ export class PixiSceneCompositor {
           record.texture.source.update();
           this.mediaPool.markTextureClean(layer.clipId);
         }
-      }
-
-      if (layer.mediaType === "video" && sourceElement instanceof HTMLCanvasElement) {
-        record.texture.source.update();
       }
 
       const layersCopy = { ...layer, opacity: 1.0 };
@@ -529,6 +583,19 @@ export class PixiSceneCompositor {
       this.prewarmToTex.destroy(true);
       this.prewarmToTex = null;
     }
+
+    if (this.backgroundSprite) {
+      this.backgroundSprite.parent?.removeChild(this.backgroundSprite);
+      this.backgroundSprite.destroy();
+      this.backgroundSprite = null;
+    }
+    if (this.backgroundTexture) {
+      this.backgroundTexture.destroy(true);
+      this.backgroundTexture = null;
+    }
+    this.backgroundCanvas = null;
+    this.backgroundContext = null;
+    this.backgroundSignature = "";
 
     // Clean up offscreen textures
     for (const texture of this.transitionRenderTextures.values()) {
