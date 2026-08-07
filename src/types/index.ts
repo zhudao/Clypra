@@ -109,6 +109,8 @@ export interface Project {
   canvasBackground?: CanvasBackgroundConfig;
   mediaAssets?: MediaAsset[];
   markers?: TimelineMarker[];
+  /** Optional live preview snapshot / cover image data URL */
+  thumbnail?: string;
   /** Timeline schema version for forward-compatible project migrations. */
   timelineSchemaVersion?: number;
 }
@@ -123,6 +125,8 @@ export interface Track {
   locked: boolean;
   visible: boolean;
   height: number;
+  /** Optional track volume multiplier (0.0 to 2.0, default 1.0) */
+  volume?: number;
 }
 
 /** Waveform bucket containing peak and RMS amplitude data */
@@ -585,3 +589,8 @@ export interface ClipMarker {
   name: string;
   color: string;
 }
+
+export * from "./export";
+export * from "./gap";
+export * from "./serialization";
+

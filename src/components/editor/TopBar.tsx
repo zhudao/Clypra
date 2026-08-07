@@ -24,39 +24,43 @@ export const TopBar: React.FC<TopBarProps> = ({ onRequestClose }) => {
     if (onRequestClose) {
       onRequestClose();
     } else {
-      // Fallback to direct close if no handler provided
       closeProject();
     }
   };
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad|Macintosh/.test(navigator.userAgent);
+  const isTauriDesktop = platform.type === "tauri";
+
 
   return (
     <>
-      {/* Native title bar area - content positioned in the title bar */}
-      <div className="h-[30px] flex items-center justify-between gap-3" data-tauri-drag-region style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
-        {/* Left side - starts after traffic lights */}
-        <div className={`flex items-center gap-2 ${platform.type === "tauri" && isMac && !isFullscreen ? "pl-[70px]" : "pl-2"}`} data-tauri-drag-region>
+      {/* Single integrated header row - content shares the top line */}
+      <div className={`h-[30px] flex items-center justify-between gap-3 px-1 ${isTauriDesktop && !isMac && !isFullscreen ? "pr-[140px]" : ""}`} data-tauri-drag-region style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
+        {/* Left side - starts after macOS traffic lights on Mac, or at edge on Windows */}
+        <div className={`flex items-center gap-2 ${isTauriDesktop && isMac && !isFullscreen ? "pl-[70px]" : "pl-1"}`} data-tauri-drag-region>
           <Button variant="ghost" size="icon-sm" onClick={handleClose} title="Back to Home" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
             <Home className="w-4 h-4" />
           </Button>
         </div>
 
-        <span className="text-xs font-semibold text-text-primary truncate max-w-[80px] sm:max-w-[200px] text-center" title={project?.name}>
+        {/* Project Name (Center) */}
+        <span className="text-xs font-semibold text-text-primary truncate max-w-[120px] sm:max-w-[240px] text-center" title={project?.name}>
           {project?.name}
         </span>
 
-        {/* Right side - actions */}
-        <div className="flex items-center gap-1.5">
+        {/* Right side - Settings & Export */}
+        <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
           <Button variant="ghost" size="icon-sm" onClick={toggleSettingsModal} title="Settings" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
             <Settings className="w-3.5 h-3.5" />
           </Button>
-          <Button variant="default" size="sm" onClick={() => setShowExportDialog(true)} className="text-xs h-6 px-2" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
-            <Upload className="w-3.5 h-3.5" />
+
+          <Button variant="default" size="sm" onClick={() => setShowExportDialog(true)} className="text-xs h-6 px-2.5" style={{ WebkitAppRegion: "no-drag", cursor: "pointer" } as React.CSSProperties}>
+            <Upload className="w-3.5 h-3.5 mr-1" />
             Export
           </Button>
         </div>
       </div>
+
 
       {/* Export Dialog */}
       {showExportDialog && (

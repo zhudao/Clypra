@@ -7,12 +7,11 @@ import { getInsertIndexForNewTrack, useTimelineStore } from "@/store/timelineSto
 import { useProjectStore } from "@/store/projectStore";
 import { createClipFromAsset } from "@/lib/timeline/timelineClip";
 import { getActiveSessionOrNull } from "@/core/runtime/ProjectSession";
-import { autoAdaptSequenceForFirstVisualClip } from "@/lib/sequence/sequenceAutoAspect";
+import { autoAdaptSequenceForFirstVisualClip } from "@/lib/timeline/sequenceAutoAspect";
 import { DEFAULT_PLACEMENT_POLICY, resolveAddToTimelinePlacement, resolveDefaultFitModeForAsset } from "@/lib/timeline/placementPolicy";
 import { getPlaybackClock } from "@/hooks/usePlaybackClock";
 import type { SourcePlaybackContext } from "@/core/playback";
 import type { MediaAsset } from "@/types";
-import { GPUPreview } from "./GPUPreview";
 import { PreviewTransport } from "./PreviewTransport";
 import { createTextClip } from "@/lib/text/textClip";
 import { TextSourcePreview } from "./TextSourcePreview";
@@ -25,10 +24,6 @@ import { StickerSourcePreview, type StickerSourcePreviewHandle } from "./Sticker
 
 const isExternalOrDataUrl = (value: string) => value.startsWith("data:") || value.startsWith("http") || value.startsWith("asset://");
 
-// GPU preview for scrubbing only (precise frame-accurate seeking)
-// Use HTML5 video for playback (hardware decode, buffering, smooth playback)
-const USE_GPU_PREVIEW = false;
-
 export const SourcePreview: React.FC = () => {
   const { sourceAsset, sourceTextPreset, sourceInPoint, sourceOutPoint, markSourceIn, markSourceOut } = useUIStore();
   const { exitSourceMode } = usePreviewMode();
@@ -40,8 +35,6 @@ export const SourcePreview: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [useGPU, setUseGPU] = useState(USE_GPU_PREVIEW && sourceAsset?.type === "video");
-  const [gpuFailed, setGpuFailed] = useState(false);
   const sourceCtxRef = useRef<SourcePlaybackContext | null>(null);
 
   const [lottieData, setLottieData] = useState<object | null>(null);
@@ -60,7 +53,7 @@ export const SourcePreview: React.FC = () => {
     // Bind appropriate media element
     if (sourceAsset?.type === "audio" && audioRef.current) {
       ctx.setMediaElement(audioRef.current);
-    } else if (sourceAsset?.type === "video" && videoRef.current && !useGPU) {
+    } else if (sourceAsset?.type === "video" && videoRef.current) {
       ctx.setMediaElement(videoRef.current);
     } else {
       ctx.setMediaElement(null);
@@ -78,7 +71,7 @@ export const SourcePreview: React.FC = () => {
       ctx.setMediaElement(null);
       sourceCtxRef.current = null;
     };
-  }, [sourceAsset?.id, sourceAsset?.type, useGPU]);
+  }, [sourceAsset?.id, sourceAsset?.type]);
 
   // Virtual clock for text preview
   useEffect(() => {
@@ -157,8 +150,6 @@ export const SourcePreview: React.FC = () => {
 
   // Reset when asset changes
   useEffect(() => {
-    setUseGPU(USE_GPU_PREVIEW && sourceAsset?.type === "video");
-    setGpuFailed(false);
     const isLottie = sourceAsset && sourceAsset.type === "image" && (sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json"));
     if (isLottie) {
       setDuration(lottieDuration);
@@ -269,17 +260,13 @@ export const SourcePreview: React.FC = () => {
     }
     const ctx = sourceCtxRef.current;
     if (!ctx) return;
-    if (useGPU) {
-      setIsPlaying((prev) => !prev);
+    const state = ctx.getState();
+    if (state === "playing") {
+      ctx.pause();
     } else {
-      const state = ctx.getState();
-      if (state === "playing") {
-        ctx.pause();
-      } else {
-        ctx.play();
-      }
+      ctx.play();
     }
-  }, [useGPU, sourceAsset?.type, sourceAsset?.path, sourceAsset?.stickerFormat, currentTime, duration]);
+  }, [sourceAsset?.type, sourceAsset?.path, sourceAsset?.stickerFormat, currentTime, duration]);
 
   const handlePlayMarkedRegion = useCallback(() => {
     sourceCtxRef.current?.playMarkedRegion();
@@ -516,23 +503,7 @@ export const SourcePreview: React.FC = () => {
       <div className="flex-1 flex items-center justify-center overflow-hidden checkerboard relative">
         <div className="w-full h-full flex items-center justify-center relative z-10">
           {sourceAsset.type === "video" ? (
-            <VideoSourcePreview
-              videoRef={videoRef}
-              src={sourcePath}
-              currentTime={currentTime}
-              isPlaying={isPlaying}
-              width={sourceAsset.width || 1920}
-              height={sourceAsset.height || 1080}
-              duration={sourceAsset.duration}
-              useGPU={useGPU}
-              gpuFailed={gpuFailed}
-              onTimeUpdate={(time: number) => {
-                setCurrentTime(time);
-                if (time >= duration && duration > 0) {
-                  setIsPlaying(false);
-                }
-              }}
-            />
+            <VideoSourcePreview videoRef={videoRef} src={sourcePath} />
           ) : sourceAsset.type === "image" ? (
             sourceAsset.stickerFormat === "lottie" || sourceAsset.path?.endsWith(".json") ? (
               lottieError ? (

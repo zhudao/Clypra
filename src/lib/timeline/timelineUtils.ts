@@ -11,7 +11,7 @@ import { AddTrackCommand, AddClipCommand, DeleteClipCommand, InsertEditCommand }
 import { capitalize } from "../utils";
 import { DensityLevel as DensityLevelEnum } from "../../types";
 import { createClipFromAsset } from "./timelineClip";
-import { autoAdaptSequenceForFirstVisualClip } from "../sequence/sequenceAutoAspect";
+import { autoAdaptSequenceForFirstVisualClip } from "./sequenceAutoAspect";
 import { DEFAULT_PLACEMENT_POLICY, resolveClipStartTime } from "./placementPolicy";
 import { generateId } from "@/lib/utils/id";
 import { resolveInsertEdit } from "./insertEdit";
@@ -45,6 +45,8 @@ export function getIntervalForDensity(density: DensityLevel): number {
 // Aligns to a global origin so clips from the same video share cached frames.
 // Uses multiplication (not accumulation) to avoid float drift at Ultra density.
 export function generateTimestampGrid(trimIn: number, trimOut: number, interval: number, videoDuration: number): number[] {
+  if (interval <= 0 || !Number.isFinite(interval) || trimOut < trimIn) return [];
+
   // Align to global grid: floor(trimIn / interval) × interval
   const gridStart = Math.floor(trimIn / interval) * interval;
 

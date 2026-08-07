@@ -11,9 +11,8 @@ import { SettingsModal } from "./components/ui/SettingsModal";
 import { ClosingProjectModal } from "./components/ui/ClosingProjectModal";
 import { CrashRecoveryDialog } from "./components/ui/CrashRecoveryDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary"; // Add root error boundary
-import { initializePerformanceAdapter, shutdownPerformanceAdapter } from "@/lib/platform/performanceAdapter";
 import { hasSnapshot, getSnapshot, clearSnapshot, type RecoverySnapshot } from "@/core/runtime/CrashRecoveryService";
-import { lifecycleMonitor } from "@/lib/monitoring/LifecycleMonitor";
+import { lifecycleMonitor } from "@/core/monitoring/LifecycleMonitor";
 import { useRecordingStore } from "@/store/recordingStore";
 import { FloatingWidget } from "@/components/ui/FloatingWidget";
 import { ScreenRecordingPreviewModal } from "@/components/ui/ScreenRecordingPreviewModal";
@@ -36,9 +35,6 @@ const App = () => {
   useEffect(() => {
     const initializeApp = async () => {
       try {
-        // Initialize performance adapter for mobile optimizations
-        await initializePerformanceAdapter();
-
         const projects = await platform.getRecentProjects();
         setRecentProjects(projects);
 
@@ -66,9 +62,7 @@ const App = () => {
     initializeApp();
 
     // Cleanup on unmount
-    return () => {
-      shutdownPerformanceAdapter();
-    };
+    return () => {};
   }, [setRecentProjects]);
 
   // ─── DEV MODE: Automated Resource Leak Detection ───────────────────────────
@@ -78,7 +72,7 @@ const App = () => {
     // Periodic leak check every 30 seconds in dev mode
     const leakCheckInterval = setInterval(() => {
       // Dynamically import to avoid bundling in production
-      import("@/lib/monitoring/ResourceTracker")
+      import("@/core/monitoring/ResourceTracker")
         .then(({ resourceTracker }) => {
           const report = resourceTracker.findLeaks();
 

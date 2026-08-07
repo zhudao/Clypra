@@ -53,7 +53,8 @@ export interface ExportAudioClipConfig {
  * @returns Array of audio clip configurations ready for FFmpeg
  */
 export function getActiveAudioClips(clips: Clip[], tracks: Track[], assets: MediaAsset[], startTime: number, endTime: number): ExportAudioClipConfig[] {
-  // Build set of active (non-muted) track IDs
+  // Build map of track IDs to track objects (for muted status and track volume)
+  const trackMap = new Map(tracks.map((t) => [t.id, t]));
   const activeTracks = new Set(tracks.filter((t) => !t.muted).map((t) => t.id));
 
   return clips
@@ -77,6 +78,7 @@ export function getActiveAudioClips(clips: Clip[], tracks: Track[], assets: Medi
       const asset = assets.find((a) => a.id === clip.mediaId);
       const directAudioPath = (clip as any).audioPath as string | undefined;
       const rawPath = asset ? asset.path : directAudioPath!;
+      const track = trackMap.get(clip.trackId);
 
       // Calculate overlap with export time range
       const clipStart = clip.startTime;
@@ -91,12 +93,27 @@ export function getActiveAudioClips(clips: Clip[], tracks: Track[], assets: Medi
       // Calculate trim offset accounting for clip overlap
       const relativeTrimIn = (clip.trimIn || 0) + (overlapStart - clipStart);
 
-      // Clamp fade durations to clip duration
-      const fadeIn = Math.max(0, Math.min(relativeDuration, (clip as any).fadeIn ?? 0));
-      const fadeOut = Math.max(0, Math.min(relativeDuration, (clip as any).fadeOut ?? 0));
+      // Calculate effective slice fade-in and fade-out relative to export overlap range
+      const rawFadeIn = Math.max(0, (clip as any).fadeIn ?? 0);
+      const rawFadeOut = Math.max(0, (clip as any).fadeOut ?? 0);
 
-      // Clamp volume to valid range
-      const volume = Math.max(0, Math.min(1, clip.volume ?? 1.0));
+      const originalFadeInEnd = clipStart + rawFadeIn;
+      let fadeIn = Math.max(0, Math.min(relativeDuration, originalFadeInEnd - overlapStart));
+
+      const originalFadeOutStart = clipEnd - rawFadeOut;
+      let fadeOut = Math.max(0, Math.min(relativeDuration, overlapEnd - Math.max(overlapStart, originalFadeOutStart)));
+
+      // Ensure combined fade duration does not exceed slice duration
+      if (fadeIn + fadeOut > relativeDuration && relativeDuration > 0) {
+        const scale = relativeDuration / (fadeIn + fadeOut);
+        fadeIn *= scale;
+        fadeOut *= scale;
+      }
+
+      // Calculate combined effective volume (clip.volume * track.volume), allowing boost up to 300% (3.0)
+      const clipVolume = clip.volume ?? 1.0;
+      const trackVolume = track?.volume ?? 1.0;
+      const volume = Math.max(0, Math.min(3.0, clipVolume * trackVolume));
 
       return {
         // Normalize to native FS path — asset.path or directAudioPath may be an asset:// or file:// URL

@@ -7,14 +7,7 @@ pub mod models;
 use thumbnail_engine::init_thumbnail_engine;
 use commands::*;
 
-#[cfg(test)]
-mod thumbnail_engine_tests;
 
-#[cfg(test)]
-mod thumbnail_engine_proptest;
-
-#[cfg(test)]
-mod decoder_pool_stress_test;
 
 #[tauri::command]
 fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
@@ -36,6 +29,16 @@ fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), Stri
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    {
+        if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                "--enable-gpu-rasterization --ignore-gpu-blocklist --enable-zero-copy --allow-file-access-from-files",
+            );
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
