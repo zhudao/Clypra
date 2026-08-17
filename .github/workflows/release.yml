@@ -3,23 +3,21 @@ name: "Publish Release"
 on:
   push:
     tags:
-      - "v*" # Trigger on version tag push, e.g. v1.2.3
-  workflow_dispatch: # Allow manual workflow dispatch
+      - "v*"
+  workflow_dispatch:
 
 jobs:
   publish-tauri:
-    name: Build & Release (${{ matrix.platform }}${{ matrix.target && format(' - {0}', matrix.target) || '' }})
+    name: Build & Release (${{ matrix.platform }} - ${{ matrix.target }})
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Native arm64 only — cross-compiling x86_64 on Apple Silicon breaks
-          # FFmpeg pkg-config discovery (see v1.2.2 release workflow).
           - platform: "macos-latest"
             target: "aarch64-apple-darwin"
-            args: ""
+            args: "--target aarch64-apple-darwin"
           - platform: "windows-latest"
             target: "x86_64-pc-windows-msvc"
             args: ""
@@ -32,68 +30,70 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------------------
-      # Linux Native System Dependencies (WebKitGTK, VA-API, FFmpeg Dev)
-      # ubuntu-24.04 ships FFmpeg 6.x+ required by ffmpeg-next 8 (22.04 has 4.x)
-      # ------------------------------------------------------------------------
+      # ── Linux ──────────────────────────────────────────────────────────────
       - name: Install System Dependencies (Linux)
         if: matrix.platform == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            xdg-utils \
+            libayatana-appindicator3-dev \
+            librsvg2-dev patchelf xdg-utils \
             libva-dev \
-            libavutil-dev \
-            libavcodec-dev \
-            libavformat-dev \
-            libswscale-dev \
-            libswresample-dev \
-            libavdevice-dev \
-            libavfilter-dev \
-            libpostproc-dev \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libclang-dev \
-            libxdo-dev
+            libavutil-dev libavcodec-dev libavformat-dev \
+            libswscale-dev libswresample-dev \
+            libavdevice-dev libavfilter-dev libpostproc-dev \
+            build-essential pkg-config libssl-dev \
+            libclang-dev libxdo-dev cmake
 
-      # ------------------------------------------------------------------------
-      # macOS: FFmpeg via Homebrew + deployment target for whisper.cpp
-      # whisper.cpp ggml uses std::filesystem which requires macOS 10.15+.
-      # MACOSX_DEPLOYMENT_TARGET must be set before cmake runs so it propagates
-      # into the C++ compiler flags via -mmacosx-version-min.
-      # ------------------------------------------------------------------------
+      # ── macOS ──────────────────────────────────────────────────────────────
+      # whisper-rs-sys builds ggml via cmake. The only reliable way to set
+      # the deployment target for cmake sub-builds inside cargo is via the
+      # SDKROOT + MACOSX_DEPLOYMENT_TARGET env pair AND setting
+      # CMAKE_OSX_DEPLOYMENT_TARGET through CARGO_BUILD_TARGET_DIR cmake
+      # passthrough. We use a .cargo/config.toml [env] block (committed) to
+      # guarantee cmake sees the flag, and also set it here for safety.
       - name: Install FFmpeg (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
-          brew install ffmpeg pkg-config
-          echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
+          brew install ffmpeg cmake pkg-config
+          BREW_PREFIX=$(brew --prefix)
+          FFMPEG_PREFIX=$(brew --prefix ffmpeg)
+          echo "FFMPEG_DIR=$FFMPEG_PREFIX" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$FFMPEG_PREFIX/lib/pkgconfig:$BREW_PREFIX/lib/pkgconfig" >> $GITHUB_ENV
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
-          echo "CXXFLAGS=-mmacosx-version-min=11.0" >> $GITHUB_ENV
-          echo "CFLAGS=-mmacosx-version-min=11.0" >> $GITHUB_ENV
+          echo "CMAKE_OSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
 
-      # ------------------------------------------------------------------------
-      # Windows: FFmpeg via vcpkg with explicit version tag
-      # ffmpeg-next v8 requires FFmpeg 6.x. vcpkg baseline pins to a known-good
-      # commit that ships FFmpeg 7.x (latest stable supported by ffmpeg-sys-next).
-      # ------------------------------------------------------------------------
+      # ── Windows ────────────────────────────────────────────────────────────
+      # LLVM is already available on windows-latest at C:\Program Files\LLVM
+      # (installed by the runner image). Just set LIBCLANG_PATH.
+      - name: Set LIBCLANG_PATH (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: powershell
+        run: |
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) {
+            echo "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV
+            Write-Host "Using runner LLVM at $llvm"
+          } else {
+            choco install llvm -y --no-progress
+            echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          }
+
       - name: Install FFmpeg (Windows)
         if: matrix.platform == 'windows-latest'
+        shell: powershell
         run: |
           cd C:\vcpkg
-          git pull
+          git pull --quiet
           vcpkg install ffmpeg[core,avcodec,avdevice,avfilter,avformat,swresample,swscale]:x64-windows-static-md
+          echo "FFMPEG_DIR=C:/vcpkg/installed/x64-windows-static-md" >> $env:GITHUB_ENV
+          echo "PKG_CONFIG_PATH=C:/vcpkg/installed/x64-windows-static-md/lib/pkgconfig" >> $env:GITHUB_ENV
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
           echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "VCPKGRS_DYNAMIC=0" >> $env:GITHUB_ENV
 
-      # ------------------------------------------------------------------------
-      # Toolchains & Cache Setup
-      # ------------------------------------------------------------------------
+      # ── Toolchain ──────────────────────────────────────────────────────────
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -102,30 +102,26 @@ jobs:
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      # ------------------------------------------------------------------------
-      # Install Dependencies & Run Verification Suites
-      # ------------------------------------------------------------------------
+      # ── Frontend ───────────────────────────────────────────────────────────
       - name: Install Frontend Dependencies
         run: npm ci
 
       - name: Run Vitest Suite
         run: npx vitest run
 
-      # Cargo tests require native FFmpeg + libclang headers; only run on Linux
-      # where the full system dependency set is installed above.
       - name: Run Cargo Test Suite
         if: matrix.platform == 'ubuntu-24.04'
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      # ------------------------------------------------------------------------
-      # Build and Publish Release Artifacts with In-App Updater Signatures
-      # ------------------------------------------------------------------------
+      # ── Release ────────────────────────────────────────────────────────────
       - name: Build & Publish Release
         uses: tauri-apps/tauri-action@v0.5
         env:
@@ -135,7 +131,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Clypra v__VERSION__"
-          releaseBody: "Automated multi-platform release bundle containing installers for macOS, Windows, and Linux."
+          releaseBody: "Automated multi-platform release bundle — macOS (arm64), Windows (x64), Linux (x64)."
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
