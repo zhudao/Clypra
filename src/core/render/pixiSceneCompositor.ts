@@ -1,4 +1,4 @@
-import { getSharedPixiRenderer, getOrCreateMediaSprite, applyMediaTransform, clearAllMediaSprites, ALL_TRANSITIONS } from "@clypra-studio/engine";
+import { getSharedPixiRenderer, getMediaSpriteRecord, getOrCreateMediaSprite, applyMediaTransform, clearAllMediaSprites, ALL_TRANSITIONS } from "@clypra-studio/engine";
 import { renderTextLayerBridged, beginTextFrame, endTextFrame } from "./textBridge.js";
 import { renderStickerLayerBridged, beginStickerFrame, endStickerFrame } from "./stickerBridge.js";
 import type { EvaluatedScene, EvaluatedMediaLayer, EvaluatedTextLayer, EvaluatedTransition } from "../evaluation/types.js";
@@ -17,9 +17,17 @@ import { getPlaybackClock } from "../playback/PlaybackClock.js";
 import { ConformCaptureService } from "./services/ConformCaptureService.js";
 import { FilterManager } from "./managers/FilterManager.js";
 import { SpriteLifecycleManager } from "./managers/SpriteLifecycleManager.js";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { isWebviewOrExternalUrl } from "@/lib/platform/pathConversion";
 
 // Boundary components
 import type { PreviewMediaPool } from "../resources/PreviewMediaPool.js";
+
+export interface NativePreviewFrame {
+  rgba: ArrayBuffer;
+  width: number;
+  height: number;
+}
 
 export class PixiSceneCompositor {
   private renderer: any;
@@ -38,6 +46,12 @@ export class PixiSceneCompositor {
   private backgroundTexture: Texture | null = null;
   private backgroundSprite: Sprite | null = null;
   private backgroundSignature = "";
+  private nativeFrameCanvas: HTMLCanvasElement | null = null;
+  private nativeFrameContext: CanvasRenderingContext2D | null = null;
+  private nativeFrameImageData: ImageData | null = null;
+  private nativeFrameTexture: Texture | null = null;
+  private nativeFrameSprite: Sprite | null = null;
+  private posterImages = new Map<string, { src: string; image: HTMLImageElement; ready: boolean }>();
 
   // Stub render textures used for off-screen pre-warming (1×1 px).
   // Allocated once and reused for all prewarm calls to avoid GC pressure.
@@ -72,8 +86,15 @@ export class PixiSceneCompositor {
     return this._isContextLost;
   }
 
-  async waitForReady(): Promise<void> {
+  async waitForReady(timeoutMs = 10000): Promise<void> {
+    const startedAt = performance.now();
     while (!this.renderer?.isReady) {
+      if (this.isDestroying) {
+        throw new Error("[PixiSceneCompositor] Renderer destroyed before initialization completed");
+      }
+      if (performance.now() - startedAt >= timeoutMs) {
+        throw new Error(`[PixiSceneCompositor] Renderer initialization timed out after ${timeoutMs}ms`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
@@ -110,6 +131,38 @@ export class PixiSceneCompositor {
   }
 
   /**
+   * Return a decoded poster while the corresponding video element is still
+   * waiting for metadata/current frame data. This keeps the paused program
+   * monitor useful during decoder startup without changing the playback path.
+   */
+  private getPosterImage(layer: EvaluatedMediaLayer): HTMLImageElement | null {
+    if (!layer.posterFrame || typeof Image === "undefined") return null;
+
+    const src = isWebviewOrExternalUrl(layer.posterFrame) ? layer.posterFrame : convertFileSrc(layer.posterFrame);
+    const cached = this.posterImages.get(layer.clipId);
+    if (cached && cached.src === src) {
+      return cached.ready ? cached.image : null;
+    }
+
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    const entry = { src, image, ready: false };
+    this.posterImages.set(layer.clipId, entry);
+    image.onload = () => {
+      if (this.posterImages.get(layer.clipId) !== entry) return;
+      entry.ready = true;
+      import("../../store/timelineStore")
+        .then(({ useTimelineStore }) => useTimelineStore.getState().incrementEpoch())
+        .catch(() => undefined);
+    };
+    image.onerror = () => {
+      if (this.posterImages.get(layer.clipId) === entry) this.posterImages.delete(layer.clipId);
+    };
+    image.src = src;
+    return null;
+  }
+
+  /**
    * Resize the compositor without destroying GPU resources.
    * Called when displayWidth/displayHeight changes.
    */
@@ -133,7 +186,14 @@ export class PixiSceneCompositor {
     }
   }
 
-  async composeFrame(scene: EvaluatedScene, viewport: { scale: number; offsetX: number; offsetY: number; pixelRatio: number; projectWidth?: number; projectHeight?: number }, videoElements: Map<string, HTMLVideoElement>, resourceHandleMap?: Map<string, any>, bodyMasks: Map<string, any> = new Map()): Promise<void> {
+  async composeFrame(
+    scene: EvaluatedScene,
+    viewport: { scale: number; offsetX: number; offsetY: number; pixelRatio: number; projectWidth?: number; projectHeight?: number },
+    videoElements: Map<string, HTMLVideoElement>,
+    resourceHandleMap?: Map<string, any>,
+    bodyMasks: Map<string, any> = new Map(),
+    nativeFrame?: NativePreviewFrame | null,
+  ): Promise<void> {
     if (this._isContextLost) {
       throw new Error("[PixiSceneCompositor] WebGL context lost during frame composition");
     }
@@ -195,6 +255,9 @@ export class PixiSceneCompositor {
     const baseMediaContainer = this.renderer.getOverlayContainer() || appStage;
     if (!baseMediaContainer) return;
 
+    const nativeFrameActive = nativeFrame ? this.updateNativeFrame(nativeFrame) : false;
+    this.updateNativeFrameSprite(baseMediaContainer, projectW, projectH, nativeFrameActive);
+
     // Scale both the dedicated background layer and the overlay layer to project viewport scale.
     if (backgroundContainer) {
       backgroundContainer.scale.set(viewport.scale);
@@ -247,6 +310,10 @@ export class PixiSceneCompositor {
       if (layer.layerType === "media") {
         const mediaLayer = layer as EvaluatedMediaLayer;
 
+        if (nativeFrameActive && mediaLayer.mediaType === "video") {
+          continue;
+        }
+
         if (isTransitionActive && transitionLayerIds.has(mediaLayer.layerId)) {
           continue;
         }
@@ -254,8 +321,23 @@ export class PixiSceneCompositor {
         if (mediaLayer.clipKind === "sticker") {
           await renderStickerLayerBridged(mediaLayer, frameId, baseMediaContainer, viewport, renderOrder);
         } else {
-          // Use media resolver to get video element or image resource
-          const sourceElement = resolveMediaSource(mediaLayer, videoElements, resourceHandleMap);
+          // Use decoded video when available. During decoder startup, prefer
+          // the existing sprite so a paused seek never flashes to black. Only
+          // fall back to the asset poster when there is no stable frame yet.
+          let sourceElement: HTMLVideoElement | HTMLCanvasElement | ImageBitmap | HTMLImageElement | null = resolveMediaSource(mediaLayer, videoElements, resourceHandleMap);
+          if (
+            mediaLayer.mediaType === "video" &&
+            (!(sourceElement instanceof HTMLVideoElement) ||
+              sourceElement.readyState < 2 ||
+              sourceElement.videoWidth <= 0 ||
+              sourceElement.videoHeight <= 0 ||
+              !this.mediaPool.isVideoFrameReady(mediaLayer.clipId, sourceElement))
+          ) {
+            const existingRecord = getMediaSpriteRecord(mediaLayer.clipId);
+            sourceElement = existingRecord && !existingRecord.destroyed
+              ? existingRecord.sourceIdentity
+              : this.getPosterImage(mediaLayer);
+          }
 
           if (!sourceElement && mediaLayer.mediaType === "video" && import.meta.env.DEV) {
             const key = `${mediaLayer.clipId}-${mediaLayer.mediaId}`;
@@ -263,7 +345,8 @@ export class PixiSceneCompositor {
           }
 
           if (sourceElement) {
-            const kind = sourceElement instanceof HTMLCanvasElement ? "image" : mediaLayer.mediaType;
+            const isImageElement = typeof HTMLImageElement !== "undefined" && sourceElement instanceof HTMLImageElement;
+            const kind = sourceElement instanceof HTMLCanvasElement || isImageElement ? "image" : mediaLayer.mediaType;
             const record = getOrCreateMediaSprite(mediaLayer.clipId, kind, sourceElement as any, baseMediaContainer);
 
             // Skip this layer if sprite creation was deferred (video metadata not ready yet)
@@ -349,6 +432,54 @@ export class PixiSceneCompositor {
 
     // 3. Render stage
     this.renderer.render();
+  }
+
+  private updateNativeFrame(frame: NativePreviewFrame): boolean {
+    if (frame.width <= 0 || frame.height <= 0 || frame.rgba.byteLength !== frame.width * frame.height * 4) {
+      return false;
+    }
+
+    if (
+      !this.nativeFrameCanvas ||
+      this.nativeFrameCanvas.width !== frame.width ||
+      this.nativeFrameCanvas.height !== frame.height
+    ) {
+      this.nativeFrameCanvas = document.createElement("canvas");
+      this.nativeFrameCanvas.width = frame.width;
+      this.nativeFrameCanvas.height = frame.height;
+      this.nativeFrameContext = this.nativeFrameCanvas.getContext("2d", { willReadFrequently: false });
+      this.nativeFrameImageData = this.nativeFrameContext?.createImageData(frame.width, frame.height) ?? null;
+      this.nativeFrameTexture?.destroy(true);
+      this.nativeFrameTexture = Texture.from(this.nativeFrameCanvas);
+      this.nativeFrameSprite = new Sprite(this.nativeFrameTexture);
+    }
+
+    if (!this.nativeFrameContext || !this.nativeFrameTexture || !this.nativeFrameImageData) return false;
+
+    this.nativeFrameImageData.data.set(new Uint8ClampedArray(frame.rgba));
+    this.nativeFrameContext.putImageData(this.nativeFrameImageData, 0, 0);
+    (this.nativeFrameTexture.source as any)?.update?.();
+    return true;
+  }
+
+  private updateNativeFrameSprite(
+    container: Container,
+    projectWidth: number,
+    projectHeight: number,
+    visible: boolean,
+  ): void {
+    const sprite = this.nativeFrameSprite;
+    if (!sprite) return;
+
+    if (sprite.parent !== container) {
+      sprite.parent?.removeChild(sprite);
+      container.addChild(sprite);
+    }
+    sprite.visible = visible;
+    sprite.position.set(0, 0);
+    sprite.width = projectWidth;
+    sprite.height = projectHeight;
+    sprite.zIndex = -900_000;
   }
 
   private renderCanvasBackground(scene: EvaluatedScene, container: Container): void {
@@ -531,11 +662,23 @@ export class PixiSceneCompositor {
     // Clear the container to prevent sprite accumulation
     container.removeChildren();
 
-    // Use media resolver to get source element
-    const sourceElement = resolveMediaSource(layer, videoElements, resourceHandleMap);
+    // Use decoded video when available. During decoder startup, use the asset
+    // poster so transition textures also have a visible first frame.
+    let sourceElement: HTMLVideoElement | HTMLCanvasElement | ImageBitmap | HTMLImageElement | null = resolveMediaSource(layer, videoElements, resourceHandleMap);
+    if (
+      layer.mediaType === "video" &&
+      (!(sourceElement instanceof HTMLVideoElement) ||
+        sourceElement.readyState < 2 ||
+        sourceElement.videoWidth <= 0 ||
+        sourceElement.videoHeight <= 0 ||
+        !this.mediaPool.isVideoFrameReady(layer.clipId, sourceElement))
+    ) {
+      sourceElement = this.getPosterImage(layer);
+    }
 
     if (sourceElement) {
-      const kind = sourceElement instanceof HTMLCanvasElement ? "image" : layer.mediaType;
+      const isImageElement = typeof HTMLImageElement !== "undefined" && sourceElement instanceof HTMLImageElement;
+      const kind = sourceElement instanceof HTMLCanvasElement || isImageElement ? "image" : layer.mediaType;
       const record = getOrCreateMediaSprite(layer.clipId, kind, sourceElement as any, container);
       if (!record) return texture;
 
@@ -603,6 +746,16 @@ export class PixiSceneCompositor {
       this.contextRestoredHandler = null;
     }
     this.canvas = null;
+
+    this.nativeFrameSprite?.parent?.removeChild(this.nativeFrameSprite);
+    this.nativeFrameSprite?.destroy();
+    this.nativeFrameTexture?.destroy(true);
+    this.nativeFrameSprite = null;
+    this.nativeFrameTexture = null;
+    this.posterImages.clear();
+    this.nativeFrameCanvas = null;
+    this.nativeFrameContext = null;
+    this.nativeFrameImageData = null;
 
     clearFilterCache();
 
