@@ -7,6 +7,57 @@ import { expect, afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 
+// lottie-web schedules a browser-only readiness timer at module load. The
+// editor's native tests do not exercise its DOM renderer, so keep the test
+// process deterministic and provide the small runtime surface used by the
+// preview bridges.
+vi.mock("lottie-web", () => ({
+  default: {
+    loadAnimation: vi.fn(() => ({
+      destroy: vi.fn(),
+      goToAndStop: vi.fn(),
+      play: vi.fn(),
+      pause: vi.fn(),
+      setSpeed: vi.fn(),
+      frameRate: 30,
+      totalFrames: 1,
+    })),
+  },
+}));
+
+// Mock pixi.js for legacy engine dependencies (Pixi is no longer used in Clypra)
+vi.mock("pixi.js", () => {
+  class MockContainer {
+    addChild = vi.fn();
+    removeChild = vi.fn();
+    destroy = vi.fn();
+    position = { set: vi.fn() };
+    scale = { set: vi.fn() };
+  }
+  class MockGraphics extends MockContainer {
+    clear = vi.fn().mockReturnThis();
+    rect = vi.fn().mockReturnThis();
+    fill = vi.fn().mockReturnThis();
+    stroke = vi.fn().mockReturnThis();
+    drawRect = vi.fn().mockReturnThis();
+    beginFill = vi.fn().mockReturnThis();
+    endFill = vi.fn().mockReturnThis();
+    lineStyle = vi.fn().mockReturnThis();
+  }
+  return {
+    Filter: class {},
+    Container: MockContainer,
+    Graphics: MockGraphics,
+    Sprite: MockContainer,
+    Texture: { from: vi.fn() },
+    Application: class {
+      stage = new MockContainer();
+      renderer = { resize: vi.fn() };
+      destroy = vi.fn();
+    },
+  };
+});
+
 // Extend Vitest's expect with jest-dom matchers
 expect.extend(matchers);
 

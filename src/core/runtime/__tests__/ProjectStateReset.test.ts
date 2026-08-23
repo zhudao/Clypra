@@ -21,7 +21,11 @@ vi.mock("@/store/dragStateStore", () => ({
 const mockUiSetState = vi.fn();
 vi.mock("@/store/uiStore", () => ({
   useUIStore: {
-    getState: () => ({}),
+    getState: () => ({
+      selectedClipIds: [],
+      selectedGapId: null,
+      previewMode: "program",
+    }),
     setState: mockUiSetState,
   },
 }));
@@ -68,6 +72,10 @@ vi.mock("@/core/interactions", () => ({
   }),
   resetViewportController: vi.fn(),
   resetTransformController: vi.fn(),
+}));
+
+vi.mock("@/hooks/useAudioSyncEngine", () => ({
+  stopGlobalAudioEngine: vi.fn(),
 }));
 
 vi.mock("@/core/playback/PlaybackClock", () => ({
@@ -130,6 +138,7 @@ describe("ProjectStateReset", () => {
       expect(result.resetSubsystems).toContain("TemplateStore");
       expect(result.resetSubsystems).toContain("FavoritesStore");
       expect(result.resetSubsystems).toContain("BodyMaskCache");
+      expect(result.resetSubsystems).toContain("GlobalAudioEngine");
 
       expect(mockTemplateReset).toHaveBeenCalled();
       expect(mockFavoritesSetState).toHaveBeenCalledWith({ downloadingIds: [] });

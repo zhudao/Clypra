@@ -44,6 +44,8 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "pixi.js": path.resolve(__dirname, "./src/lib/mocks/pixiMock.ts"),
+      "pixi-filters": path.resolve(__dirname, "./src/lib/mocks/pixiMock.ts"),
       ...workspaceAlias,
     },
   },
@@ -86,6 +88,14 @@ export default defineConfig(async () => ({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
+    // The published Studio engine is otherwise externalized by Vitest. Inline
+    // it so the lottie-web mock in test-setup also covers its animation bridge
+    // and cannot leave a browser-only readiness timer behind after teardown.
+    server: {
+      deps: {
+        inline: ["@clypra-studio/engine"],
+      },
+    },
     // Some stores initialize background timers (e.g. AudioEngine, Zustand
     // subscribers) that outlive the test run. All 1807 tests pass but vitest
     // exits with code 1 due to the unhandled timer. Suppress that exit signal
