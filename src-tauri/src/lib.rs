@@ -1,7 +1,6 @@
 #![allow(
     clippy::too_many_arguments,
     clippy::type_complexity,
-    clippy::chunks_exact_to_as_chunks,
     clippy::new_without_default
 )]
 
@@ -9,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 pub mod ai;
+pub mod audio;
 pub mod commands;
 pub mod models;
 pub mod native_audio;
@@ -241,6 +241,11 @@ pub fn run() {
             prewarm_decoders,
             get_render_artifact,
             get_render_artifacts_batch,
+            check_coarse_baseline_cache,
+            get_disk_cache_stats,
+            clear_disk_cache,
+            set_cache_size_limit,
+            get_cache_size_limit,
             // Video export commands
             start_video_export,
             write_export_frame,

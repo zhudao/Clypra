@@ -1,29 +1,32 @@
+use crate::audio::decoder::decode_audio_clip;
+use crate::audio::mixer::{AudioClipConfig, DecodedAudioClip};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
-const TICKS_PER_SECOND: i64 = 1_000_000;
-const MAX_PCM_BYTES: usize = 256 * 1024 * 1024;
-const MAX_MIXER_PCM_BYTES: usize = 512 * 1024 * 1024;
-const MAX_ACTIVE_CLIPS: usize = 64;
+pub const TICKS_PER_SECOND: i64 = 1_000_000;
+pub const MAX_PCM_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_MIXER_PCM_BYTES: usize = 512 * 1024 * 1024;
+pub const MAX_ACTIVE_CLIPS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeAudioStatus {
     pub available: bool,
     pub running: bool,
+    pub playing: bool,
     pub host: Option<String>,
     pub device_name: Option<String>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub sample_format: Option<String>,
     pub audio_position_ticks: u64,
+    pub callback_count: u64,
+    pub rendered_frames: u64,
+    pub non_silent_frames: u64,
     pub last_error: Option<String>,
     pub speed: f32,
     pub volume: f32,
@@ -69,6 +72,43 @@ impl NativePcmClip {
             gain: self.gain,
             fade_in_ticks: self.fade_in_ticks,
             fade_out_ticks: self.fade_out_ticks,
+        }
+    }
+}
+
+impl From<DecodedAudioClip> for NativePcmClip {
+    fn from(clip: DecodedAudioClip) -> Self {
+        Self {
+            id: clip.config.id,
+            sample_rate: clip.sample_rate,
+            channels: clip.channels,
+            samples: clip.samples,
+            timeline_start_ticks: clip.config.timeline_start_ticks,
+            duration_ticks: clip.config.duration_ticks,
+            gain: clip.config.gain,
+            fade_in_ticks: clip.config.fade_in_ticks,
+            fade_out_ticks: clip.config.fade_out_ticks,
+        }
+    }
+}
+
+impl From<NativePcmClip> for DecodedAudioClip {
+    fn from(clip: NativePcmClip) -> Self {
+        Self {
+            config: AudioClipConfig {
+                id: clip.id,
+                path: String::new(),
+                timeline_start_ticks: clip.timeline_start_ticks,
+                source_start_ticks: 0,
+                duration_ticks: clip.duration_ticks,
+                gain: clip.gain,
+                fade_in_ticks: clip.fade_in_ticks,
+                fade_out_ticks: clip.fade_out_ticks,
+                track_id: None,
+            },
+            sample_rate: clip.sample_rate,
+            channels: clip.channels,
+            samples: clip.samples,
         }
     }
 }
@@ -143,29 +183,28 @@ impl NativeAudioMixer {
         self.clips.iter().map(NativePcmClip::status).collect()
     }
 
-    fn mix_into<T>(
+    pub fn mix_into<T>(
         &self,
         output: &mut [T],
         output_channels: u16,
         output_sample_rate: u32,
         timeline_start_ticks: i64,
         master_gain: f32,
-    ) where
+    ) -> bool
+    where
         T: SizedSample + FromSample<f32>,
     {
         for sample in output.iter_mut() {
             *sample = T::EQUILIBRIUM;
         }
 
-        if self.clips.is_empty() {
-            return;
-        }
-        if output_channels == 0 || output_sample_rate == 0 {
-            return;
+        if self.clips.is_empty() || output_channels == 0 || output_sample_rate == 0 {
+            return false;
         }
 
         let output_channels = usize::from(output_channels);
         let output_sample_rate = i64::from(output_sample_rate);
+        let mut has_audio = false;
 
         for (frame_index, output_frame) in output.chunks_mut(output_channels).enumerate() {
             let frame_ticks =
@@ -178,9 +217,13 @@ impl NativeAudioMixer {
                     .filter_map(|clip| sample_at(clip, timeline_ticks, channel_index))
                     .sum::<f32>()
                     * master_gain;
+                if value.abs() > 0.000001 {
+                    has_audio = true;
+                }
                 *sample = T::from_sample(value.clamp(-1.0, 1.0));
             }
         }
+        has_audio
     }
 }
 
@@ -201,7 +244,8 @@ fn sample_at(clip: &NativePcmClip, timeline_ticks: i64, output_channel: usize) -
         return None;
     }
 
-    let source_position = relative_ticks as f64 * clip_sample_rate as f64 / TICKS_PER_SECOND as f64;
+    let source_position =
+        relative_ticks as f64 * clip_sample_rate as f64 / TICKS_PER_SECOND as f64;
     let source_index = source_position.floor() as usize;
     let source_fraction = (source_position - source_index as f64) as f32;
     let source_frame = source_index.saturating_mul(clip_channels);
@@ -238,6 +282,8 @@ struct NativeAudioClockInner {
     channels: Option<u16>,
     sample_format: Option<String>,
     played_frames: Arc<AtomicU64>,
+    callback_count: Arc<AtomicU64>,
+    non_silent_frames: Arc<AtomicU64>,
     position_ticks: Arc<AtomicI64>,
     playing: Arc<AtomicBool>,
     speed_milli: Arc<AtomicU32>,
@@ -262,6 +308,8 @@ impl NativeAudioClock {
                 channels: None,
                 sample_format: None,
                 played_frames: Arc::new(AtomicU64::new(0)),
+                callback_count: Arc::new(AtomicU64::new(0)),
+                non_silent_frames: Arc::new(AtomicU64::new(0)),
                 position_ticks: Arc::new(AtomicI64::new(0)),
                 playing: Arc::new(AtomicBool::new(false)),
                 speed_milli: Arc::new(AtomicU32::new(1_000)),
@@ -286,6 +334,8 @@ impl NativeAudioClock {
             *last_error = None;
         }
         self.inner.played_frames.store(0, Ordering::Release);
+        self.inner.callback_count.store(0, Ordering::Release);
+        self.inner.non_silent_frames.store(0, Ordering::Release);
         self.inner.position_ticks.store(0, Ordering::Release);
         self.inner.playing.store(false, Ordering::Release);
 
@@ -305,7 +355,10 @@ impl NativeAudioClock {
         let channels = supported.channels();
         let sample_format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
+
         let played_frames = self.inner.played_frames.clone();
+        let callback_count = self.inner.callback_count.clone();
+        let non_silent_frames = self.inner.non_silent_frames.clone();
         let position_ticks = self.inner.position_ticks.clone();
         let playing = self.inner.playing.clone();
         let speed_milli = self.inner.speed_milli.clone();
@@ -321,12 +374,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::F32 => build_audio_stream::<f32>(
@@ -335,12 +390,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::I16 => build_audio_stream::<i16>(
@@ -349,12 +406,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::I24 => build_audio_stream::<cpal::I24>(
@@ -363,6 +422,8 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
                 speed_milli,
@@ -377,12 +438,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::I64 => build_audio_stream::<i64>(
@@ -391,12 +454,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::U8 => build_audio_stream::<u8>(
@@ -405,12 +470,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::U16 => build_audio_stream::<u16>(
@@ -419,12 +486,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::U24 => build_audio_stream::<cpal::U24>(
@@ -433,6 +502,8 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
                 speed_milli,
@@ -447,12 +518,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::U64 => build_audio_stream::<u64>(
@@ -461,12 +534,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             cpal::SampleFormat::F64 => build_audio_stream::<f64>(
@@ -475,12 +550,14 @@ impl NativeAudioClock {
                 channels,
                 sample_rate,
                 played_frames,
+                callback_count,
+                non_silent_frames,
                 position_ticks,
                 playing,
-                    speed_milli,
-                    volume_milli,
-                    muted,
-                    mixer,
+                speed_milli,
+                volume_milli,
+                muted,
+                mixer,
                 last_error,
             ),
             unsupported => {
@@ -501,9 +578,6 @@ impl NativeAudioClock {
         self.inner.channels = Some(channels);
         self.inner.sample_format = Some(format!("{sample_format:?}"));
         self.inner.stream = Some(stream);
-        // Opening the device must not make the timeline audible. Playback is
-        // enabled only by native_play_from_audio after the shared transport
-        // explicitly enters the playing state.
         self.inner.playing.store(false, Ordering::Release);
         Ok(self.status())
     }
@@ -541,7 +615,7 @@ impl NativeAudioClock {
 
     pub fn set_output(&self, volume: f32, muted: bool) {
         let safe_volume = if volume.is_finite() {
-            volume.clamp(0.0, 1.0)
+            volume.clamp(0.0, 2.0)
         } else {
             1.0
         };
@@ -601,12 +675,16 @@ impl NativeAudioClock {
         NativeAudioStatus {
             available: self.inner.sample_rate.is_some(),
             running: self.inner.stream.is_some() && last_error.is_none(),
+            playing: self.inner.playing.load(Ordering::Acquire),
             host: self.inner.host.clone(),
             device_name: self.inner.device_name.clone(),
             sample_rate,
             channels: self.inner.channels,
             sample_format: self.inner.sample_format.clone(),
             audio_position_ticks,
+            callback_count: self.inner.callback_count.load(Ordering::Acquire),
+            rendered_frames: self.inner.played_frames.load(Ordering::Acquire),
+            non_silent_frames: self.inner.non_silent_frames.load(Ordering::Acquire),
             last_error,
             speed: self.inner.speed_milli.load(Ordering::Acquire) as f32 / 1_000.0,
             volume: self.inner.volume_milli.load(Ordering::Acquire) as f32 / 1_000.0,
@@ -615,12 +693,19 @@ impl NativeAudioClock {
     }
 }
 
+/// Real-time safe audio output stream builder.
+///
+/// Invariant: The stream callback performs ZERO heap allocations and acquires no
+/// blocking mutexes. It advances `position_ticks` atomically based on the exact
+/// hardware sample count.
 fn build_audio_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     channels: u16,
     sample_rate: u32,
     played_frames: Arc<AtomicU64>,
+    callback_count: Arc<AtomicU64>,
+    non_silent_frames: Arc<AtomicU64>,
     position_ticks: Arc<AtomicI64>,
     playing: Arc<AtomicBool>,
     speed_milli: Arc<AtomicU32>,
@@ -635,7 +720,9 @@ where
     device.build_output_stream(
         config,
         move |data: &mut [T], _| {
-            if !playing.load(Ordering::Acquire) {
+            callback_count.fetch_add(1, Ordering::Relaxed);
+
+            if !playing.load(Ordering::Acquire) || muted.load(Ordering::Acquire) {
                 for sample in data.iter_mut() {
                     *sample = T::EQUILIBRIUM;
                 }
@@ -643,31 +730,39 @@ where
             }
 
             let start_ticks = position_ticks.load(Ordering::Acquire);
-            if muted.load(Ordering::Acquire) {
-                for sample in data.iter_mut() {
-                    *sample = T::EQUILIBRIUM;
-                }
-            } else if let Ok(mixer) = mixer.try_read() {
-                mixer.mix_into(
+            let master_gain = volume_milli.load(Ordering::Acquire) as f32 / 1_000.0;
+
+            // Non-blocking try_read lock for real-time safety
+            if let Ok(mixer_guard) = mixer.try_read() {
+                if mixer_guard.mix_into(
                     data,
                     channels,
                     sample_rate,
                     start_ticks,
-                    volume_milli.load(Ordering::Acquire) as f32 / 1_000.0,
-                );
+                    master_gain,
+                ) {
+                    non_silent_frames.fetch_add(
+                        (data.len() / usize::from(channels.max(1))) as u64,
+                        Ordering::Relaxed,
+                    );
+                }
             } else {
+                // Lock contention fallback (render silence rather than block the audio thread)
                 for sample in data.iter_mut() {
                     *sample = T::EQUILIBRIUM;
                 }
             }
+
             let frames = data.len() / usize::from(channels.max(1));
-            played_frames.fetch_add(frames as u64, Ordering::AcqRel);
+            played_frames.fetch_add(frames as u64, Ordering::Relaxed);
+
+            // Hardware master clock tick update
             let elapsed_ticks = (frames as i64)
                 .saturating_mul(TICKS_PER_SECOND)
                 .saturating_mul(i64::from(speed_milli.load(Ordering::Acquire)))
                 / i64::from(sample_rate.max(1))
                 / 1_000;
-            position_ticks.fetch_add(elapsed_ticks, Ordering::AcqRel);
+            position_ticks.fetch_add(elapsed_ticks, Ordering::Release);
         },
         move |error| {
             if let Ok(mut last_error) = last_error.lock() {
@@ -678,6 +773,8 @@ where
     )
 }
 
+/// Decodes an audio clip file into a `NativePcmClip` using the high-performance
+/// format-agnostic audio decoder.
 pub async fn decode_native_audio_clip(
     path: &Path,
     clip_id: String,
@@ -690,110 +787,20 @@ pub async fn decode_native_audio_clip(
     sample_rate: u32,
     channels: u16,
 ) -> Result<NativePcmClip, String> {
-    if sample_rate == 0 || channels == 0 {
-        return Err("Native audio output configuration is invalid".to_string());
-    }
-
-    let mut command = Command::new("ffmpeg");
-    command
-        .env("PATH", crate::commands::export::augmented_path())
-        .arg("-v")
-        .arg("error")
-        .arg("-nostdin")
-        .arg("-threads")
-        .arg("1");
-    if source_start_ticks > 0 {
-        command.arg("-ss").arg(format_seconds(source_start_ticks));
-    }
-    command
-        .arg("-i")
-        .arg(path)
-        .arg("-vn")
-        .arg("-ac")
-        .arg(channels.to_string())
-        .arg("-ar")
-        .arg(sample_rate.to_string());
-    if duration_ticks > 0 {
-        command.arg("-t").arg(format_seconds(duration_ticks));
-    }
-    command
-        .arg("-f")
-        .arg("f32le")
-        .arg("pipe:1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Unable to start native audio decoder: {error}"))?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Native audio decoder did not expose PCM output".to_string())?;
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = stdout
-            .read(&mut buffer)
-            .await
-            .map_err(|error| format!("Unable to read native PCM audio: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        if bytes.len().saturating_add(read) > MAX_PCM_BYTES {
-            let _ = child.kill().await;
-            return Err(format!(
-                "Native audio clip exceeds the {} MiB PCM limit",
-                MAX_PCM_BYTES / 1024 / 1024
-            ));
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-    }
-    let status = child
-        .wait()
-        .await
-        .map_err(|error| format!("Unable to finish native audio decode: {error}"))?;
-    if !status.success() {
-        return Err("Native audio decoder failed to decode the clip".to_string());
-    }
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        return Err("Native audio decoder returned incomplete PCM samples".to_string());
-    }
-
-    let samples = bytes
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect::<Vec<_>>();
-    if samples.is_empty() {
-        return Err("Native audio decoder returned no samples".to_string());
-    }
-    let decoded_duration_ticks = (samples.len() as i64 / i64::from(channels))
-        .saturating_mul(TICKS_PER_SECOND)
-        / i64::from(sample_rate);
-
-    Ok(NativePcmClip {
+    let config = AudioClipConfig {
         id: clip_id,
-        sample_rate,
-        channels,
-        samples: samples.into(),
+        path: path.to_string_lossy().to_string(),
         timeline_start_ticks,
-        duration_ticks: if duration_ticks > 0 {
-            duration_ticks.min(decoded_duration_ticks)
-        } else {
-            decoded_duration_ticks
-        },
+        source_start_ticks,
+        duration_ticks,
         gain: gain.clamp(0.0, 4.0),
         fade_in_ticks: fade_in_ticks.max(0),
         fade_out_ticks: fade_out_ticks.max(0),
-    })
-}
+        track_id: None,
+    };
 
-fn format_seconds(ticks: i64) -> String {
-    format!(
-        "{}.{:06}",
-        ticks.div_euclid(TICKS_PER_SECOND),
-        ticks.rem_euclid(TICKS_PER_SECOND)
-    )
+    let decoded = decode_audio_clip(path, config, sample_rate, channels).await?;
+    Ok(decoded.into())
 }
 
 #[cfg(test)]

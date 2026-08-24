@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-23
+
+### 🔊 Native Audio Playback
+
+- **Native Audio Output**: Added native CPAL audio playback with FFmpeg PCM decoding, timeline clip mixing, volume and mute control, and output-device handling.
+- **Reliable Seek and Transport**: Fixed stale native clock samples and queued play, pause, and seek commands that could rewind playback to 0s or leave audio silent after seeking.
+- **Audio Timeline Synchronization**: Refreshes native audio when clips and assets arrive after startup and keeps native runtime time aligned with the audio clock.
+- **Audio Diagnostics**: Added focused audio tracing for decoded clips, device state, callback execution, rendered frames, and non-silent mixer output.
+
+## [1.4.0] - 2026-08-23
+
+### 🚀 Deep Native Migration
+
+- **Native-First Preview and Playback**: Completed the migration of preview, scrubbing, transport, transitions, and source rendering onto the Tauri/Rust native media path.
+- **Full Native Media Pipeline**: Unified native decoding, geometry and aspect handling, frame delivery, raster-surface ownership, filmstrip atlases and caching, and export frame pooling for consistent desktop playback and rendering.
+- **Native Timeline Integration**: Connected timeline precision, snapping, waveform and envelope editing, gap and transition indicators, and source-time calculations to the native playback contract.
+- **Native-Supported Editor Surface**: Reworked desktop and mobile layout composition, resizable panels, sidebar navigation, properties and empty states, and cache and settings flows around the native runtime.
+- **Legacy Path Retirement**: Removed the legacy timeline controls and documented the mathematical invariants and performance contracts required by the native pipeline.
+
+### 🧪 Validation
+
+- Verified the TypeScript build, frontend suite, Rust backend suite, Clippy, focused 4K scrub stress, and production build.
+- CI validates the frontend, Rust backend, and release build checks on the release PR.
+
 ## [1.2.2] - 2026-08-06
 
 ### ♻️ Refactoring

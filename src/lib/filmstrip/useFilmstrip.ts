@@ -34,6 +34,7 @@ export interface UseFilmstripOptions {
   viewportScrollLeft: number;
   viewportWidth: number;
   pixelsPerSecond: number;
+  playheadTime?: number;
   enabled?: boolean;
 }
 
@@ -79,6 +80,7 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
       viewportScrollLeft: opts.viewportScrollLeft,
       viewportWidth: opts.viewportWidth,
       pixelsPerSecond: opts.pixelsPerSecond,
+      playheadTime: opts.playheadTime,
     });
   }, [
     runtime,
@@ -93,6 +95,7 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
     opts.viewportScrollLeft,
     opts.viewportWidth,
     opts.pixelsPerSecond,
+    opts.playheadTime,
     renderState.epochId, // Re-request on epoch change
   ]);
 
@@ -132,6 +135,15 @@ export function useFilmstrip(opts: UseFilmstripOptions): UseFilmstripResult {
     opts.pixelsPerSecond,
     renderState.epochId,
   ]);
+
+  // Trigger asset-wide bounded coarse preload on timeline mount so horizontal scrolling hits cache 100% of the time.
+  useEffect(() => {
+    if (!runtime || !enabled || !opts.videoPath || !opts.duration) return;
+    runtime.preloadAssetCoarseBaseline({
+      videoPath: opts.videoPath,
+      duration: opts.duration,
+    });
+  }, [runtime, enabled, opts.videoPath, opts.duration]);
 
   // Return immutable projection
   return {

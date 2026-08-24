@@ -37,6 +37,9 @@ import { useSettingsStore } from "./settingsStore";
 import { saveSnapshot, clearSnapshot } from "@/core/runtime/CrashRecoveryService";
 import { lifecycleMonitor } from "@/core/monitoring/LifecycleMonitor";
 import { TRACK_TYPE_CONFIG } from "@/lib/timeline/trackTypeConfig";
+import { getActiveSessionOrNull } from "@/core/runtime/ProjectSession";
+import { toast } from "@/lib/toast";
+import { suppressAutoSave, enableAutoSave } from "./middleware/autoSaveMiddleware";
 // import { TIMELINE_PPS_PER_ZOOM, TIMELINE_ZOOM_DEFAULT } from "@/lib/timelineZoom";
 
 interface ProjectStore {
@@ -62,8 +65,10 @@ interface ProjectStore {
     },
   ) => Promise<void> | void;
   addMediaAsset: (asset: MediaAsset) => void;
+  updateMediaAsset: (assetId: string, updates: Partial<MediaAsset>) => void;
   removeMediaAsset: (assetId: string) => void;
   updateProject: (updates: Partial<Project>) => void;
+  setProjectThumbnail: (thumbnail: string) => void;
   setRecentProjects: (projects: Project[]) => void;
   renameProject: (projectId: string, newName: string) => Promise<void>;
   deleteProject: (projectId: string) => Promise<void>;
@@ -218,6 +223,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   showToast: (message, variant = "success", durationMs = 3000) => {
     set({ toastMessage: message, toastVariant: variant });
+    if (variant === "error") {
+      toast.error(message, { duration: durationMs });
+    } else if (variant === "warning") {
+      toast.warning(message, { duration: durationMs });
+    } else {
+      toast.success(message, { duration: durationMs });
+    }
     if (durationMs > 0) {
       setTimeout(() => set({ toastMessage: null }), durationMs);
     }
@@ -318,6 +330,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
     // Wrap load logic in a promise we can track
     loadInProgress = (async () => {
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+      }
+      suppressAutoSave();
       try {
         // ═══════════════════════════════════════════════════════════════════════════════
         // PHASE 1: Dispose Previous Runtime & Reset State
@@ -446,6 +463,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           // Prewarming failed silently - graceful degradation
         }
       } finally {
+        enableAutoSave();
         // ✅ FIX-005: Clear load mutex after completion
         loadInProgress = null;
       }
@@ -469,10 +487,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
     get().scheduleAutoSave();
 
-    // Trigger background thumbnail pre-extraction for video assets.
-    // The Low → Medium → High density cascade is handled entirely in Rust
-    // Native decoder handles on-demand extraction via decode_frames_streaming
-    // No preloading needed - decoder is fast enough (3-15ms per frame)
+    // Trigger eager background baseline preload for video assets on project import.
+    // Bounded to <=300 L0 tiles at low concurrency so tiles are warm before timeline drop.
+    if (asset.type === "video" && asset.path && typeof asset.duration === "number" && asset.duration > 0) {
+      try {
+        const session = getActiveSessionOrNull();
+        if (session && session.state === "active") {
+          session.renderRuntime.preloadAssetCoarseBaseline({
+            videoPath: asset.path,
+            duration: asset.duration,
+          });
+        }
+      } catch (err) {
+        console.warn("[projectStore] Failed to trigger coarse baseline preload for asset:", asset.path, err);
+      }
+    }
+  },
+
+  updateMediaAsset: (assetId, updates) => {
+    set((state) => ({
+      mediaAssets: state.mediaAssets.map((a) =>
+        a.id === assetId ? { ...a, ...updates } : a
+      ),
+    }));
+    get().scheduleAutoSave();
   },
 
   removeMediaAsset: (assetId) => {
@@ -487,6 +525,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       project: state.project ? { ...state.project, ...updates, updatedAt: Date.now() } : null,
     }));
     get().scheduleAutoSave();
+  },
+
+  setProjectThumbnail: (thumbnail) => {
+    set((state) => ({
+      project: state.project ? { ...state.project, thumbnail } : null,
+    }));
+    // Note: purely in-memory UI preview thumbnail update; does not dirty project or schedule auto-save on play/pause
   },
 
   setRecentProjects: (projects) => {
