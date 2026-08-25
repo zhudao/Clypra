@@ -2,6 +2,10 @@ use super::{
     FrameCache, FramePacket, FrameRequest, NativeCoreError, NativeFrameServiceStats,
     PerformanceSample,
 };
+use std::collections::VecDeque;
+use super::performance::{
+    now_ms, optional_stage_percentiles, percentile_ms, ModeStats, PreviewMode,
+};
 
 /// Reusable native frame service boundary.
 ///
@@ -14,6 +18,8 @@ pub struct NativeFrameService {
     cache_hits: u64,
     cache_misses: u64,
     last_sample: Option<PerformanceSample>,
+    window_samples: VecDeque<(u64, PerformanceSample)>,
+    last_window_log_ms: u64,
 }
 
 impl NativeFrameService {
@@ -24,6 +30,8 @@ impl NativeFrameService {
             cache_hits: 0,
             cache_misses: 0,
             last_sample: None,
+            window_samples: VecDeque::new(),
+            last_window_log_ms: 0,
         })
     }
 
@@ -62,10 +70,89 @@ impl NativeFrameService {
     }
 
     pub fn record_sample(&mut self, sample: PerformanceSample) {
+        let now = now_ms();
         self.last_sample = Some(sample);
+        self.window_samples.push_back((now, self.last_sample.clone().expect("sample stored")));
+        while self.window_samples.front().is_some_and(|(timestamp, _)| now.saturating_sub(*timestamp) > 5_000) {
+            self.window_samples.pop_front();
+        }
+        if now.saturating_sub(self.last_window_log_ms) >= 5_000 {
+            self.last_window_log_ms = now;
+            let request_count = self.window_samples.len();
+            let cache_hits = self.window_samples.iter().filter(|(_, item)| item.cache_hit).count();
+            let dropped = self.window_samples.iter().filter(|(_, item)| item.dropped).count();
+            let stale = self.window_samples.iter().filter(|(_, item)| item.stale).count();
+            let cancelled = self.window_samples.iter().filter(|(_, item)| item.cancelled).count();
+            eprintln!(
+                "[playback:5s] {{\"requests\":{},\"cacheHitRate\":{:.3},\"dropped\":{},\"stale\":{},\"cancelled\":{}}}",
+                request_count,
+                if request_count == 0 { 0.0 } else { cache_hits as f64 / request_count as f64 },
+                dropped,
+                stale,
+                cancelled,
+            );
+        }
     }
 
     pub fn stats(&self) -> NativeFrameServiceStats {
+        let now = now_ms();
+        let mut seek_samples: Vec<u32> = self
+            .window_samples
+            .iter()
+            .filter(|(_, sample)| {
+                matches!(
+                    sample.mode,
+                    Some(PreviewMode::Seek | PreviewMode::Scrub | PreviewMode::FrameStep)
+                )
+            })
+            .map(|(_, sample)| sample.total_time_us)
+            .collect();
+        let requests = self.window_samples.len() as u64;
+        let hits = self.window_samples.iter().filter(|(_, sample)| sample.cache_hit).count() as u64;
+        let cache_samples = self
+            .window_samples
+            .iter()
+            .filter(|(_, sample)| {
+                !matches!(
+                    sample.strategy.as_deref(),
+                    Some("SURFACE_WARM" | "SURFACE_COLD")
+                )
+            })
+            .count() as u64;
+        let mode_stats = [
+            PreviewMode::Playback,
+            PreviewMode::PlaybackLookahead,
+            PreviewMode::Seek,
+            PreviewMode::Scrub,
+            PreviewMode::FrameStep,
+            PreviewMode::Prefetch,
+        ]
+        .into_iter()
+        .map(|mode| {
+            let samples: Vec<PerformanceSample> = self
+                .window_samples
+                .iter()
+                .filter(|(_, sample)| sample.mode == Some(mode))
+                .map(|(_, sample)| sample.clone())
+                .collect();
+            ModeStats {
+                mode,
+                decode: optional_stage_percentiles(&samples, |sample| sample.decode_us),
+                conversion_upload: optional_stage_percentiles(&samples, |sample| sample.conversion_upload_us),
+                compose: optional_stage_percentiles(&samples, |sample| sample.compose_us),
+                readback: optional_stage_percentiles(&samples, |sample| sample.readback_us),
+                present: optional_stage_percentiles(&samples, |sample| sample.present_us),
+                scheduler_wait: optional_stage_percentiles(&samples, |sample| sample.scheduler_wait_us),
+                ipc_wait: optional_stage_percentiles(&samples, |sample| sample.ipc_wait_us),
+                decoder_mutex_wait: optional_stage_percentiles(&samples, |sample| sample.decoder_mutex_wait_us),
+                gpu_queue_wait: optional_stage_percentiles(&samples, |sample| sample.gpu_queue_wait_us),
+                surface_acquire: optional_stage_percentiles(&samples, |sample| sample.surface_acquire_us),
+                submit_present: optional_stage_percentiles(&samples, |sample| sample.submit_present_us),
+                dropped_count: samples.iter().filter(|sample| sample.dropped).count(),
+                stale_count: samples.iter().filter(|sample| sample.stale).count(),
+            }
+        })
+        .collect();
         NativeFrameServiceStats {
             total_requests: self.total_requests,
             cache_hits: self.cache_hits,
@@ -73,6 +160,16 @@ impl NativeFrameService {
             cached_entries: self.cache.len(),
             cached_bytes: self.cache.current_bytes(),
             last_sample: self.last_sample.clone(),
+            window_started_at_ms: self.window_samples.front().map(|(timestamp, _)| *timestamp).unwrap_or(now),
+            window_request_count: requests,
+            window_dropped_frames: self.window_samples.iter().filter(|(_, sample)| sample.dropped).count() as u64,
+            window_stale_frames: self.window_samples.iter().filter(|(_, sample)| sample.stale).count() as u64,
+            window_cancelled_frames: self.window_samples.iter().filter(|(_, sample)| sample.cancelled).count() as u64,
+            window_seek_p50_ms: percentile_ms(&mut seek_samples, 0.50),
+            window_seek_p95_ms: percentile_ms(&mut seek_samples, 0.95),
+            window_seek_p99_ms: percentile_ms(&mut seek_samples, 0.99),
+            window_cache_hit_rate: if cache_samples == 0 { 0.0 } else { hits as f64 / cache_samples as f64 },
+            mode_stats,
         }
     }
 }
@@ -92,6 +189,7 @@ mod tests {
             project: ProjectSnapshot {
                 schema_version: 1,
                 project_revision: "project:1".to_string(),
+                frame_rate: 30,
                 canvas_width: 2,
                 canvas_height: 2,
                 clear_color: [0.0, 0.0, 0.0, 1.0],
@@ -119,6 +217,10 @@ mod tests {
             quality: QualityTier::Full,
             color_policy: ColorPolicy::default(),
             render_graph_version: 1,
+            generation: None,
+            mode: None,
+            scrub_velocity_px_per_second: None,
+            requested_at_ms: None,
         }
     }
 

@@ -15,16 +15,26 @@
 import { useEffect, useLayoutEffect, useRef, useMemo, useState } from "react";
 import { platform } from "@/core/platform";
 import { cn } from "@/lib/utils";
-import { createRasterSurface, type AnyRasterSurface } from "@/lib/renderEngine/webglRasterSurface";
+import {
+  createRasterSurface,
+  type AnyRasterSurface,
+} from "@/lib/renderEngine/webglRasterSurface";
 import { useFilmstrip } from "@/lib/filmstrip/useFilmstrip";
 import { useRenderRuntime } from "@/hooks/useRenderRuntime";
 import { usePlaybackClock } from "@/hooks/usePlaybackClock";
-import { getFilmstripRenderWindow, getFilmstripTileWidthForTier } from "@/lib/filmstrip/filmstripLayout";
+import {
+  getFilmstripRenderWindow,
+  getFilmstripTileWidthForTier,
+} from "@/lib/filmstrip/filmstripLayout";
 import { generateViewportTileAddresses } from "@/lib/filmstrip/filmstripTiers";
 import { normalizePathForTauriInvoke } from "@/lib/platform/tauri";
 import { useTimelineStore } from "@/store/timelineStore";
 import type { Clip, MediaAsset } from "@/types";
 import type { RenderEpochId, SpatialTier } from "@/lib/renderEngine/types";
+import {
+  startMetricsFlushLoop,
+  recordPaintCommit,
+} from "@/lib/renderEngine/filmstripMetrics";
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
 
@@ -33,10 +43,32 @@ const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
  */
 export function clearFilmstripFrameCache(): void {}
 
+type FilmstripRenderWindow = ReturnType<typeof getFilmstripRenderWindow>;
+
+function areRenderWindowsEqual(
+  a: FilmstripRenderWindow | undefined,
+  b: FilmstripRenderWindow,
+): boolean {
+  return (
+    !!a &&
+    a.leftPx === b.leftPx &&
+    a.widthPx === b.widthPx &&
+    a.trimIn === b.trimIn &&
+    a.trimOut === b.trimOut &&
+    a.isVisible === b.isVisible
+  );
+}
+
 /** Resolve a media source path without double-converting already-converted URLs. */
 function resolveMediaSrc(path: string): string {
   if (!path) return "";
-  if (path.startsWith("data:") || path.startsWith("asset://") || path.startsWith("http://") || path.startsWith("https://") || path.startsWith("blob:")) {
+  if (
+    path.startsWith("data:") ||
+    path.startsWith("asset://") ||
+    path.startsWith("http://") ||
+    path.startsWith("https://") ||
+    path.startsWith("blob:")
+  ) {
     return path;
   }
   return platform.convertFileSrc(path);
@@ -51,7 +83,14 @@ export interface ClipFilmstripProps {
   className?: string;
 }
 
-export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, stripHeightPx = 40, className }: ClipFilmstripProps) {
+export function ClipFilmstrip({
+  clip,
+  mediaAsset,
+  clipWidthPx,
+  pixelsPerSecond,
+  stripHeightPx = 40,
+  className,
+}: ClipFilmstripProps) {
   // PERF: Read viewport scroll state only in ClipFilmstrip (not in parent Clip component)
   // This prevents all clips from re-rendering on scroll - only filmstrips re-render
   const viewportScrollLeft = useTimelineStore((s) => s.scrollLeft);
@@ -60,7 +99,7 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
   const surfaceRef = useRef<AnyRasterSurface | null>(null);
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);
   const cachedImageRef = useRef<HTMLImageElement | null>(null);
-  const [committedFilmstrip, setCommittedFilmstrip] = useState<{
+  const committedFilmstripRef = useRef<{
     clipId: string;
     epochId: RenderEpochId;
     spatialTier: SpatialTier;
@@ -79,16 +118,22 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
 
   const isVideoSource = useMemo(() => {
     const path = mediaAsset.path ?? "";
-    return mediaAsset.type === "video" && path.length > 0 && !IMAGE_EXT.test(path);
+    return (
+      mediaAsset.type === "video" && path.length > 0 && !IMAGE_EXT.test(path)
+    );
   }, [mediaAsset.type, mediaAsset.path]);
 
   const runtime = useRenderRuntime();
-  const videoPath = isVideoSource && mediaAsset.path ? normalizePathForTauriInvoke(mediaAsset.path) : "";
+  const videoPath =
+    isVideoSource && mediaAsset.path
+      ? normalizePathForTauriInvoke(mediaAsset.path)
+      : "";
   const clockState = usePlaybackClock();
   const currentTime = clockState.time;
   const clipLocalPlayheadTime = currentTime - clip.startTime + clip.trimIn;
   const playheadTime =
-    clipLocalPlayheadTime >= clip.trimIn && clipLocalPlayheadTime <= clip.trimOut
+    clipLocalPlayheadTime >= clip.trimIn &&
+    clipLocalPlayheadTime <= clip.trimOut
       ? clipLocalPlayheadTime
       : clip.trimIn;
 
@@ -112,42 +157,81 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
     return getFilmstripTileWidthForTier(spatialTier);
   }, [spatialTier]);
 
+  useEffect(() => {
+    startMetricsFlushLoop(5000);
+  }, []);
+
   // Keep the canvas bounded to the current viewport. At deep zoom the clip's
   // DOM width can be very large, but a full-clip canvas would exceed the
   // platform's device-pixel/GPU backing-store limit. The native tile request
   // remains viewport-bounded; this is only the presentation window.
-  const renderWindow = useMemo(() => getFilmstripRenderWindow({
-    clipStartTime: clip.startTime,
-    clipWidthPx,
-    trimIn: clip.trimIn,
-    trimOut: clip.trimOut,
-    viewportScrollLeft,
-    viewportWidth,
-    pixelsPerSecond,
-  }), [clip.startTime, clip.trimIn, clip.trimOut, clipWidthPx, pixelsPerSecond, viewportScrollLeft, viewportWidth]);
+  const renderWindow = useMemo(
+    () =>
+      getFilmstripRenderWindow({
+        clipStartTime: clip.startTime,
+        clipWidthPx,
+        trimIn: clip.trimIn,
+        trimOut: clip.trimOut,
+        viewportScrollLeft,
+        viewportWidth,
+        pixelsPerSecond,
+      }),
+    [
+      clip.startTime,
+      clip.trimIn,
+      clip.trimOut,
+      clipWidthPx,
+      pixelsPerSecond,
+      viewportScrollLeft,
+      viewportWidth,
+    ],
+  );
 
-  const tileAddresses = useMemo(() => generateViewportTileAddresses({
-    clipId: clip.id,
-    videoPath,
-    zoomTier: spatialTier,
-    trimIn: clip.trimIn,
-    trimOut: clip.trimOut,
-    clipStartTime: clip.startTime,
-    clipWidthPx,
-    viewportScrollLeft,
-    viewportWidth,
-    pixelsPerSecond,
-    overscanFactor: 2.0,
-    videoDuration: mediaAsset.duration ?? 0,
-  }), [clip.id, videoPath, spatialTier, clip.trimIn, clip.trimOut, clip.startTime, clipWidthPx, viewportScrollLeft, viewportWidth, pixelsPerSecond, mediaAsset.duration]);
+  const tileAddresses = useMemo(
+    () =>
+      generateViewportTileAddresses({
+        clipId: clip.id,
+        videoPath,
+        zoomTier: spatialTier,
+        trimIn: clip.trimIn,
+        trimOut: clip.trimOut,
+        clipStartTime: clip.startTime,
+        clipWidthPx,
+        viewportScrollLeft,
+        viewportWidth,
+        pixelsPerSecond,
+        overscanFactor: 2.0,
+        videoDuration: mediaAsset.duration ?? 0,
+      }),
+    [
+      clip.id,
+      videoPath,
+      spatialTier,
+      clip.trimIn,
+      clip.trimOut,
+      clip.startTime,
+      clipWidthPx,
+      viewportScrollLeft,
+      viewportWidth,
+      pixelsPerSecond,
+      mediaAsset.duration,
+    ],
+  );
 
-  const tileSignature = useMemo(() => tileAddresses
-    .map((address) => `${address.zoomTier}:${Math.round(address.timestamp * 1000)}`)
-    .join("|"), [tileAddresses]);
+  const tileSignature = useMemo(
+    () =>
+      tileAddresses
+        .map(
+          (address) =>
+            `${address.zoomTier}:${Math.round(address.timestamp * 1000)}`,
+        )
+        .join("|"),
+    [tileAddresses],
+  );
 
   // A reused Clip component must not briefly display the previous clip's committed pixels.
   useEffect(() => {
-    setCommittedFilmstrip(null);
+    committedFilmstripRef.current = null;
   }, [clip.id, videoPath]);
 
   // ── RasterSurface lifecycle ───────────────────────────────────────────────
@@ -204,7 +288,8 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
 
       const currentEpochArtifacts = artifacts.filter(
         (artifact) =>
-          (artifact.epochId === epochId || artifact.epochId === ("epoch-preload" as RenderEpochId)) &&
+          (artifact.epochId === epochId ||
+            artifact.epochId === ("epoch-preload" as RenderEpochId)) &&
           artifact.spatialTier === spatialTier,
       );
 
@@ -243,35 +328,18 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
     runtime?.tileCache,
   ]);
 
-  // ── Epoch Transition & Debounce Gating (Bug B Fix) ───────────────────────
-  // NOTE (Track A stopgap): During epoch transitions, avoid premature commits on the first arriving tile.
-  // We commit when either:
-  // 1) All requested visible tile addresses have matching artifacts, OR
-  // 2) A 120ms debounce threshold expires after the first artifact arrives.
-  // (This will be naturally superseded by Track B's progressive two-tier ingestion).
+  // ── Epoch Transition & Debounce Gating (Unconditional Escape Timer) ─────
+  // Start the 120ms debounce threshold timer immediately upon epoch/spatialTier
+  // change to ensure a bounded fallback commit even if decode is delayed.
   const [epochDebounceExpired, setEpochDebounceExpired] = useState(false);
-  const firstArtifactTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
-    firstArtifactTimeRef.current = null;
     setEpochDebounceExpired(false);
+    const timer = setTimeout(() => {
+      setEpochDebounceExpired(true);
+    }, 120); // 120ms bounded fallback escape window
+    return () => clearTimeout(timer);
   }, [epochId, spatialTier]);
-
-  useEffect(() => {
-    const currentEpochArtifacts = artifacts.filter(
-      (artifact) =>
-        (artifact.epochId === epochId || artifact.epochId === ("epoch-preload" as RenderEpochId)) &&
-        artifact.spatialTier === spatialTier,
-    );
-
-    if (currentEpochArtifacts.length > 0 && !epochDebounceExpired && firstArtifactTimeRef.current === null) {
-      firstArtifactTimeRef.current = Date.now();
-      const timer = setTimeout(() => {
-        setEpochDebounceExpired(true);
-      }, 120); // 120ms debounce window
-      return () => clearTimeout(timer);
-    }
-  }, [artifacts, epochId, spatialTier, epochDebounceExpired]);
 
   // ── Draw filmstrip whenever artifacts or layout changes ───────────────────
   useEffect(() => {
@@ -302,49 +370,71 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
 
     const currentEpochArtifacts = artifacts.filter(
       (artifact) =>
-        (artifact.epochId === epochId || artifact.epochId === ("epoch-preload" as RenderEpochId)) &&
+        (artifact.epochId === epochId ||
+          artifact.epochId === ("epoch-preload" as RenderEpochId)) &&
         artifact.spatialTier === spatialTier,
     );
 
     const hasAllTiles =
       tileAddresses.length > 0 &&
       tileAddresses.every((addr) =>
-        currentEpochArtifacts.some((art) => Math.abs(art.timestampMs - addr.timestamp * 1000) < 1),
+        currentEpochArtifacts.some(
+          (art) => Math.abs(art.timestampMs - addr.timestamp * 1000) < 1,
+        ),
       );
 
-    const isReadyToCommit = hasAllTiles || epochDebounceExpired || currentEpochArtifacts.length >= tileAddresses.length;
+    const isReadyToCommit =
+      hasAllTiles ||
+      epochDebounceExpired ||
+      (tileAddresses.length > 0 &&
+        currentEpochArtifacts.length >= tileAddresses.length);
 
     const hasAnyCacheOrArtifacts =
       currentEpochArtifacts.length > 0 ||
       (runtime?.tileCache && runtime.tileCache.getStats().tileCount > 0);
 
     if (hasAnyCacheOrArtifacts) {
+      const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       surface.drawFilmstrip(currentEpochArtifacts, layout);
+      if (t0 > 0) {
+        recordPaintCommit(spatialTier, performance.now() - t0);
+      }
       if (isReadyToCommit) {
-        setCommittedFilmstrip((previous) => {
-          if (
-            previous?.clipId === clip.id &&
-            previous.epochId === epochId &&
-            previous.spatialTier === spatialTier &&
-            previous.signature === tileSignature &&
-            previous.renderWindow === renderWindow
-          ) {
-            return previous;
-          }
-          return {
+        const previous = committedFilmstripRef.current;
+        if (
+          previous?.clipId !== clip.id ||
+          previous.epochId !== epochId ||
+          previous.spatialTier !== spatialTier ||
+          previous.signature !== tileSignature ||
+          !areRenderWindowsEqual(previous.renderWindow, renderWindow)
+        ) {
+          committedFilmstripRef.current = {
             clipId: clip.id,
             epochId,
             spatialTier,
             signature: tileSignature,
             renderWindow,
           };
-        });
+        }
       }
-    } else if (!committedFilmstrip) {
+    } else if (!committedFilmstripRef.current) {
       // Cold start: neutral placeholder
       surface.drawPlaceholder(layout);
     }
-  }, [artifacts, renderWindow, stripHeightPx, tileWidthPx, tileAddresses, clip.id, epochId, spatialTier, tileSignature, committedFilmstrip, epochDebounceExpired, runtime, videoPath]);
+  }, [
+    artifacts,
+    renderWindow,
+    stripHeightPx,
+    tileWidthPx,
+    tileAddresses,
+    clip.id,
+    epochId,
+    spatialTier,
+    tileSignature,
+    epochDebounceExpired,
+    runtime,
+    videoPath,
+  ]);
 
   // ── Image tile rendering (still-image clips) ──────────────────────────────
   useEffect(() => {
@@ -413,7 +503,11 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
     };
 
     // Reuse cached image if same src already decoded
-    if (cachedImageRef.current?.src === src && cachedImageRef.current.complete && cachedImageRef.current.naturalWidth > 0) {
+    if (
+      cachedImageRef.current?.src === src &&
+      cachedImageRef.current.complete &&
+      cachedImageRef.current.naturalWidth > 0
+    ) {
       drawTiles(cachedImageRef.current);
       return;
     }
@@ -430,7 +524,13 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
     return () => {
       cancelled = true;
     };
-  }, [mediaAsset.type, mediaAsset.path, mediaAsset.posterFrame, debouncedClipWidthPx, stripHeightPx]);
+  }, [
+    mediaAsset.type,
+    mediaAsset.path,
+    mediaAsset.posterFrame,
+    debouncedClipWidthPx,
+    stripHeightPx,
+  ]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -439,7 +539,19 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
     const visibleWindow = renderWindow;
 
     return (
-      <div data-testid="clip-filmstrip" className={cn("relative overflow-hidden rounded-[2px] border border-timeline-filmstrip-border bg-timeline-filmstrip-bg", className)} style={{ height: stripHeightPx, width: "100%", opacity: 1, transition: "opacity 80ms linear" }}>
+      <div
+        data-testid="clip-filmstrip"
+        className={cn(
+          "relative overflow-hidden rounded-xs border border-timeline-filmstrip-border bg-timeline-filmstrip-bg",
+          className,
+        )}
+        style={{
+          height: stripHeightPx,
+          width: "100%",
+          opacity: 1,
+          transition: "opacity 80ms linear",
+        }}
+      >
         <canvas
           ref={canvasRef}
           style={{
@@ -456,14 +568,33 @@ export function ClipFilmstrip({ clip, mediaAsset, clipWidthPx, pixelsPerSecond, 
   }
 
   // Image asset — tiled canvas rendering (one decoded bitmap, many timeline tiles)
-  if (mediaAsset.type === "image" && (mediaAsset.posterFrame || mediaAsset.path)) {
+  if (
+    mediaAsset.type === "image" &&
+    (mediaAsset.posterFrame || mediaAsset.path)
+  ) {
     return (
-      <div data-testid="clip-filmstrip-image" className={cn("relative overflow-hidden rounded-[2px] border border-timeline-filmstrip-border", className)} style={{ height: stripHeightPx, width: "100%" }}>
-        <canvas ref={imageCanvasRef} style={{ display: "block", width: "100%", height: "100%" }} />
+      <div
+        data-testid="clip-filmstrip-image"
+        className={cn(
+          "relative overflow-hidden rounded-xs border border-timeline-filmstrip-border",
+          className,
+        )}
+        style={{ height: stripHeightPx, width: "100%" }}
+      >
+        <canvas
+          ref={imageCanvasRef}
+          style={{ display: "block", width: "100%", height: "100%" }}
+        />
       </div>
     );
   }
 
   // Empty placeholder
-  return <div data-testid="clip-filmstrip-empty" className={cn("w-full rounded-[2px] bg-timeline-filmstrip-empty", className)} style={{ height: stripHeightPx }} />;
+  return (
+    <div
+      data-testid="clip-filmstrip-empty"
+      className={cn("w-full rounded-xs bg-timeline-filmstrip-empty", className)}
+      style={{ height: stripHeightPx }}
+    />
+  );
 }

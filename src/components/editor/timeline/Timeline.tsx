@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useMemo } from "react";
+import React, { useRef, useEffect, useCallback, useMemo, useState } from "react";
 import { Film, ArrowLeft } from "lucide-react";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useUIStore } from "@/store/uiStore";
@@ -6,8 +6,8 @@ import { GapManager } from "@/lib/timeline/gapManager";
 import { EditingActions } from "@/core/interactions";
 import { usePreviewMode } from "@/hooks/usePreviewMode";
 import {
-  usePlaybackClock,
-  usePlaybackControls,
+  usePlaybackStatus,
+  useTransportControls,
   getPlaybackClock,
 } from "@/hooks/usePlaybackClock";
 import {
@@ -27,7 +27,10 @@ import {
   getTimelineMaxScrollLeft,
   timeToPixel,
   pixelToTime,
+  getTimelineLaneClientX,
 } from "@/lib/timeline/timelineViewport";
+import { getTrackVisualSpec } from "@/lib/timeline/trackTypeConfig";
+import { clampAndSnapProgramTime } from "@/lib/timeline/programTimelineBridge";
 
 
 import { TimelineToolbar } from "./TimelineToolbar";
@@ -36,26 +39,29 @@ import { TrackLabel } from "./TrackLabel";
 import { Track } from "./Track";
 import { Playhead } from "./Playhead";
 import { EmptyTimelineDropZone } from "./EmptyTimelineDropZone";
+import { ClipContextMenu } from "./ClipContextMenu";
+import { TimelineEmptySpaceContextMenu } from "./TimelineEmptySpaceContextMenu";
+import { AudioStreamPicker } from "./AudioStreamPicker";
+import { MediaJobIndicator } from "./MediaJobIndicator";
+import { RenameClipDialog } from "./RenameClipDialog";
 
 export const Timeline: React.FC = () => {
-  const {
-    tracks,
-    clips,
-    pixelsPerSecond,
-    scrollLeft,
-    setScrollLeft,
-    setViewportWidth,
-    snapGuides,
-  } = useTimelineStore();
+  const tracks = useTimelineStore((s) => s.tracks);
+  const mainVideoTrackId = useTimelineStore((s) => s.mainVideoTrackId);
+  const clips = useTimelineStore((s) => s.clips);
+  const pixelsPerSecond = useTimelineStore((s) => s.pixelsPerSecond);
+  const scrollLeft = useTimelineStore((s) => s.scrollLeft);
+  const setScrollLeft = useTimelineStore((s) => s.setScrollLeft);
+  const setViewportWidth = useTimelineStore((s) => s.setViewportWidth);
+  const snapGuides = useTimelineStore((s) => s.snapGuides);
   const hasClips = clips.length > 0;
 
-  const { previewMode, clearSelection } = useUIStore();
+  const previewMode = useUIStore((s) => s.previewMode);
+  const selectedClipIds = useUIStore((s) => s.selectedClipIds);
+  const clearSelection = useUIStore((s) => s.clearSelection);
   const { exitSourceMode } = usePreviewMode();
-  const clockState = usePlaybackClock();
-  const { seek } = usePlaybackControls();
-  const currentTime = clockState.time;
-  const duration = clockState.duration;
-  const isPlaying = clockState.state === "playing";
+  const { isPlaying, duration } = usePlaybackStatus();
+  const { seek: transportSeek } = useTransportControls();
   const containerRef = useRef<HTMLDivElement>(null);
   const wasPlayingRef = useRef(false);
   const runtime = useRenderRuntime();
@@ -63,6 +69,67 @@ export const Timeline: React.FC = () => {
   const hasTimelineContent = hasClips || tracks.length > 0;
   const showInactivePreviewOverlay =
     !isProgramPreviewActive && hasTimelineContent;
+
+  const [clipContextMenu, setClipContextMenu] = useState<{
+    clickedClipId: string | null;
+    clickedTrackId?: string | null;
+    position: { x: number; y: number };
+  } | null>(null);
+
+  const [emptySpaceContextMenu, setEmptySpaceContextMenu] = useState<{
+    clickedTrackId: string | null;
+    clickedTime: number;
+    position: { x: number; y: number };
+  } | null>(null);
+  const [renameClipId, setRenameClipId] = useState<string | null>(null);
+
+  const handleClipContextMenu = useCallback(
+    (e: React.MouseEvent, clipId: string, trackId: string) => {
+      setEmptySpaceContextMenu(null);
+      setClipContextMenu({
+        clickedClipId: clipId,
+        clickedTrackId: trackId,
+        position: { x: e.clientX, y: e.clientY },
+      });
+    },
+    [],
+  );
+
+  const handleTrackContextMenu = useCallback(
+    (e: React.MouseEvent, trackId: string, time: number) => {
+      setClipContextMenu(null);
+      setEmptySpaceContextMenu({
+        clickedTrackId: trackId,
+        clickedTime: time,
+        position: { x: e.clientX, y: e.clientY },
+      });
+    },
+    [],
+  );
+
+  const handleTimelineContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest('[data-timeline-interactive="true"]')) return;
+      if (target && target.closest("[data-clip-id]")) return;
+      if (target && target.closest("[data-gap-id]")) return;
+      e.preventDefault();
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const clickedTime = pixelToTime(
+        getTimelineLaneClientX(e.clientX, rect.left, hasClips) + scrollLeft,
+        pixelsPerSecond,
+      );
+      setClipContextMenu(null);
+      setEmptySpaceContextMenu({
+        clickedTrackId: null,
+        clickedTime: Math.max(0, clickedTime),
+        position: { x: e.clientX, y: e.clientY },
+      });
+    },
+    [hasClips, scrollLeft, pixelsPerSecond],
+  );
 
   // Consume extracted hooks
   useTimelineZoom(containerRef, hasTimelineContent);
@@ -97,6 +164,73 @@ export const Timeline: React.FC = () => {
     return runtime.attach(container);
   }, [runtime]);
 
+  // Keep a clip selected from the program monitor visible in the timeline.
+  // This is intentionally DOM-local so selection remains ephemeral UI state
+  // and does not introduce a second timeline viewport model.
+  const revealSelectedClip = useCallback(
+    (clipId: string) => {
+      const container = containerRef.current;
+      if (!container) return;
+
+      const clipElement = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-clip-id]"),
+      ).find((element) => element.dataset.clipId === clipId);
+      if (!clipElement) return;
+
+      const containerRect = container.getBoundingClientRect();
+      const clipRect = clipElement.getBoundingClientRect();
+      const labelWidth = getTimelineLabelColumnWidth(hasClips);
+      const headerHeight = hasClips ? 24 : 0;
+      const leftEdge = containerRect.left + labelWidth;
+      const rightEdge = containerRect.right;
+      const topEdge = containerRect.top + headerHeight;
+      const bottomEdge = containerRect.bottom;
+
+      let nextScrollLeft = container.scrollLeft;
+      let nextScrollTop = container.scrollTop;
+
+      // Do not jump horizontally if any part of the clip is already visible in the viewport
+      const isHorizontallyVisible =
+        clipRect.right > leftEdge && clipRect.left < rightEdge;
+
+      if (!isHorizontallyVisible) {
+        if (clipRect.right <= leftEdge) {
+          nextScrollLeft -= leftEdge - clipRect.left;
+        } else if (clipRect.left >= rightEdge) {
+          nextScrollLeft += clipRect.right - rightEdge;
+        }
+      }
+
+      if (clipRect.top < topEdge) {
+        nextScrollTop -= topEdge - clipRect.top;
+      } else if (clipRect.bottom > bottomEdge) {
+        nextScrollTop += clipRect.bottom - bottomEdge;
+      }
+
+      const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      nextScrollLeft = Math.max(0, Math.min(nextScrollLeft, maxScrollLeft));
+      nextScrollTop = Math.max(0, Math.min(nextScrollTop, maxScrollTop));
+
+      if (Math.abs(container.scrollLeft - nextScrollLeft) > 0.5) {
+        container.scrollLeft = nextScrollLeft;
+        setScrollLeft(nextScrollLeft);
+      }
+      if (Math.abs(container.scrollTop - nextScrollTop) > 0.5) {
+        container.scrollTop = nextScrollTop;
+      }
+    },
+    [hasClips, setScrollLeft],
+  );
+
+  useEffect(() => {
+    const clipId = selectedClipIds[0];
+    if (!clipId) return;
+
+    const frame = window.requestAnimationFrame(() => revealSelectedClip(clipId));
+    return () => window.cancelAnimationFrame(frame);
+  }, [clips, selectedClipIds, revealSelectedClip]);
+
   // Notify runtime when zoom scale changes
   useEffect(() => {
     if (!runtime) return;
@@ -105,10 +239,11 @@ export const Timeline: React.FC = () => {
 
   // ── Clamp playhead to sequence bounds ──────────────────────────────────────
   useEffect(() => {
-    if (duration > 0 && currentTime > duration) {
-      seek(duration);
+    const clock = getPlaybackClock();
+    if (duration > 0 && clock.time > duration) {
+      transportSeek(duration);
     }
-  }, [duration, currentTime, seek]);
+  }, [duration, transportSeek]);
 
   // ✅ PERFORMANCE OPTIMIZED: RAF-based auto-scroll with throttled state updates
   const autoScrollRafRef = useRef<number | null>(null);
@@ -119,6 +254,57 @@ export const Timeline: React.FC = () => {
   const pixelsPerSecondRef = useRef(pixelsPerSecond);
   pixelsPerSecondRef.current = pixelsPerSecond;
   const SCROLL_STATE_THROTTLE = 100; // Update React state only every 100ms during playback
+
+  // PreviewTransport seeks through the shared clock while the timeline is
+  // mounted elsewhere in the editor. Follow those paused scrubs here so a
+  // preview scrub never leaves the playhead outside the visible timeline.
+  const keepProgramTimeVisible = useCallback(
+    (time: number) => {
+      const container = containerRef.current;
+      if (!container || !hasClips || duration <= 0) return;
+
+      const pps = pixelsPerSecondRef.current;
+      const labelColumnWidth = getTimelineLabelColumnWidth(hasClips);
+      const effectiveViewportWidth = Math.max(0, container.clientWidth - labelColumnWidth);
+      if (effectiveViewportWidth <= 0) return;
+
+      const playheadX = time * pps;
+      const leftEdge = container.scrollLeft;
+      const rightEdge = leftEdge + effectiveViewportWidth;
+      const maxScrollLeft = getTimelineMaxScrollLeft(
+        container.clientWidth,
+        getTimelineCanvasDuration(duration),
+        pps,
+        hasClips,
+      );
+
+      let nextScrollLeft = container.scrollLeft;
+      if (playheadX < leftEdge) {
+        nextScrollLeft = playheadX - effectiveViewportWidth * 0.15;
+      } else if (playheadX > rightEdge) {
+        nextScrollLeft = playheadX - effectiveViewportWidth * 0.85;
+      } else {
+        return;
+      }
+
+      nextScrollLeft = Math.max(0, Math.min(nextScrollLeft, maxScrollLeft));
+      if (Math.abs(container.scrollLeft - nextScrollLeft) <= 0.5) return;
+
+      container.scrollLeft = nextScrollLeft;
+      setScrollLeft(nextScrollLeft);
+    },
+    [duration, hasClips, setScrollLeft],
+  );
+
+  useEffect(() => {
+    if (previewMode !== "program" || isPlaying) return;
+
+    const clock = getPlaybackClock();
+    return clock.subscribe((state) => {
+      if (clock.getState().state === "playing") return;
+      keepProgramTimeVisible(state.time);
+    });
+  }, [isPlaying, keepProgramTimeVisible, previewMode]);
 
   // Auto-scroll during playback: viewport tracking
   // SMOOTH-2 fix: read clock inside RAF tick — effect only re-runs on isPlaying/pps/duration change
@@ -146,7 +332,7 @@ export const Timeline: React.FC = () => {
     if (justStartedPlaying) {
       // Audit 6.2 fix: read from ref so snap uses current zoom at play-start
       const pps = pixelsPerSecondRef.current;
-      const playheadX = Math.round(currentTime * pps);
+      const playheadX = Math.round(getPlaybackClock().time * pps);
       const leftEdge = container.scrollLeft;
       const rightEdge = leftEdge + effectiveViewportWidth;
       const canvasDuration = getTimelineCanvasDuration(duration);
@@ -286,7 +472,7 @@ export const Timeline: React.FC = () => {
 
         // Insert 2-second gap at playhead position
         const gapDuration = 2.0;
-        GapManager.insertGap(trackId, currentTime, gapDuration);
+        GapManager.insertGap(trackId, getPlaybackClock().time, gapDuration);
         return;
       }
 
@@ -310,7 +496,7 @@ export const Timeline: React.FC = () => {
         const trackId = selectedTrackId || tracks[0]?.id;
         if (!trackId) return;
 
-        const gapAtPlayhead = GapManager.getGapAtPosition(trackId, currentTime);
+        const gapAtPlayhead = GapManager.getGapAtPosition(trackId, getPlaybackClock().time);
 
         if (gapAtPlayhead && !gapAtPlayhead.protected) {
           GapManager.removeGap(gapAtPlayhead.id);
@@ -321,7 +507,7 @@ export const Timeline: React.FC = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [tracks, currentTime]);
+  }, [tracks]);
 
   const handleTimelinePointerDownCapture = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -364,12 +550,13 @@ export const Timeline: React.FC = () => {
         event.clientX - rect.left - labelColumnWidth + container.scrollLeft;
       const time = Math.max(0, Math.min(pixelToTime(x, pixelsPerSecond), duration));
 
-      seek(time);
+      const frameRate = getPlaybackClock().frameRate;
+      transportSeek(clampAndSnapProgramTime(time, duration, frameRate));
     },
     [
       duration,
       pixelsPerSecond,
-      seek,
+      transportSeek,
       previewMode,
       exitSourceMode,
       clearSelection,
@@ -427,6 +614,7 @@ export const Timeline: React.FC = () => {
           onScroll={handleScroll}
           onPointerDownCapture={handleTimelinePointerDownCapture}
           onClick={seekFromPointer}
+          onContextMenu={handleTimelineContextMenu}
           id="timeline-tracks-container"
           className={`h-full overflow-auto scrollbar-thin relative transition-colors ${isDraggingOver ? "bg-cyan-500/10 ring-2 ring-cyan-500/50 ring-inset" : ""}`}
           style={{
@@ -531,6 +719,12 @@ export const Timeline: React.FC = () => {
                   )}
 
                 {tracks.map((track) => {
+                  const visualSpec = getTrackVisualSpec(track, tracks, mainVideoTrackId);
+                  const visualTrack =
+                    track.height === visualSpec.height
+                      ? track
+                      : { ...track, height: visualSpec.height };
+
                   // FIX: Filter clips per track to avoid passing entire clips array
                   // This prevents tracks from re-rendering when clips on OTHER tracks change
                   const trackClips = clips.filter(
@@ -556,23 +750,26 @@ export const Timeline: React.FC = () => {
                   return (
                     <React.Fragment key={track.id}>
                       {/* LEFT: Track label — sticky left, scrolls vertically with clips */}
-                      <TrackLabel track={track} />
+                      <TrackLabel track={visualTrack} visualSpec={visualSpec} />
 
                       {/* RIGHT: Track clips — scrolls both directions */}
                       <div
                         className="relative mb-0"
                         style={{
                           width: `${contentWidth}px`,
-                          height: `${track.height}px`,
+                          height: `${visualTrack.height}px`,
                         }}
                       >
                         <Track
-                          track={track}
+                          track={visualTrack}
+                          visualSpec={visualSpec}
                           pixelsPerSecond={pixelsPerSecond}
                           clips={trackClips}
                           onClipDragStart={handleClipDragStart}
                           onClipDragMove={handleClipDragMove}
                           onClipDragEnd={handleClipDragEnd}
+                          onClipContextMenu={handleClipContextMenu}
+                          onTrackContextMenu={handleTrackContextMenu}
                           dragState={trackDragState}
                         />
                       </div>
@@ -675,6 +872,29 @@ export const Timeline: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Context Menus */}
+      {clipContextMenu && (
+        <ClipContextMenu
+          clickedClipId={clipContextMenu.clickedClipId}
+          clickedTrackId={clipContextMenu.clickedTrackId}
+          position={clipContextMenu.position}
+          onClose={() => setClipContextMenu(null)}
+          onRename={(clipId) => setRenameClipId(clipId)}
+        />
+      )}
+
+      {emptySpaceContextMenu && (
+        <TimelineEmptySpaceContextMenu
+          clickedTrackId={emptySpaceContextMenu.clickedTrackId}
+          clickedTime={emptySpaceContextMenu.clickedTime}
+          position={emptySpaceContextMenu.position}
+          onClose={() => setEmptySpaceContextMenu(null)}
+        />
+      )}
+      <RenameClipDialog clipId={renameClipId} onClose={() => setRenameClipId(null)} />
+      <AudioStreamPicker />
+      <MediaJobIndicator />
     </div>
   );
 };

@@ -49,15 +49,34 @@ export class TimelineZoomSpring {
   private rafId: number | null = null;
   private mode: SpringMode = "idle";
   private inertiaVelocity = 0;
+  private isApplyingFrame = false;
+  private animationGeneration = 0;
+  private unsubscribeStore: () => void;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
     this.currentPps = useTimelineStore.getState().pixelsPerSecond;
     this.targetPps = this.currentPps;
+
+    this.unsubscribeStore = useTimelineStore.subscribe((state, prevState) => {
+      if (this.isApplyingFrame) return;
+      if (state.pixelsPerSecond !== prevState.pixelsPerSecond) {
+        // External zoom change (e.g. toolbar button, slider, keyboard shortcut)
+        if (this.mode !== "idle") {
+          this.cancelScheduledFrame();
+          this.mode = "idle";
+        }
+        this.currentPps = state.pixelsPerSecond;
+        this.targetPps = state.pixelsPerSecond;
+      }
+    });
   }
 
   /** Current animated PPS (use this as the base when computing the next target). */
   getCurrentPps(): number {
+    if (this.mode === "idle") {
+      return useTimelineStore.getState().pixelsPerSecond;
+    }
     return this.currentPps;
   }
 
@@ -93,16 +112,28 @@ export class TimelineZoomSpring {
   }
 
   dispose(): void {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
-    }
+    this.cancelScheduledFrame();
     this.mode = "idle";
+    this.unsubscribeStore();
   }
 
   private scheduleIfNeeded(): void {
     if (this.rafId !== null) return; // already ticking
-    this.rafId = requestAnimationFrame(() => this.tick());
+    const generation = this.animationGeneration;
+    this.rafId = requestAnimationFrame(() => {
+      // A callback can already be queued when cancelAnimationFrame runs.
+      // Ignore it if a newer animation or disposal invalidated this generation.
+      if (generation !== this.animationGeneration) return;
+      this.tick();
+    });
+  }
+
+  private cancelScheduledFrame(): void {
+    this.animationGeneration += 1;
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
   }
 
   private tick(): void {
@@ -145,18 +176,30 @@ export class TimelineZoomSpring {
     if (!this.anchor) return;
     const { anchorTime, localTimelineX, containerWidth, viewportEndSeconds, hasClips } = this.anchor;
 
-    useTimelineStore.getState().setPixelsPerSecond(this.currentPps);
+    this.isApplyingFrame = true;
+    try {
+      const state = useTimelineStore.getState();
+      if (!Object.is(state.pixelsPerSecond, this.currentPps)) {
+        state.setPixelsPerSecond(this.currentPps);
+      }
 
-    const nextScrollLeft = getAnchoredZoomScrollLeft({
-      anchorTime,
-      localTimelineX,
-      containerWidth,
-      viewportEndSeconds,
-      nextPixelsPerSecond: this.currentPps,
-      hasClips,
-    });
+      const nextScrollLeft = getAnchoredZoomScrollLeft({
+        anchorTime,
+        localTimelineX,
+        containerWidth,
+        viewportEndSeconds,
+        nextPixelsPerSecond: this.currentPps,
+        hasClips,
+      });
 
-    this.container.scrollLeft = nextScrollLeft;
-    useTimelineStore.getState().setScrollLeft(nextScrollLeft);
+      if (Math.abs(this.container.scrollLeft - nextScrollLeft) > 0.01) {
+        this.container.scrollLeft = nextScrollLeft;
+      }
+      if (Math.abs(useTimelineStore.getState().scrollLeft - nextScrollLeft) > 0.01) {
+        useTimelineStore.getState().setScrollLeft(nextScrollLeft);
+      }
+    } finally {
+      this.isApplyingFrame = false;
+    }
   }
 }

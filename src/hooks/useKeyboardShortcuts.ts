@@ -11,29 +11,14 @@ import { EditingActions } from "@/core/interactions";
 import { generateId } from "@/lib/utils/id";
 import { useAnchoredTimelineZoom } from "./timeline/useAnchoredTimelineZoom";
 import { toast } from "@/lib/toast";
+import { formatSplitMessage } from "@/lib/timeline/clipName";
 
-let copiedClipsClipboard: Array<{
-  trackId: string;
-  mediaId: string;
-  duration: number;
-  trimIn: number;
-  trimOut: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  opacity: number;
-  rotation: number;
-  startOffset: number;
-  aspectRatioLocked?: boolean;
-  sourceAspectRatio?: number;
-  fitMode?: "contain" | "cover" | "fill" | "stretch" | "original";
-}> = [];
+import { clipboardService } from "@/core/clipboard/clipboardService";
 
 export const useKeyboardShortcuts = () => {
   const { pause, seek, setActiveContext, togglePlayback } = useTransportControls();
   const { time: transportTime } = useTransportSnapshot();
-  const { swapClips, addMarker } = useTimelineStore();
+  const { addMarker } = useTimelineStore();
   const { selectedClipIds, selectClip, selectTrack, previewMode, exitSourceMode, markSourceIn, markSourceOut } = useUIStore();
   const { project } = useProjectStore();
   const { undo, redo } = useHistoryStore();
@@ -135,6 +120,14 @@ export const useKeyboardShortcuts = () => {
 
       // ─── Program mode shortcuts ──────────────────────────────────────────
 
+      if (useShortcutStore.getState().getMatchingAction(e) === "group-clips") {
+        e.preventDefault();
+        const result = EditingActions.groupSelectedClips(selectedClipIds);
+        if (result.success) toast.success("Grouped clips");
+        else if (result.error) toast.error(result.error);
+        return;
+      }
+
       if (isMeta && e.key === "z" && !e.shiftKey) {
         e.preventDefault();
         undo();
@@ -145,74 +138,21 @@ export const useKeyboardShortcuts = () => {
         e.preventDefault();
       } else if (isMeta && e.key === "i") {
         e.preventDefault();
-      } else if (isMeta && e.key.toLowerCase() === "d") {
+      } else if (isMeta && e.key.toLowerCase() === "d" && !e.shiftKey) {
         e.preventDefault();
-        const store = useTimelineStore.getState();
-        const selected = store.clips.filter((c) => selectedClipIds.includes(c.id)).sort((a, b) => a.startTime - b.startTime);
-        if (selected.length === 0) return;
-        const minStart = selected[0].startTime;
-        const maxEnd = Math.max(...selected.map((c) => c.startTime + c.duration));
-        const offset = maxEnd - minStart;
-        selected.forEach((clip) => {
-          store.addClip({
-            ...clip,
-            id: generateId("clip"),
-            startTime: clip.startTime + offset,
-          });
-        });
-        toast.success(`Duplicated ${selected.length} clip${selected.length > 1 ? "s" : ""}`);
+        clipboardService.duplicateClips(selectedClipIds);
       } else if (isMeta && e.key.toLowerCase() === "c") {
         e.preventDefault();
-        const store = useTimelineStore.getState();
-        const selected = store.clips.filter((c) => selectedClipIds.includes(c.id)).sort((a, b) => a.startTime - b.startTime);
-        if (selected.length === 0) return;
-        const minStart = selected[0].startTime;
-        copiedClipsClipboard = selected.map((clip) => ({
-          trackId: clip.trackId,
-          mediaId: clip.mediaId,
-          duration: clip.duration,
-          trimIn: clip.trimIn,
-          trimOut: clip.trimOut,
-          x: clip.x,
-          y: clip.y,
-          width: clip.width,
-          height: clip.height,
-          opacity: clip.opacity,
-          rotation: clip.rotation,
-          startOffset: clip.startTime - minStart,
-          aspectRatioLocked: clip.aspectRatioLocked,
-          sourceAspectRatio: clip.sourceAspectRatio,
-          fitMode: clip.fitMode,
-        }));
-        toast.info(`Copied ${copiedClipsClipboard.length} clip${copiedClipsClipboard.length > 1 ? "s" : ""}`);
+        clipboardService.copyClips(selectedClipIds);
+      } else if (isMeta && e.key.toLowerCase() === "x") {
+        e.preventDefault();
+        clipboardService.cutClips(selectedClipIds, false);
       } else if (isMeta && e.key.toLowerCase() === "v") {
         e.preventDefault();
-        if (copiedClipsClipboard.length === 0) return;
-        const store = useTimelineStore.getState();
-        copiedClipsClipboard.forEach((clip) => {
-          store.addClip({
-            id: generateId("clip"),
-            trackId: clip.trackId,
-            mediaId: clip.mediaId,
-            startTime: Math.max(0, transportTime + clip.startOffset),
-            duration: clip.duration,
-            trimIn: clip.trimIn,
-            trimOut: clip.trimOut,
-            x: clip.x,
-            y: clip.y,
-            width: clip.width,
-            height: clip.height,
-            opacity: clip.opacity,
-            rotation: clip.rotation,
-            aspectRatioLocked: clip.aspectRatioLocked,
-            sourceAspectRatio: clip.sourceAspectRatio,
-            fitMode: clip.fitMode,
-          });
-        });
-        toast.success(`Pasted ${copiedClipsClipboard.length} clip${copiedClipsClipboard.length > 1 ? "s" : ""}`);
+        clipboardService.pasteClips(transportTime);
       } else if (isMeta && e.shiftKey && e.key === "S") {
         e.preventDefault();
-        const result = swapClips();
+        const result = EditingActions.swapSelectedClips();
         if (result.error) {
           toast.error(result.error);
         }
@@ -239,7 +179,11 @@ export const useKeyboardShortcuts = () => {
             toast.info("No clips under playhead to split");
           } else {
             const successCount = results.filter((r) => r.success).length;
-            toast.success(`Split ${successCount} clip${successCount > 1 ? "s" : ""}`);
+            if (successCount > 0) {
+              toast.success(formatSplitMessage(results));
+            } else {
+              toast.error(results.find((result) => result.error)?.error || "Split failed");
+            }
           }
         } else {
           // PB-HIDDEN-005 fix: Ctrl+K splits only SELECTED clips at playhead
@@ -252,7 +196,11 @@ export const useKeyboardShortcuts = () => {
               toast.info("No selected clips under playhead to split");
             } else {
               const successCount = results.filter((r) => r.success).length;
-              toast.success(`Split ${successCount} selected clip${successCount > 1 ? "s" : ""}`);
+              if (successCount > 0) {
+                toast.success(formatSplitMessage(results));
+              } else {
+                toast.error(results.find((result) => result.error)?.error || "Split failed");
+              }
             }
           } else {
             // No selection — fall back to split all
@@ -261,7 +209,11 @@ export const useKeyboardShortcuts = () => {
               toast.info("No clips under playhead to split");
             } else {
               const successCount = results.filter((r) => r.success).length;
-              toast.success(`Split ${successCount} clip${successCount > 1 ? "s" : ""}`);
+              if (successCount > 0) {
+                toast.success(formatSplitMessage(results));
+              } else {
+                toast.error(results.find((result) => result.error)?.error || "Split failed");
+              }
             }
           }
         }
@@ -388,9 +340,14 @@ export const useKeyboardShortcuts = () => {
         }
 
         const store = useTimelineStore.getState();
+        const trackBefore = store.tracks.find((track) => track.id === selectedTrackId);
+        if (trackBefore?.locked) {
+          toast.info("Unlock the track before changing mute");
+          return;
+        }
         store.toggleTrackMute(selectedTrackId);
 
-        const track = store.tracks.find((t) => t.id === selectedTrackId);
+        const track = useTimelineStore.getState().tracks.find((t) => t.id === selectedTrackId);
         toast.info(track?.muted ? "Track muted" : "Track unmuted");
       } else if (isMeta && e.altKey && e.key.toLowerCase() === "p") {
         e.preventDefault();
@@ -462,7 +419,7 @@ export const useKeyboardShortcuts = () => {
           const failCount = results.length - successCount;
 
           if (successCount > 0) {
-            toast.success(`Split ${successCount} clip${successCount > 1 ? "s" : ""}`);
+            toast.success(formatSplitMessage(results));
           } else if (failCount > 0) {
             toast.error(results[0].error || "Split failed");
           }
@@ -490,7 +447,7 @@ export const useKeyboardShortcuts = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [transportTime, frameRate, selectedClipIds, previewMode, togglePlayback, pause, seek, setActiveContext, zoomByStep, fitSequence, selectClip, selectTrack, exitSourceMode, markSourceIn, markSourceOut, swapClips, addMarker, undo, redo]);
+  }, [transportTime, frameRate, selectedClipIds, previewMode, togglePlayback, pause, seek, setActiveContext, zoomByStep, fitSequence, selectClip, selectTrack, exitSourceMode, markSourceIn, markSourceOut, addMarker, undo, redo]);
 
   return { toastMessage: null };
 };

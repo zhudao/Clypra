@@ -6,6 +6,122 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-08-25
+
+### ⚡ Program Preview Performance
+
+- **Smoother native Program Preview playback and scrubbing** — removed high-frequency decoder console I/O from the frame path and kept native-surface diagnostics from blocking presentation.
+- **Native-surface playback telemetry** — added optional timings for decoder wait/decode, YUV conversion/upload, composition, surface acquisition, and present submission.
+- **RGBA readback telemetry** — separated compositor time from GPU readback/map time for paused seeking and scrubbing.
+- **Mode-aware preview statistics** — performance data is partitioned across playback, lookahead, seek, scrub, frame-step, and prefetch with P50/P95/P99 stage percentiles.
+- **Frontend preview tracing** — added bounded dispatch, IPC, and canvas-paint measurements keyed by request ID, generation, and frame index.
+- **Accurate cache metrics** — native-surface staging frames are no longer counted as RGBA frame-cache hits.
+
+## [1.4.3] - 2026-08-25
+
+### ✂️ Timeline Editing
+
+- **Ripple-left trim no longer creates a gap** — left-edge ripple trim now keeps the clip anchored at its start time; only `trimIn` and duration are updated, and downstream clips shift left cleanly.
+- **Atomic undo/redo for trim gestures** — every trim (including ripple-trim) is committed as one `TimelineTrimCommand` that restores clips, gaps, and downstream positions together.
+- **Atomic undo/redo for clip drag** — moving or dropping clips — including onto a new track — creates a single `TimelineDragCommand` entry; undo restores tracks, clips, gaps, and ordering exactly.
+- **New-track drops land at the pointer position** — clips no longer jump to `startTime = 0`; snapping remains active within 8 px of valid targets.
+- **Departure-gap closure** — when a clip moves to a new track only the gap it leaves behind is closed; earlier gaps on the source track are preserved.
+- **Split selects only the right clip** — after splitting, only the continuation clip is selected so Delete removes just the new half.
+- **Atomic split-all at playhead** — splitting all clips at once is wrapped in a single history transaction for a one-step undo.
+- **Swap clips is undoable** — `SwapClipsCommand` validates locks, same-track moves, and collisions before committing and updates transition references.
+- **Duplicate clips is undoable** — `DuplicateClipsCommand` regenerates IDs recursively through compound clip trees.
+
+### 🗂️ Clip Organisation
+
+- **Compound Clips (Group Clips)** — select multiple clips and press **Alt+G** (or use the context menu) to collapse them into one movable unit. Ungroup restores the originals. Compound clips are single-track only.
+- **Clip rename** — right-click any clip and choose **Rename Clip**, or use the context menu's rename item; the change is fully undoable.
+- **A-roll / B-roll visual hierarchy** — video tracks are now classified as A-roll (main, accent border) or B-roll (secondary, muted saturation) using `TrackVisualSpec`. Each track label shows a role icon.
+- **Media type labeling** — audio tracks display a waveform icon; text, sticker, effect, and filter tracks each have their own icon in the track label.
+- **Resize handles are selection-only** — trim handles are hidden on unselected clips, removing accidental resize interactions.
+
+### 🔊 Audio
+
+- **Detach Audio** — right-click a video clip and choose **Detach Audio** to split the embedded audio into an independent audio clip on its own track. The operation is undoable.
+- **Audio Extraction pipeline** — backend Tauri commands (`probe_media_streams`, `start_audio_extraction`, `cancel_media_job`, `get_media_job_result`) and a `mediaJobStore` lay the groundwork for background format-aware audio extraction.
+- **Audio decoder seek fix** — the native audio seek now uses the global microseconds time-base (`AV_TIME_BASE`) instead of the stream's sample-rate time-base, preventing mis-seeks on clips with non-zero `trimIn`.
+- **Preroll trimming** — decoded PCM preroll from keyframe-aligned seeks is trimmed before mixing so the audio starts at the exact requested source position.
+- **Detached audio is invisible to the compositor** — clips with `kind === "audio"` are excluded from the visual evaluator and `PreviewMediaPool` video-element allocation.
+
+### ⚡ Performance & Playback
+
+- **Adaptive scrub quality** — playhead drag velocity is tracked in real time; fast scrubs request `quarter` or `half` quality and settle on a full-quality frame on release.
+- **Seek generation tracking** — `SeekController` assigns a monotonically increasing generation to every seek so stale decode results can never overwrite a newer frame.
+- **Native batch cancel** — `cancel_native_preview_requests` stops FFmpeg work at packet and frame boundaries when a newer seek arrives, with per-request `AbortController` cancellation in the JS scheduler.
+- **Hardware acceleration re-enabled** — VideoToolbox (macOS), D3D11VA (Windows), and VAAPI (Linux) are active again with a `get_format` callback for per-frame pixel format negotiation.
+- **Native playback queue doubled** — queue capacity increased from 3 to 6 frames for smoother continuous playback.
+- **Filmstrip batch decode** — missing tiles are collected across an entire request, sorted chronologically, and decoded in chunks of 12 with a single GOP seek per chunk.
+- **L0 tile pinning** — coarse filmstrip tiles (L0) are protected from LRU eviction; dense L1–L3 tiles absorb all eviction pressure first.
+- **Per-file decode mutex** — concurrent zoom/scroll batch requests queue behind a per-file async mutex so the decoder is never stampeded.
+- **RAF-coalesced zoom slider** — toolbar zoom drag now coalesces pointer move events to one update per animation frame.
+- **Fit-sequence clamping fix** — "Fit Sequence" no longer clamps the zoom floor away; the overview level is preserved.
+
+### 📊 Metrics & Telemetry
+
+- **A/V sync metrics** — frontend (`syncMetrics.ts`) and Rust (`sync_metrics.rs`) modules track clock/poll drift, frame pacing jank, dropped frames, and end-to-end seek latency.
+- **Filmstrip metrics HUD** — press **Cmd+Shift+M** to open the live debug overlay showing per-tier decode/convert timing (SRC, L0–L3), cache hit rates, A/V drift p95, UI playhead drift, and native seek correctness.
+- **5-second aggregate logs** — both the Rust and JS metric collectors emit structured summaries every 5 seconds for profiling without log flood.
+- **Per-stage timing** — batch decode now records separate seek, decode, convert, and serialize durations per tier.
+
+### 🛠️ Editor & UX
+
+- **Right-click context menus** — clip and empty-space context menus are available throughout the timeline with viewport-aware flip placement, grouped items, disabled-state hints, and keyboard shortcut labels.
+- **Command registry** — all timeline editing actions (split, trim, delete, duplicate, swap, group, rename, close gaps) are routed through a shared `clipCommands`/`timelineCommands` registry for consistent keyboard, toolbar, and context-menu behavior.
+- **Close All Gaps** — new toolbar command packs every unlocked track in one undoable transaction.
+- **Preview scrub follows timeline** — paused preview scrubs keep the timeline playhead visible; selecting a clip from the program monitor scrolls it into view without jumping if it is already partially visible.
+- **Active clip highlight** — clips under the program preview playhead glow with a subtle accent ring in program mode.
+- **Full process exit on window close** — closing the app now calls `exit(0)` (macOS: `CloseRequested` handler) so the process does not linger after the window is dismissed.
+- **Updater manifest URL rewrite** — CI now rewrites GitHub API asset URLs to direct public download URLs in `latest.json` and `updater.json` before publishing, fixing auto-update on all platforms.
+
+## [1.4.2] - 2026-08-24
+
+### 🖱️ Timeline Context Menus & Command Orchestration
+
+- **Clip & Empty-Space Context Menus**: Introduced right-click context menus for timeline clips (`ClipContextMenu`) and empty track regions (`TimelineEmptySpaceContextMenu`), providing instant access to essential editing workflows (Cut, Copy, Duplicate, Split Clip at Playhead, Ripple Delete, Delete, Mute/Unmute, and Properties).
+- **Viewport-Aware Context Menu Placement**: Upgraded `ContextMenu` with automated viewport collision detection and flip placement, grouped item support with visual dividers, disabled item states, and shortcut hint badges.
+- **Unified Command Layer**: Added `useClipCommands` and `useTimelineCommands` hooks to centralize clip action execution across context menus, the timeline toolbar, and keyboard shortcuts.
+- **Structured Clipboard Engine**: Introduced `ClipboardService` for structured multi-clip copy/paste and duplication with track index mapping, playhead offset calculation, and duplicate placement offsets.
+
+### ⚡ Filmstrip & Thumbnail Decoding Optimizations
+
+- **Single-Seek Forward GOP Sweep (`decode_frames_batch_full_res`)**: Accelerated batch thumbnail decoding in Rust by replacing repeated per-frame seeks with a single forward keyframe sweep per chunk.
+- **Optimized Hardware Decoding & Color Conversion**: Added static HW-to-CPU frame transfers, format callbacks, `FAST_BILINEAR` 1:1 color conversion, and zero-swscale YUV420P→NV12 conversion paths.
+- **Multi-Tier Raster & Pyramid Fallback**: Enhanced `webglRasterSurface` and `FilmstripTileCache` with L0 thumbnail protection/pinning during time-eviction, two-pass LRU cache eviction, and seamless pyramid fallback resolution during high-speed zoom and scrub.
+- **Batch Serialization & Coalescing**: Added file-level mutex gating to prevent concurrent duplicate decodes of identical video files, normalized spatial tiers, and coalesced in-flight native batches.
+- **Timeline Zoom Spring Synchronization**: Enhanced `useTimelineZoomSpring` and epoch debounce mechanisms to guarantee continuous zooming SLA (sub-150ms resolution) and prevent clip render churn.
+
+### 📊 Real-Time Metrics & Performance HUD
+
+- **Live Filmstrip Performance HUD (`FilmstripMetricsOverlay`)**: Added an in-editor diagnostics HUD toggled via `Cmd+Shift+M` (macOS) / `Ctrl+Shift+M` (Windows/Linux) showing real-time frontend render timings and native Rust backend stats.
+- **Frontend Telemetry**: Added telemetry tracking per-tier decode rates, request dispatch frequencies, cache hits/misses, first-artifact latencies, and paint commit durations.
+- **Rust Backend Metrics Snapshot**: Added `get_decode_metrics_snapshot` Tauri invoke command backed by atomic metrics accumulators in the thumbnail engine.
+
+### 🎯 UI Polish & Frontend React Optimization
+
+- **Selective Store Subscriptions & Memoization**: Applied granular store selectors and `React.memo` across `TopBar`, `PropertiesPanel`, `Sidebar`, and `TimelineToolbar` to eliminate redundant re-render cycles.
+- **Playback Clock Decoupling (`usePlaybackStatus`)**: Replaced high-frequency requestAnimationFrame clock subscriptions in timeline containers with discrete playback status hooks, stopping timeline re-renders on pure time ticks.
+- **Reusable Outside-Click Dismissal (`useClickOutside`)**: Unified outside-click and Escape dismissal across layout menus, speed/aspect/quality popovers, and context menus.
+- **Popover Stacking & Positioning**: Resolved stacking context and clipping issues in `PreviewTransport` popovers.
+
+### 🖼️ Project Thumbnail Service
+
+- **Background Project Cover Generation**: Added `ProjectThumbnailService` to automatically generate and cache project preview thumbnails in the background during save without blocking the UI thread or marking projects as dirty.
+- **Auto-Save Suppression on Hydration**: Suppressed auto-save triggers during initial project loading and state hydration.
+
+### 🐛 Bug Fixes & Process Lifecycle
+
+- **macOS Window Close Process Exit**: Fixed a process hang on macOS window close by listening to the `CloseRequested` window event and cleanly terminating the process across all project states.
+- **Auto-Updater Manifest Public URLs**: Fixed auto-updater manifest generation in CI to rewrite GitHub API asset URLs to public download URLs, ensuring unauthenticated clients can fetch update binaries reliably.
+- **Cleaned Up Diagnostic Logs**: Removed noisy console logs and `eprintln` spam from hot rendering and playback paths.
+
+### 🧪 Test Verification
+
+- **Comprehensive Test Suite**: Verified 100% pass rate across all 238 frontend test files (1,989 unit/integration tests) and 161 Rust backend unit and stress tests.
+
 ## [1.4.1] - 2026-08-23
 
 ### 🔊 Native Audio Playback

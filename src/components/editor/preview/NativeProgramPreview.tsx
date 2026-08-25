@@ -20,22 +20,28 @@ import { formatTime } from "@/lib/utils/timeFormatting";
 import { refitClipsForCanvasChange } from "@/lib/timeline/refitClips";
 import { useAudioSyncEngine } from "@/hooks/useAudioSyncEngine";
 
-import { type TelemetryStats } from "./TelemetryOverlay";
+import { TelemetryOverlay, type TelemetryStats } from "./TelemetryOverlay";
 import { AspectSelector } from "./AspectSelector";
 import { PlaybackSpeedSelector } from "./PlaybackSpeedSelector";
 import { PlaybackQualitySelector } from "./PlaybackQualitySelector";
 import { VolumeControl } from "./VolumeControl";
 import { getCanvasBackgroundLayer } from "./canvasBackground";
 import { drawCanvasBackground } from "@/core/render/canvasBackground";
-import { captureCanvasThumbnail } from "@/lib/media/projectThumbnail";
 import { getFrameIndexAtTime, getFrameStartTime } from "@/lib/utils/frameTime";
-import { tracePlayback } from "@/core/playback/playbackTrace";
+import { clampAndSnapProgramTime } from "@/lib/timeline/programTimelineBridge";
+import { getPlaybackMetricsSnapshot, tracePlayback } from "@/core/playback/playbackTrace";
+import { getSyncMetricsSnapshot, startSyncMetricsFlushLoop } from "@/lib/playback/syncMetrics";
+import { nativePerfCollector, type NativePerfSpan } from "@/core/playback/nativePerfTelemetry";
+import type { SeekIntent } from "@/core/playback/seekController";
 import {
   getNativePreviewSurfaceGeometry,
   hideNativeSurface,
+  cancelNativePreviewRequests,
   isTauriRuntime,
   onNativePreviewWindowMoved,
   presentNativeFrame,
+  getNativeFrameServiceStats,
+  getNativeSyncMetricsSnapshot,
   queueNativeFrame,
   registerNativeRasterAsset,
   probeNativeSurface,
@@ -121,8 +127,14 @@ export const NativeProgramPreview: React.FC = () => {
 
   const clockState = usePlaybackClock();
   const clock = getPlaybackClock();
-  const { seek, setSpeed, setDuration, setFrameRate } = usePlaybackControls();
-  const { play: transportPlay, pause: transportPause, setActiveContext } = useTransportControls();
+  const { setDuration, setFrameRate } = usePlaybackControls();
+  const {
+    play: transportPlay,
+    pause: transportPause,
+    seek: transportSeek,
+    setSpeed: transportSetSpeed,
+    setActiveContext,
+  } = useTransportControls();
 
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(100);
@@ -227,6 +239,62 @@ export const NativeProgramPreview: React.FC = () => {
   });
 
   showTelemetryRef.current = showTelemetry;
+
+  useEffect(() => {
+    if (!showTelemetry) {
+      setTelemetryStats(null);
+      return;
+    }
+
+    startSyncMetricsFlushLoop();
+    let active = true;
+    const flushMetrics = async () => {
+      const snapshot = getPlaybackMetricsSnapshot();
+      const frontendSync = getSyncMetricsSnapshot();
+      const [nativeSync, nativeRender] = await Promise.all([
+        getNativeSyncMetricsSnapshot().catch(() => null),
+        getNativeFrameServiceStats().catch(() => null),
+      ]);
+      if (!active) return;
+      const hasNativeDrift = Boolean(nativeSync && nativeSync.av_drift.n > 0);
+      const hasNativeSeeks = Boolean(nativeSync && nativeSync.seeks.n > 0);
+      const lastRender = nativeRender?.lastSample;
+      const cacheTotal = snapshot.cacheHits + snapshot.cacheMisses;
+      const next: TelemetryStats = {
+        avgEvaluationTimeMs: lastRender ? lastRender.decodeTimeUs / 1000 : 0,
+        avgRasterTimeMs: lastRender ? (lastRender.readbackTimeUs + (lastRender.presentTimeUs ?? 0)) / 1000 : 0,
+        avgTotalTimeMs: lastRender ? lastRender.totalTimeUs / 1000 : snapshot.seekP95Ms ?? 0,
+        cacheHitRate: nativeRender?.windowCacheHitRate ?? (cacheTotal > 0 ? snapshot.cacheHits / cacheTotal : 0),
+        active: nativeRender?.windowRequestCount ?? 0,
+        droppedFrames: Math.max(snapshot.droppedFrames, nativeSync?.dropped_frames ?? 0, nativeRender?.windowDroppedFrames ?? 0),
+        driftMagnitude: hasNativeDrift ? nativeSync!.av_drift.max_abs_micros / 1_000_000 : snapshot.maxDriftMs / 1000,
+        seekP50Ms: nativeRender?.windowSeekP50Ms ?? (hasNativeSeeks ? nativeSync!.seeks.avg_latency_micros / 1000 : snapshot.seekP50Ms),
+        seekP95Ms: nativeRender?.windowSeekP95Ms ?? (hasNativeSeeks ? nativeSync!.seeks.max_latency_micros / 1000 : snapshot.seekP95Ms),
+        seekP99Ms: snapshot.seekP99Ms,
+        avDriftP95Ms: hasNativeDrift ? nativeSync!.av_drift.p95_abs_micros / 1000 : 0,
+        uiPlayheadDriftAvgMs: frontendSync.ui_playhead_drift.avg,
+        uiPlayheadDriftMaxMs: frontendSync.ui_playhead_drift.maxAbs,
+        paintIntervalAvgMs: frontendSync.playhead_paint_jitter.avg,
+        framePacingJank: nativeSync?.frame_pacing.jank_events ?? 0,
+        nativeSeekAvgMs: hasNativeSeeks ? nativeSync!.seeks.avg_latency_micros / 1000 : null,
+        nativeSeekMaxMs: hasNativeSeeks ? nativeSync!.seeks.max_latency_micros / 1000 : null,
+        nativeSeekCorrect: hasNativeSeeks ? nativeSync!.seeks.correct : 0,
+        nativeSeekCount: hasNativeSeeks ? nativeSync!.seeks.n : 0,
+        staleFrames: Math.max(snapshot.staleFrames, nativeRender?.windowStaleFrames ?? 0),
+        cancelledFrames: Math.max(snapshot.cancelledFrames, nativeRender?.windowCancelledFrames ?? 0),
+        cacheMisses: nativeRender ? nativeRender.cacheMisses : snapshot.cacheMisses,
+      };
+      telemetryRef.current = next;
+      setTelemetryStats(next);
+    };
+
+    void flushMetrics();
+    const interval = window.setInterval(() => void flushMetrics(), 250);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [showTelemetry]);
   renderStateRef.current.clips = clips;
   renderStateRef.current.tracks = tracks;
   renderStateRef.current.transitions = transitions;
@@ -585,8 +653,9 @@ export const NativeProgramPreview: React.FC = () => {
     let nativeSurfaceShown = false;
     let lastNativePlaybackRequestKey = "";
     let visibleRequestKey = "";
-    let visibleRequestGeneration = 0;
-    let prefetchCenterKey = "";
+    const seekController = getActiveSessionOrNull()?.transportAuthority?.getSeekController();
+    let latestSeekIntent: SeekIntent | null = seekController?.getCurrent() ?? null;
+    let visibleRequestGeneration = seekController?.getGeneration() ?? 0;
     let transportRevision = 0;
     const nativeTextRasterCache = new Map<string, Promise<NativeTextRasterAsset>>();
     const registeredNativeTextAssets = new Set<string>();
@@ -600,6 +669,7 @@ export const NativeProgramPreview: React.FC = () => {
     const registeredNativeAnimatedStickerAssets = new Set<string>();
     const nativeBackgroundAssetsById = new Map<string, NativeRasterLayerSnapshot & { rgba: number[] }>();
     const registeredNativeBackgroundAssets = new Set<string>();
+    const nativeFrontendPerfSpans = new Map<string, NativePerfSpan>();
     const maxNativeTextRasterCacheEntries = 96;
     const maxNativeBodyMaskCacheEntries = 90;
     const maxNativeSmartOverlayCacheEntries = 48;
@@ -948,8 +1018,24 @@ export const NativeProgramPreview: React.FC = () => {
     const nativePreviewScheduler = new NativePreviewFrameScheduler({
       maxCacheEntries: 12,
       maxInFlight: 2,
-      load: async (request) => {
-        const render = () => renderNativeFrame(request);
+      load: async (request, signal) => {
+        if (signal?.aborted) {
+          throw new DOMException("Native preview request cancelled", "AbortError");
+        }
+        const requestKey = getNativeFrameRequestKey(request);
+        const frontendSpan = nativePerfCollector.isEnabled()
+          ? nativePerfCollector.begin(request)
+          : null;
+        frontendSpan?.markDispatchStarted();
+        if (frontendSpan) nativeFrontendPerfSpans.set(requestKey, frontendSpan);
+        const render = async () => {
+          frontendSpan?.markIpcStarted();
+          try {
+            return await renderNativeFrame(request);
+          } finally {
+            frontendSpan?.markIpcFinished();
+          }
+        };
         let rgba: ArrayBuffer;
         try {
           rgba = await render();
@@ -966,6 +1052,22 @@ export const NativeProgramPreview: React.FC = () => {
           height: request.outputHeight,
         };
       },
+    });
+
+    const unsubscribeSeekIntent = seekController?.subscribe((intent) => {
+      latestSeekIntent = intent;
+      visibleRequestGeneration = Math.max(visibleRequestGeneration, intent.generation);
+      nativePreviewScheduler.setVisibleGeneration(intent.generation);
+      void cancelNativePreviewRequests(intent.generation).catch(() => undefined);
+      forceRenderNeeded = true;
+      tracePlayback("seek.intent", {
+        requestId: intent.requestId,
+        generation: intent.generation,
+        mode: intent.mode,
+        targetTime: intent.time,
+        quality: intent.quality,
+        velocityPxPerSecond: intent.velocityPxPerSecond,
+      });
     });
 
     const presentNativePlaybackFrame = async (request: NativeFrameRequest) => {
@@ -1001,6 +1103,17 @@ export const NativeProgramPreview: React.FC = () => {
       const frameRate = state.project?.frameRate ?? 30;
       const frameIndex = getFrameIndexAtTime(timeToRender, frameRate);
       const frameStartTime = getFrameStartTime(timeToRender, frameRate);
+      const requestIntent = latestSeekIntent
+        ? {
+            generation: latestSeekIntent.generation,
+            mode: isPlaying && latestSeekIntent.mode !== "scrub" ? "playback" as const : latestSeekIntent.mode,
+            quality: isPlaying && latestSeekIntent.mode !== "scrub" ? "full" as const : latestSeekIntent.quality,
+            velocityPxPerSecond: latestSeekIntent.velocityPxPerSecond,
+            requestedAtMs: latestSeekIntent.issuedAtMs,
+          }
+        : isPlaying
+          ? { mode: "playback" as const, quality: "full" as const }
+          : undefined;
 
       const timeChanged = frameIndex !== lastRenderedFrameIndex;
       const epochChanged = state.epoch !== lastRenderedEpoch;
@@ -1069,6 +1182,7 @@ export const NativeProgramPreview: React.FC = () => {
         state.canvasWidth,
         state.canvasHeight,
         nativeRasterLayers,
+        requestIntent,
       );
       let nativePlaybackRequest = nativeRequest;
       if (isPlaying && nativeRequest && nativePresentationLatencyMs > 0) {
@@ -1118,6 +1232,9 @@ export const NativeProgramPreview: React.FC = () => {
               state.canvasWidth,
               state.canvasHeight,
               [...lookAheadBackground, ...lookAheadTextRasters, ...lookAheadAnimatedStickers, ...lookAheadSmartOverlays],
+              requestIntent
+                ? { ...requestIntent, mode: "playback-lookahead" as const }
+                : { mode: "playback-lookahead" as const, quality: "full" as const },
             ) ?? nativeRequest;
           }
         }
@@ -1150,7 +1267,6 @@ export const NativeProgramPreview: React.FC = () => {
         visibleRequestKey = nativeRequestKey;
         visibleRequestGeneration += 1;
         nativePreviewScheduler.setVisibleGeneration();
-        prefetchCenterKey = "";
       }
       const targetGeneration = visibleRequestGeneration;
       // Do not hand the visible surface to native video until native audio has
@@ -1242,21 +1358,30 @@ export const NativeProgramPreview: React.FC = () => {
               requestKey,
               frameIndex: requestToPresent.frameTime.frameIndex,
               request: requestToPresent,
+              generation: targetGeneration,
             };
 
             if (nativeSurfaceUsable) {
+              const frontendSpan = nativePerfCollector.isEnabled()
+                ? nativePerfCollector.begin(requestToPresent)
+                : null;
+              frontendSpan?.markDispatchStarted();
+              frontendSpan?.markIpcStarted();
               nativePlaybackInFlight = presentNativePlaybackFrame(requestToPresent)
                 .then((presentation) => {
+                  frontendSpan?.markIpcFinished();
                   const elapsedMs = performance.now() - requestStartedAt;
                   nativePresentationLatencyMs = nativePresentationLatencyMs > 0
                     ? nativePresentationLatencyMs * 0.75 + elapsedMs * 0.25
                     : elapsedMs;
                   if (!presentation.presented) {
+                    frontendSpan?.finish({ dropped: presentation.dropped, stale: presentation.stale === true });
                     lastNativePlaybackRequestKey = "";
                     if (presentation.dropped) {
                       nativeDroppedFrameCount += 1;
                     }
                   } else {
+                    frontendSpan?.finish();
                     const current = renderStateRef.current;
                     if (
                       isActive &&
@@ -1280,6 +1405,8 @@ export const NativeProgramPreview: React.FC = () => {
                   }
                 })
                 .catch((error) => {
+                  frontendSpan?.markIpcFinished();
+                  frontendSpan?.finish({ dropped: true });
                   nativeContinuousFailureStreak += 1;
                   lastNativePlaybackRequestKey = "";
                   if (nativeContinuousFailureStreak >= 3) {
@@ -1301,6 +1428,9 @@ export const NativeProgramPreview: React.FC = () => {
               nativePlaybackInFlight = nativePreviewScheduler
                 .requestVisible(requestSource)
                 .then((frame) => {
+                  const frontendSpan = nativeFrontendPerfSpans.get(requestKey);
+                  frontendSpan?.finish();
+                  nativeFrontendPerfSpans.delete(requestKey);
                   const current = renderStateRef.current;
                   if (
                     isActive &&
@@ -1316,6 +1446,9 @@ export const NativeProgramPreview: React.FC = () => {
                   }
                 })
                 .catch((error) => {
+                  const frontendSpan = nativeFrontendPerfSpans.get(requestKey);
+                  frontendSpan?.finish({ stale: true, cancelled: error instanceof DOMException && error.name === "AbortError" });
+                  nativeFrontendPerfSpans.delete(requestKey);
                   nativeContinuousFailureStreak += 1;
                   lastNativePlaybackRequestKey = "";
                   if (nativeContinuousFailureStreak >= 3) {
@@ -1384,12 +1517,16 @@ export const NativeProgramPreview: React.FC = () => {
                 requestKey: nativeRequestKey,
                 frameIndex,
                 request: requestForRender,
+                generation: targetGeneration,
               };
               const loadedFrame = await nativePreviewScheduler.requestVisible(visibleSource);
               // A seek or play action may have happened while native decode
               // was awaiting FFmpeg/GPU readback. Never commit that stale
               // response to the current program canvas.
               if (!targetStillCurrent()) {
+                const frontendSpan = nativeFrontendPerfSpans.get(nativeRequestKey);
+                frontendSpan?.finish({ stale: true });
+                nativeFrontendPerfSpans.delete(nativeRequestKey);
                 tracePlayback("native-render.stale-seek-frame", {
                   requestedTime: timeToRender,
                   requestedFrameIndex: frameIndex,
@@ -1427,6 +1564,12 @@ export const NativeProgramPreview: React.FC = () => {
                 blocked: nativeBlockedKey === nativeRequestKey,
                 error: error instanceof Error ? error.message : String(error),
               });
+              const frontendSpan = nativeFrontendPerfSpans.get(nativeRequestKey);
+              frontendSpan?.finish({
+                stale: error instanceof Error && /stale|cancel/i.test(error.message),
+                cancelled: error instanceof DOMException && error.name === "AbortError",
+              });
+              nativeFrontendPerfSpans.delete(nativeRequestKey);
               nativeRetryAt = performance.now() + 250;
               if (nativeOnlyMode) {
                 setNativeOnlyBlocked(true);
@@ -1435,53 +1578,33 @@ export const NativeProgramPreview: React.FC = () => {
             }
           }
 
-          // Prefetch only after the visible request is satisfied. The visible
-          // frame therefore always wins the decoder/GPU budget over lookahead.
-          if (nativePausedReadbackPath && exactNativeFrame && prefetchCenterKey !== nativeRequestKey) {
-            const durationFrames = Math.max(0, Math.ceil(state.clock.duration * frameRate));
-            const prefetchSources: NativePreviewRequestSource[] = [];
-            for (const offset of [1, 2, 3, 4, 5, 6, -1, -2]) {
-              const targetFrameIndex = frameIndex + offset;
-              if (targetFrameIndex < 0 || (durationFrames > 0 && targetFrameIndex >= durationFrames)) continue;
-
-              const targetTime = getFrameStartTime(targetFrameIndex / frameRate, frameRate);
-              const targetScene = evaluateTimelineSceneCached(
-                targetTime,
-                state.clips,
-                state.tracks,
-                state.mediaAssets,
-                state.project,
-                state.epoch,
-                state.transitions,
-                state.sceneVersions,
-              );
-              const targetRequest = buildNativeFrameRequest(
-                targetScene,
-                `${state.project?.id ?? "unknown-project"}:${state.epoch}`,
-                targetFrameIndex,
-                frameRate,
-                state.canvasWidth,
-                state.canvasHeight,
-              );
-              if (!targetRequest) continue;
-              prefetchSources.push({
-                requestKey: getNativeFrameRequestKey(targetRequest),
-                frameIndex: targetFrameIndex,
-                request: targetRequest,
-                priority: offset > 0 ? offset : 10 + Math.abs(offset),
-              });
-            }
-            nativePreviewScheduler.prefetch(prefetchSources);
-            prefetchCenterKey = nativeRequestKey;
-          }
+          // Do not speculative-prefetch paused readback frames. Each item would
+          // trigger a full GPU composition plus RGBA readback, and all requests
+          // for one source serialize on its decoder mutex. On a seek this turns
+          // eight background frames into visible latency for the next target.
+          // Playback lookahead uses the retained native surface path instead.
 
           if (!targetStillCurrent()) {
             forceRenderNeeded = true;
             return;
           }
 
-          if (nativeFrame && canvasEl && !drawNativeFrameToCanvas(canvasEl, nativeFrame)) {
-            throw new Error("Native preview returned a frame that could not be drawn to the preview canvas");
+          let canvasPaintMs: number | undefined;
+          if (nativeFrame && canvasEl) {
+            const canvasPaintStarted = performance.now();
+            if (!drawNativeFrameToCanvas(canvasEl, nativeFrame)) {
+              throw new Error("Native preview returned a frame that could not be drawn to the preview canvas");
+            }
+            canvasPaintMs = performance.now() - canvasPaintStarted;
+          }
+          if (nativeFrame && canvasEl && exactNativeFrame !== null) {
+            const frontendSpan = nativeFrontendPerfSpans.get(nativeRequestKey);
+            if (frontendSpan) {
+              frontendSpan.finish({
+                canvasPaintMs,
+              });
+              nativeFrontendPerfSpans.delete(nativeRequestKey);
+            }
           }
 
           // Smart overlays are already rasterized into the native request. The
@@ -1504,20 +1627,6 @@ export const NativeProgramPreview: React.FC = () => {
           if (state.clock.isSeeking && nativeFrameReady) {
             state.clock.completeSeek();
           }
-
-          // Live program preview thumbnail sync: capture frame snapshot when paused / seeking finished.
-          // Audit 1.6 fix: `!playbackState` was always false because playbackState is a non-empty
-          // string. Replaced with an explicit check for non-playing states.
-          if (playbackState !== "playing" && nativeFrameReady && !state.clock.isSeeking) {
-            if (thumbnailDebounceTimer) clearTimeout(thumbnailDebounceTimer);
-            thumbnailDebounceTimer = setTimeout(() => {
-              if (!isActive || !canvasEl) return;
-              const thumbnailDataUrl = captureCanvasThumbnail(canvasEl, 640, 0.85);
-              if (thumbnailDataUrl && thumbnailDataUrl !== useProjectStore.getState().project?.thumbnail) {
-                useProjectStore.getState().setProjectThumbnail(thumbnailDataUrl);
-              }
-            }, 500);
-          }
         } catch (err) {
         }
       }
@@ -1538,8 +1647,6 @@ export const NativeProgramPreview: React.FC = () => {
       }
     };
 
-    let thumbnailDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
     let lastSubscriberClockState: "playing" | "paused" | "stopped" = clock.state;
     const unsubscribeClock = clock.subscribe((newClockState) => {
       forceRenderNeeded = true;
@@ -1556,7 +1663,6 @@ export const NativeProgramPreview: React.FC = () => {
       if (wasStateChange) {
         visibleRequestGeneration += 1;
         nativePreviewScheduler.setVisibleGeneration();
-        prefetchCenterKey = "";
         // A play/pause/stop transition is a new opportunity for native decode.
         // Clear the per-target circuit breaker without re-enabling retries every RAF.
         nativeBlockedKey = "";
@@ -1569,15 +1675,9 @@ export const NativeProgramPreview: React.FC = () => {
     return () => {
       isActive = false;
       unsubscribeClock();
+      unsubscribeSeekIntent?.();
       nativePreviewScheduler.dispose();
       nativeAnimatedStickerRenderer.dispose();
-      if (thumbnailDebounceTimer) clearTimeout(thumbnailDebounceTimer);
-      if (canvasEl) {
-        const finalDataUrl = captureCanvasThumbnail(canvasEl, 640, 0.85);
-        if (finalDataUrl && finalDataUrl !== useProjectStore.getState().project?.thumbnail) {
-          useProjectStore.getState().setProjectThumbnail(finalDataUrl);
-        }
-      }
       if (rafId !== null) cancelAnimationFrame(rafId);
       frameScheduled = false;
     };
@@ -1624,12 +1724,16 @@ export const NativeProgramPreview: React.FC = () => {
         <span className="text-[13px] text-text-muted leading-none">
           — {isTauriRuntime() ? (nativeSurfacePresenting ? "wgpu Surface" : "Native readback") : "Open the desktop runtime"}
         </span>
-        <button onClick={() => setShowSafeOverlay((s) => !s)} className={cn("ml-auto px-2 h-6 rounded text-[10px] font-medium transition-colors cursor-pointer", showSafeOverlay ? "bg-accent/20 text-accent" : "text-text-muted hover:text-text-primary hover:bg-white/6")}>
+        <button onClick={() => setShowTelemetry((s) => !s)} className={cn("ml-auto px-2 h-6 rounded text-[10px] font-medium transition-colors cursor-pointer", showTelemetry ? "bg-accent/20 text-accent" : "text-text-muted hover:text-text-primary hover:bg-white/6")}>
+          Metrics
+        </button>
+        <button onClick={() => setShowSafeOverlay((s) => !s)} className={cn("px-2 h-6 rounded text-[10px] font-medium transition-colors cursor-pointer", showSafeOverlay ? "bg-accent/20 text-accent" : "text-text-muted hover:text-text-primary hover:bg-white/6")}>
           Safe Zones
         </button>
       </div>
 
       <div className="flex-1 flex items-center justify-center overflow-hidden bg-[#06080a] relative">
+        <TelemetryOverlay showTelemetry={showTelemetry} telemetryStats={telemetryStats} />
         <div ref={previewContainerCallback} onPointerDownCapture={handlePreviewPointerDownCapture} className={cn("w-full h-full flex items-center justify-center relative z-10 overflow-hidden", isPanning && "cursor-grabbing", spacePressed && !isPanning && "cursor-grab")}>
           <div ref={nativeSurfaceTargetRef} data-testid="program-preview-viewport" className="relative flex shrink-0 items-center justify-center overflow-visible shadow-[0_0_40px_rgba(0,0,0,0.36)]" style={{ width: displayWidth, height: displayHeight }}>
             <>
@@ -1717,22 +1821,22 @@ export const NativeProgramPreview: React.FC = () => {
         }}
         onSeek={(time) => {
           if (clips.length === 0) return;
-          seek(time);
+          transportSeek(clampAndSnapProgramTime(time, duration, frameRate));
         }}
         formatTime={formatTime}
         onStepBack={() => {
           if (clips.length === 0) return;
           const targetTime = Math.max(0, currentTime - step);
-          seek(targetTime);
+          transportSeek(clampAndSnapProgramTime(targetTime, duration, frameRate), { mode: "frameStep", quality: "full" });
         }}
         onStepForward={() => {
           if (clips.length === 0) return;
           const targetTime = Math.min(duration, currentTime + step);
-          seek(targetTime);
+          transportSeek(clampAndSnapProgramTime(targetTime, duration, frameRate), { mode: "frameStep", quality: "full" });
         }}
         leftActions={
           <div className="relative" ref={speedMenuRef}>
-            <PlaybackSpeedSelector playbackSpeed={playbackSpeed} speedMenuOpen={speedMenuOpen} setSpeedMenuOpen={setSpeedMenuOpen} setSpeed={setSpeed} />
+            <PlaybackSpeedSelector playbackSpeed={playbackSpeed} speedMenuOpen={speedMenuOpen} setSpeedMenuOpen={setSpeedMenuOpen} setSpeed={transportSetSpeed} />
           </div>
         }
         rightActions={

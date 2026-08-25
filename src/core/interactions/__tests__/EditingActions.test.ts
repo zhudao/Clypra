@@ -70,10 +70,43 @@ describe("EditingActions split interactions", () => {
     const rightClip = clips.find((clip) => clip.id === result.rightClipId);
 
     expect(result.success).toBe(true);
+    expect(result.clipName).toBe("Untitled clip");
     expect(result.rightClipId).toBeDefined();
     expect(rightClip).toBeDefined();
     expect(rightClip?.startTime).toBeCloseTo(snappedTime, 6);
-    expect(useUIStore.getState().selectedClipIds).toEqual([result.leftClipId, result.rightClipId]);
+    expect(useUIStore.getState().selectedClipIds).toEqual([result.rightClipId]);
+  });
+
+  it("renames a clip through the undoable command path", () => {
+    useTimelineStore.setState({ clips: [makeClip({ name: "Antler.mp4" })] });
+
+    const result = EditingActions.renameClip("clip-1", "A-roll");
+
+    expect(result).toEqual({ success: true, name: "A-roll" });
+    expect(useTimelineStore.getState().clips[0].name).toBe("A-roll");
+
+    useHistoryStore.getState().undo();
+    expect(useTimelineStore.getState().clips[0].name).toBe("Antler.mp4");
+  });
+
+  it("deletes only the selected right split after splitting", () => {
+    const result = EditingActions.executeSplit({
+      clipId: "clip-1",
+      time: 5,
+      source: "click",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.rightClipId).toBeDefined();
+
+    const selectedClipIds = useUIStore.getState().selectedClipIds;
+    expect(selectedClipIds).toEqual([result.rightClipId]);
+
+    EditingActions.deleteSelection(selectedClipIds);
+
+    const remainingClips = useTimelineStore.getState().clips;
+    expect(remainingClips).toHaveLength(1);
+    expect(remainingClips[0].id).toBe(result.leftClipId);
   });
 
   it("rejects split when the requested time snaps to a clip boundary", () => {
@@ -122,5 +155,25 @@ describe("EditingActions split interactions", () => {
     });
     EditingActions.deleteSelection(["left"], true);
     expect(useTimelineStore.getState().clips.find((clip) => clip.id === "right")?.startTime).toBe(5);
+  });
+
+  it("restores lift-deleted clip order and gaps on undo", () => {
+    useTimelineStore.setState({
+      clips: [
+        makeClip({ id: "left", startTime: 0, duration: 5, trimOut: 5 }),
+        makeClip({ id: "middle", startTime: 5, duration: 5, trimIn: 5, trimOut: 10 }),
+        makeClip({ id: "right", startTime: 10, duration: 5, trimIn: 10, trimOut: 15 }),
+      ],
+      gaps: [],
+    });
+
+    EditingActions.deleteSelection(["middle"], true);
+    expect(useTimelineStore.getState().gaps).toHaveLength(1);
+
+    useHistoryStore.getState().undo();
+
+    const restored = useTimelineStore.getState();
+    expect(restored.clips.map((clip) => clip.id)).toEqual(["left", "middle", "right"]);
+    expect(restored.gaps).toEqual([]);
   });
 });

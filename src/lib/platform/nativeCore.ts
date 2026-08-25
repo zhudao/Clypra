@@ -74,6 +74,60 @@ export interface NativePerformanceSample {
   totalTimeUs: number;
   bytesTransferred: number;
   cacheHit: boolean;
+  generation?: number;
+  mode?: NativePreviewMode;
+  quality?: NativeQualityTier;
+  strategy?: "HOT" | "WARM" | "COLD";
+  cancelled?: boolean;
+  stale?: boolean;
+  dropped?: boolean;
+  seekTimeUs?: number;
+  conversionTimeUs?: number;
+  uploadTimeUs?: number;
+  presentTimeUs?: number;
+  decodeUs?: number;
+  conversionUploadUs?: number;
+  composeUs?: number;
+  readbackUs?: number;
+  presentUs?: number;
+  schedulerWaitUs?: number;
+  ipcWaitUs?: number;
+  decoderMutexWaitUs?: number;
+  gpuQueueWaitUs?: number;
+  surfaceAcquireUs?: number;
+  submitPresentUs?: number;
+}
+
+export type NativePreviewMode =
+  | "playback"
+  | "playback-lookahead"
+  | "seek"
+  | "scrub"
+  | "frame-step"
+  | "prefetch";
+
+export interface NativeStagePercentiles {
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  sampleCount: number;
+}
+
+export interface NativeModeStats {
+  mode: NativePreviewMode;
+  decode: NativeStagePercentiles;
+  conversionUpload: NativeStagePercentiles;
+  compose: NativeStagePercentiles;
+  readback: NativeStagePercentiles;
+  present: NativeStagePercentiles;
+  schedulerWait: NativeStagePercentiles;
+  ipcWait: NativeStagePercentiles;
+  decoderMutexWait: NativeStagePercentiles;
+  gpuQueueWait: NativeStagePercentiles;
+  surfaceAcquire: NativeStagePercentiles;
+  submitPresent: NativeStagePercentiles;
+  droppedCount: number;
+  staleCount: number;
 }
 
 export interface NativeFrameServiceStats {
@@ -83,6 +137,16 @@ export interface NativeFrameServiceStats {
   cachedEntries: number;
   cachedBytes: number;
   lastSample: NativePerformanceSample | null;
+  windowStartedAtMs?: number;
+  windowRequestCount?: number;
+  windowDroppedFrames?: number;
+  windowStaleFrames?: number;
+  windowCancelledFrames?: number;
+  windowSeekP50Ms?: number;
+  windowSeekP95Ms?: number;
+  windowSeekP99Ms?: number;
+  windowCacheHitRate?: number;
+  modeStats?: NativeModeStats[];
 }
 
 export const NATIVE_PLAYBACK_POLICY = {
@@ -131,6 +195,46 @@ export interface NativeSurfacePresentation {
   audioPositionTicks: number;
   frameAgeTicks: number;
   surface: NativeSurfaceProbe;
+  generation?: number;
+  mode?: "playback" | "scrub" | "seek" | "frameStep";
+  stale?: boolean;
+  cancelled?: boolean;
+}
+
+export interface NativeSyncDriftSnapshot {
+  n: number;
+  avg_micros: number;
+  max_abs_micros: number;
+  p95_abs_micros: number;
+}
+
+export interface NativeSyncFramePacingSnapshot {
+  n: number;
+  target_interval_micros: number;
+  stddev_micros: number;
+  jank_events: number;
+}
+
+export interface NativeSyncSeekSnapshot {
+  n: number;
+  avg_latency_micros: number;
+  max_latency_micros: number;
+  correct: number;
+  events: Array<{
+    requested_ticks: number;
+    presented_ticks: number;
+    latency_micros: number;
+    correct: boolean;
+  }>;
+}
+
+/** Snapshot returned by the native A/V synchronization metrics command. */
+export interface NativeSyncMetricsSnapshot {
+  av_drift: NativeSyncDriftSnapshot;
+  frame_pacing: NativeSyncFramePacingSnapshot;
+  dropped_frames: number;
+  seeks: NativeSyncSeekSnapshot;
+  timestamp_epoch_ms: number;
 }
 
 export interface NativeFrameTime {
@@ -296,6 +400,8 @@ export interface NativeRasterLayerSnapshot {
 export interface NativeProjectSnapshot {
   schemaVersion: number;
   projectRevision: string;
+  /** Authoritative project frame rate used by native pacing telemetry. */
+  frameRate?: number;
   canvasWidth: number;
   canvasHeight: number;
   clearColor: [number, number, number, number];
@@ -314,6 +420,11 @@ export interface NativeFrameRequest {
   quality: NativeQualityTier;
   colorPolicy: NativeColorPolicy;
   renderGraphVersion: number;
+  /** Optional asynchronous seek identity; omitted by legacy callers. */
+  generation?: number;
+  mode?: "playback" | "playback-lookahead" | "scrub" | "seek" | "frameStep" | "prefetch";
+  scrubVelocityPxPerSecond?: number;
+  requestedAtMs?: number;
 }
 
 export type NativeFrameRequestInput = Omit<NativeFrameRequest, "contractVersion">;

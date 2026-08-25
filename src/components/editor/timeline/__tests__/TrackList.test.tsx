@@ -37,9 +37,9 @@ describe("TrackLabel interactions", () => {
       </>
     );
 
+    fireEvent.click(screen.getAllByLabelText("Mute track")[0]);
     fireEvent.click(screen.getAllByLabelText("Lock track")[0]);
     fireEvent.click(screen.getAllByLabelText("Hide track")[0]);
-    fireEvent.click(screen.getAllByLabelText("Mute track")[0]);
 
     const [first, second] = useTimelineStore.getState().tracks;
     expect(first.locked).toBe(true);
@@ -65,5 +65,15 @@ describe("TrackLabel interactions", () => {
     fireEvent.click(screen.getAllByLabelText("Mute track")[0]);
 
     expect(useUIStore.getState().selectedTrackId).toBeNull();
+  });
+
+  it("shows the strict visual role icon without renaming the track", () => {
+    const tracks = useTimelineStore.getState().tracks;
+    render(<TrackLabel track={tracks[0]} />);
+
+    const roleIcon = screen.getByTestId("track-track-1-visual-role");
+    expect(roleIcon).toHaveAttribute("aria-label", "A-Roll (Main)");
+    expect(roleIcon).toHaveAttribute("title", "A-Roll (Main)");
+    expect(roleIcon.querySelector("svg")).toBeInTheDocument();
   });
 });
