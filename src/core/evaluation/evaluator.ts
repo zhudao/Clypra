@@ -30,6 +30,8 @@ import { evaluateProperty } from "./animation";
 import { resolveClipSourceTime } from "../timeline/sourceTime";
 import { calculateTextAnimationState } from "@/lib/text/textAnimation";
 import { normalizeFilterIntensity } from "../render/filterIR";
+import { resolveTextEffectDefinition, resolveTextEffectTypography } from "@/lib/text/textClip";
+import { evaluateEffectiveAudioState } from "@/core/audio/effectiveAudioState";
 import { useEffectsStore } from "@/features/text-effects/store/effectsStore";
 import { expandCompoundClips } from "@/core/timeline/compoundClips";
 import { compareCompositorClips } from "@/core/compositor/ordering";
@@ -130,12 +132,28 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       const textClip = clip as unknown as TextClip;
       const transitionState = evaluateTransitionState(clip, transitionWindows);
 
-      const styleDefinition = textClip.styleId ? (useEffectsStore.getState().definitions[textClip.styleId] ?? textClip.styleDefinition) : textClip.styleDefinition;
+      const catalogStyleDefinition = resolveTextEffectDefinition(
+        textClip.styleId,
+        textClip.styleDefinition,
+        textClip.styleRevisionId,
+        textClip.styleContentHash,
+      );
+      const styleDefinition = catalogStyleDefinition || textClip.styleSnapshot
+        ? ({
+            ...(catalogStyleDefinition || {}),
+            id: textClip.styleId,
+            name: (catalogStyleDefinition as any)?.name || textClip.styleId || "Pinned Text Effect",
+            scene: textClip.styleSnapshot,
+          } as any)
+        : undefined;
+      const styleTypography = resolveTextEffectTypography(styleDefinition);
 
-      const evalFontSize = kf.fontSize !== undefined ? evaluateProperty(kf.fontSize, offset, clip.duration) : textClip.fontSize || 48;
+      const evalFontSize = kf.fontSize !== undefined
+        ? evaluateProperty(kf.fontSize, offset, clip.duration)
+        : textClip.fontSize || styleTypography.fontSize || 48;
       const evalColor = kf.color !== undefined ? evaluateProperty(kf.color, offset, clip.duration) : textClip.color || "#ffffff";
-      const evalLetterSpacing = kf.letterSpacing !== undefined ? evaluateProperty(kf.letterSpacing, offset, clip.duration) : (textClip.letterSpacing ?? styleDefinition?.font?.letterSpacing ?? 0);
-      const evalLineHeight = kf.lineHeight !== undefined ? evaluateProperty(kf.lineHeight, offset, clip.duration) : (textClip.lineHeight ?? styleDefinition?.font?.lineHeight ?? 1.2);
+      const evalLetterSpacing = kf.letterSpacing !== undefined ? evaluateProperty(kf.letterSpacing, offset, clip.duration) : (textClip.letterSpacing ?? styleTypography.letterSpacing ?? 0);
+      const evalLineHeight = kf.lineHeight !== undefined ? evaluateProperty(kf.lineHeight, offset, clip.duration) : (textClip.lineHeight ?? styleTypography.lineHeight ?? 1.2);
 
       // ── Calculate Text Animations ──────────────────────────────────────────
       const animationState = calculateTextAnimationState(evalTime, clip.startTime, clip.duration, textClip.entranceAnimation, textClip.exitAnimation);
@@ -184,11 +202,11 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         // only the creation-time default; it must not reappear during
         // evaluation after the user clears the editor field.
         text: textClip.text ?? "",
-        fontFamily: normalizeFontFamily(textClip.fontFamily || styleDefinition?.font?.family || "Inter Variable"),
+        fontFamily: normalizeFontFamily(textClip.fontFamily || styleTypography.fontFamily || "Inter Variable"),
         fontSize: evalFontSize,
         color: evalColor,
-        fontWeight: (textClip.fontWeight ?? styleDefinition?.font?.weight ?? "normal") as "normal" | "bold" | number,
-        fontStyle: textClip.fontStyle || styleDefinition?.font?.style || "normal",
+        fontWeight: (textClip.fontWeight ?? styleTypography.fontWeight ?? "normal") as "normal" | "bold" | number,
+        fontStyle: textClip.fontStyle || styleTypography.fontStyle || "normal",
         textAlign: textClip.align || "center",
         verticalAlign: textClip.valign || "middle",
         lineHeight: evalLineHeight,
@@ -198,8 +216,17 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         shadow: textClip.shadow,
         background: textClip.background,
         styleId: textClip.styleId,
+        styleVersion: textClip.styleVersion,
+        styleRevisionId: textClip.styleRevisionId,
+        styleContentHash: textClip.styleContentHash,
+        styleSnapshot: textClip.styleSnapshot,
+        parameterOverrides: textClip.parameterOverrides,
         styleDefinition,
         templateId: textClip.templateId,
+        templateRevisionId: textClip.templateRevisionId,
+        templateContentHash: textClip.templateContentHash,
+        templateSnapshot: textClip.templateSnapshot,
+        templateDependencies: textClip.templateDependencies,
         customization: textClip.customization,
       };
 
@@ -221,6 +248,16 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
         stickerFormat: clip.stickerFormat,
         stickerAnimationPath: clip.stickerAnimationPath,
         stickerSourceId: clip.stickerSourceId,
+      };
+    }
+    if (!asset && clip.kind === "image" && clip.mediaUrl) {
+      asset = {
+        id: clip.mediaId,
+        name: clip.name || "Template Image",
+        path: clip.mediaUrl,
+        type: "image",
+        duration: clip.duration,
+        size: 0,
       };
     }
     // Explicit audio clips can retain their source video asset so the audio
@@ -314,23 +351,30 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
   for (const clip of sortedClips) {
     const asset = assetMap.get(clip.mediaId);
     const track = trackMap.get(clip.trackId);
+    const directAudioPath = (clip as any).audioPath as string | undefined;
     // Audio layer creation:
     // - Explicit audio role clips always create audio
     // - Video assets with primary OR overlay role create audio (video tracks have audio)
-    const hasAudio = clip.role === "audio" || (asset?.type === "video" && (clip.role === "primary" || clip.role === "overlay"));
-    if (!hasAudio || !asset) continue;
-    if (track?.muted ?? false) continue;
+    const hasAudio =
+      clip.kind === "audio" ||
+      asset?.type === "audio" ||
+      asset?.type === "video" ||
+      Boolean(directAudioPath) ||
+      Boolean(clip.audio);
+    if (!hasAudio || (!asset && !directAudioPath)) continue;
 
     const sourceTime = resolveClipSourceTime(clip, evalTime, {
       clampToRange: true,
       frameRate: project?.frameRate ?? 30,
     }).sourceTime;
-    const sourcePath = asset.path ? (isExternalOrDataUrl(asset.path) ? asset.path : convertFileSrc(asset.path)) : "";
+    const rawAudioPath = directAudioPath || asset?.path || "";
+    const sourcePath = rawAudioPath
+      ? (isExternalOrDataUrl(rawAudioPath) ? rawAudioPath : convertFileSrc(rawAudioPath))
+      : "";
     if (!sourcePath) continue;
 
-    const clipVolume = clip.volume ?? 1.0;
-    const trackVolume = track?.volume ?? 1.0;
-    const effectiveVolume = Math.max(0, Math.min(3.0, clipVolume * trackVolume));
+    const effectiveAudio = evaluateEffectiveAudioState(clip, track, evalTime, { tracks });
+    const effectiveVolume = Math.max(0, Math.min(3.0, effectiveAudio.gain));
 
     audioLayers.push({
       layerId: `${clip.id}-audio`,
@@ -338,10 +382,10 @@ export function evaluateTimelineScene(time: number, clips: Clip[], tracks: Track
       mediaId: clip.mediaId,
       sourcePath,
       sourceTime,
-      pan: 0.0,
+      pan: effectiveAudio.pan,
       priority: clip.trackIndex,
       volume: effectiveVolume,
-      muted: track?.muted ?? false,
+      muted: effectiveAudio.muted,
     });
   }
 

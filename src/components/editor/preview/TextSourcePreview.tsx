@@ -1,7 +1,8 @@
 import React, { useRef, useEffect, useCallback } from "react";
 import { TemplatePreviewPlayer } from "@/features/text-templates";
-import { renderTextEffectCore, type TextEffectConfig, _buildConfig } from "@clypra-studio/engine";
+import { evaluateScene, textEffectConfigToScene, type TextEffectConfig, _buildConfig } from "@clypra-studio/engine";
 import { getFontLoader } from "@/core/fonts/FontLoader";
+import { traceTextRenderGeometry, traceTextRenderScene } from "@/core/render/textRenderTrace";
 
 // Effects are designed for this banner canvas size (800×200).
 const PREVIEW_CANVAS_W = 800;
@@ -45,16 +46,18 @@ export const resolveTextSourcePreviewConfig = (preset: any): TextEffectConfig =>
   // Normalize them into the exact config shape consumed by renderTextEffectCore.
   const isNested = !!preset?.font;
   const config = isNested ? _buildConfig(preset, preset.text || "CLYPRA", preset.fontSize || 100, PREVIEW_CANVAS_W, PREVIEW_CANVAS_H) : preset;
+  const sceneText = preset?.scene?.text;
 
   return {
     ...config,
     text: config.text || "CLYPRA",
     effectName: config.effectName || config.name || preset?.name || "Effect",
-    fontFamily: config.fontFamily || preset?.font?.family || preset?.fontFamily || "Inter Variable",
-    fontWeight: normalizePreviewFontWeight(config.fontWeight ?? preset?.font?.weight ?? preset?.fontWeight),
-    fontStyle: config.fontStyle || preset?.font?.style || preset?.fontStyle || "normal",
-    letterSpacing: config.letterSpacing ?? preset?.font?.letterSpacing ?? preset?.letterSpacing ?? 0,
-    lineHeight: config.lineHeight ?? preset?.font?.lineHeight ?? preset?.lineHeight ?? 1.2,
+    fontFamily: config.fontFamily || sceneText?.fontFamily || preset?.font?.family || preset?.fontFamily || "Inter Variable",
+    fontSize: config.fontSize ?? sceneText?.fontSize ?? preset?.fontSize ?? 100,
+    fontWeight: normalizePreviewFontWeight(config.fontWeight ?? sceneText?.fontWeight ?? preset?.font?.weight ?? preset?.fontWeight),
+    fontStyle: config.fontStyle || sceneText?.fontStyle || preset?.font?.style || preset?.fontStyle || "normal",
+    letterSpacing: config.letterSpacing ?? sceneText?.letterSpacing ?? preset?.font?.letterSpacing ?? preset?.letterSpacing ?? 0,
+    lineHeight: config.lineHeight ?? sceneText?.lineHeight ?? preset?.font?.lineHeight ?? preset?.lineHeight ?? 1.2,
     glowLayers: config.glowLayers || [],
   };
 };
@@ -136,9 +139,65 @@ export const TextSourcePreview: React.FC<TextSourcePreviewProps> = ({ preset }) 
       if (!ctx) return;
 
       ctx.clearRect(0, 0, PREVIEW_CANVAS_W, PREVIEW_CANVAS_H);
+      traceTextRenderGeometry({
+        path: "source-preview",
+        assetId: (preset as any).id,
+        revisionId: (preset as any).revisionId ?? (preset as any).revision?.revisionId,
+        contentHash: (preset as any).contentHash ?? (preset as any).revision?.contentHash,
+        layer: {
+          text: effectConfig.text,
+          fontFamily: effectConfig.fontFamily,
+          fontSize: effectConfig.fontSize,
+          fontWeight: effectConfig.fontWeight,
+          fontStyle: effectConfig.fontStyle,
+          textAlign: effectConfig.textPosX ?? "center",
+          verticalAlign: effectConfig.textPosY ?? "middle",
+        },
+        render: {
+          canvasWidth: PREVIEW_CANVAS_W,
+          canvasHeight: PREVIEW_CANVAS_H,
+          renderer: "shared-text-effect-engine -> source-canvas",
+        },
+        authoredCanvas: (preset as any).scene?.canvas,
+      });
 
       try {
-        renderTextEffectCore(ctx, effectConfig);
+        // Studio's authoring surface evaluates a SceneDocument. Use the same
+        // scene path here so source preview does not use a second legacy
+        // renderer with different post-FX/layout behavior.
+        const publishedScene = (preset as any).scene;
+        if (publishedScene?.effectLayers) {
+          const scene = JSON.parse(JSON.stringify(publishedScene));
+          scene.text.content = effectConfig.text;
+          scene.text.fontFamily = effectConfig.fontFamily;
+          scene.text.fontWeight = effectConfig.fontWeight;
+          scene.text.fontStyle = effectConfig.fontStyle;
+          scene.text.fontSize = effectConfig.fontSize;
+          scene.text.letterSpacing = effectConfig.letterSpacing;
+          scene.text.lineHeight = effectConfig.lineHeight;
+          scene.canvas.width = PREVIEW_CANVAS_W;
+          scene.canvas.height = PREVIEW_CANVAS_H;
+          traceTextRenderScene(scene, {
+            path: "source-preview",
+            assetId: (preset as any).id,
+            category: (preset as any).category,
+            revisionId: (preset as any).revisionId,
+            contentHash: (preset as any).contentHash,
+            time: 0,
+          });
+          evaluateScene(scene, 0, ctx);
+        } else {
+          const scene = textEffectConfigToScene(effectConfig);
+          traceTextRenderScene(scene, {
+            path: "source-preview",
+            assetId: (preset as any).id,
+            category: (preset as any).category,
+            revisionId: (preset as any).revisionId,
+            contentHash: (preset as any).contentHash,
+            time: 0,
+          });
+          evaluateScene(scene, 0, ctx);
+        }
       } catch (error) {
         console.error("[TextSourcePreview] ❌ Error:", error);
         ctx.fillStyle = "#ff0000";

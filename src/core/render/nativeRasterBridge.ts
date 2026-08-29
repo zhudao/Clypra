@@ -17,6 +17,11 @@ import { isTauriRuntime, registerNativeImageAsset, registerNativeRasterAsset } f
 import type { NativeRasterLayerSnapshot } from "@/lib/platform/nativeCore";
 import { buildNativeImageAssetId } from "@/core/render/nativeRasterAssetIds";
 import {
+  buildNativeTextRasterKey,
+  rasterizeTextLayerForNative,
+  type NativeTextRasterAsset,
+} from "@/components/editor/preview/nativeTextPreview";
+import {
   NativeAnimatedStickerRenderer,
   type NativeAnimatedStickerRaster,
 } from "@/components/editor/preview/nativeStickerPreview";
@@ -27,6 +32,7 @@ interface NativeRasterBridgeOptions {
   frameKey: number;
 }
 
+const MAX_TEXT_CACHE_ENTRIES = 96;
 const MAX_REGISTERED_ASSETS = 256;
 
 function evictOldest<TKey, TValue>(cache: Map<TKey, TValue>, maxEntries: number): void {
@@ -57,6 +63,7 @@ function snapshot(asset: UploadableNativeRaster): NativeRasterLayerSnapshot {
  * contract failures rather than falling back to the browser compositor.
  */
 export class NativeRasterBridge {
+  private readonly textCache = new Map<string, Promise<NativeTextRasterAsset>>();
   private readonly imageCache = new Map<string, Promise<void>>();
   private readonly imageSourcesById = new Map<string, { sourcePath: string; width: number; height: number }>();
   private readonly assetsById = new Map<string, UploadableNativeRaster>();
@@ -66,14 +73,17 @@ export class NativeRasterBridge {
   async rasterize(scene: EvaluatedScene, options: NativeRasterBridgeOptions): Promise<NativeRasterLayerSnapshot[]> {
     if (!isTauriRuntime()) return [];
 
-    // Native GPU pass-chain interpreter in wgpu is the authoritative renderer for text on desktop Tauri.
-    // NativeRasterBridge only handles background, animated stickers, images, and smart overlays.
-    const [background, animatedStickers, images] = await Promise.all([
+    // Studio text effects are authored and evaluated by the shared Canvas engine.
+    // Keep those pixels intact and let native own only final composition; the
+    // native SDF path remains a compatibility fallback for frames that cannot
+    // be rasterized in the WebView.
+    const [text, background, animatedStickers, images] = await Promise.all([
+      this.rasterizeText(scene),
       this.rasterizeBackground(scene, options.frameKey),
       this.rasterizeAnimatedStickers(scene),
       this.rasterizeImages(scene),
     ]);
-    return [...background, ...animatedStickers, ...images];
+    return [...background, ...text, ...animatedStickers, ...images];
   }
 
   /**
@@ -95,6 +105,10 @@ export class NativeRasterBridge {
 
     const rasterWidth = Math.max(1, Math.round(width));
     const rasterHeight = Math.max(1, Math.round(height));
+    // The rendered pixels are time-dependent, so this cache is intentionally
+    // frame-addressed. The preview scheduler is responsible for ensuring that
+    // only the newest playback frame reaches this method; callers must not
+    // turn this into an unbounded background queue.
     const assetId = `native-smart-overlay:${options.frameKey}:${stableSerialize(activeClips)}`;
     const existing = this.assetsById.get(assetId);
     if (existing) {
@@ -152,11 +166,47 @@ export class NativeRasterBridge {
   }
 
   dispose(): void {
+    this.textCache.clear();
     this.imageCache.clear();
     this.imageSourcesById.clear();
     this.assetsById.clear();
     this.registeredAssetIds.clear();
     this.animatedStickerRenderer.dispose();
+  }
+
+  private async rasterizeText(scene: EvaluatedScene): Promise<NativeRasterLayerSnapshot[]> {
+    const layers = scene.visualLayers.filter((layer) => layer.layerType === "text");
+    const pendingAssets = layers.map((layer) => {
+      const key = buildNativeTextRasterKey(layer);
+      let raster = this.textCache.get(key);
+      if (!raster) {
+        raster = rasterizeTextLayerForNative(layer);
+        this.textCache.set(key, raster);
+        evictOldest(this.textCache, MAX_TEXT_CACHE_ENTRIES);
+        void raster.catch(() => {
+          if (this.textCache.get(key) === raster) this.textCache.delete(key);
+        });
+      }
+      return raster;
+    });
+
+    // Keep a single unsupported/malformed text layer from taking down the
+    // complete native frame. Its absence intentionally selects the native
+    // text snapshot fallback in buildNativeVideoProjectRequest.
+    const rasterResults = await Promise.allSettled(pendingAssets);
+    const assets = rasterResults
+      .filter((result): result is PromiseFulfilledResult<NativeTextRasterAsset> => result.status === "fulfilled")
+      .map((result) => result.value);
+
+    const registrationResults = await Promise.allSettled(
+      assets.map(async (asset) => {
+        await this.register(asset);
+        return asset;
+      }),
+    );
+    return registrationResults
+      .filter((result): result is PromiseFulfilledResult<NativeTextRasterAsset> => result.status === "fulfilled")
+      .map((result) => snapshot(result.value));
   }
 
   private async rasterizeAnimatedStickers(scene: EvaluatedScene): Promise<NativeRasterLayerSnapshot[]> {
@@ -235,7 +285,16 @@ export class NativeRasterBridge {
 
     const width = Math.max(1, Math.round(scene.metadata.canvasWidth));
     const height = Math.max(1, Math.round(scene.metadata.canvasHeight));
-    const assetId = `native-background:${frameKey}:${stableSerialize(background)}`;
+    // Gradients are immutable for a given configuration and dimensions. The
+    // old frame-keyed identity forced a full-canvas getImageData() and native
+    // upload on every playback frame even though the pixels never changed.
+    // Shaders are time-dependent and remain frame-addressed until they have a
+    // native procedural implementation.
+    const backgroundIdentity = stableSerialize(background);
+    const timeDependent = background.type === "shader";
+    const assetId = timeDependent
+      ? `native-background:${frameKey}:${backgroundIdentity}`
+      : `native-background:${backgroundIdentity}:${width}x${height}`;
     const existing = this.assetsById.get(assetId);
     if (existing) {
       await this.register(existing);

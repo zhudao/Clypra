@@ -144,7 +144,21 @@ export function useAddToTimeline(): (item: any, type: string) => Promise<void> {
             useTemplateStore.getState().templates.find((t) => t.id === item.templateId);
 
           if (templateDef) {
-            const compoundClip = instantiateTemplate(templateDef, {
+            let resolvedTemplate = templateDef;
+            if (!resolvedTemplate.layers?.length && item.templateId) {
+              try {
+                const { TextEffectsApi } = await import("@/features/text-effects/api/textEffectsApi");
+                const templateData = await TextEffectsApi.getTemplateData(
+                  resolvedTemplate.category,
+                  resolvedTemplate.id,
+                  { revisionId: (resolvedTemplate as any).revisionId },
+                );
+                resolvedTemplate = { ...resolvedTemplate, ...templateData };
+              } catch (error) {
+                console.warn("[Clypra:AddToTimeline] Failed to resolve template revision:", error);
+              }
+            }
+            const compoundClip = instantiateTemplate(resolvedTemplate, {
               trackId: targetTrackId,
               startTime: placement.startTime,
               canvasWidth: project?.canvasWidth || 1920,
@@ -165,15 +179,18 @@ export function useAddToTimeline(): (item: any, type: string) => Promise<void> {
           canvasHeight: project?.canvasHeight || 1080,
           textRole: "title",
           ...presetConfig,
-          fontFamily: item.fontFamily,
-          color: item.color,
-          fontSize: item.fontSize,
-          fontWeight: item.fontWeight,
-          fontStyle: item.fontStyle,
-          stroke: item.stroke,
-          shadow: item.shadow,
-          background: item.background,
-          styleId: item.styleId,
+          ...(item.fontFamily !== undefined ? { fontFamily: item.fontFamily } : {}),
+          ...(item.color !== undefined ? { color: item.color } : {}),
+          ...(item.fontSize !== undefined ? { fontSize: item.fontSize } : {}),
+          ...(item.fontWeight !== undefined ? { fontWeight: item.fontWeight } : {}),
+          ...(item.fontStyle !== undefined ? { fontStyle: item.fontStyle } : {}),
+          ...(item.stroke !== undefined ? { stroke: item.stroke } : {}),
+          ...(item.shadow !== undefined ? { shadow: item.shadow } : {}),
+          ...(item.background !== undefined ? { background: item.background } : {}),
+          ...(item.styleId !== undefined ? { styleId: item.styleId } : {}),
+          styleRevisionId: item.styleRevisionId ?? effectDefinition?.revisionId ?? effectDefinition?.revision?.revisionId,
+          styleContentHash: item.styleContentHash ?? effectDefinition?.contentHash ?? effectDefinition?.revision?.contentHash,
+          styleSnapshot: item.styleSnapshot ?? effectDefinition?.scene,
           effectDefinition,
           templateId: item.templateId,
           customization: item.customization,

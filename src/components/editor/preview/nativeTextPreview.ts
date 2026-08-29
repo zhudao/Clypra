@@ -1,8 +1,9 @@
 import type { EvaluatedTextLayer } from "@/core/evaluation/types";
-import { effectBleed } from "@/lib/text/textClip";
+import { effectBleed, resolveTextEffectDefinition } from "@/lib/text/textClip";
 import { getTextRenderMetrics, normalizeFontSize } from "@/lib/utils/fixedSizing";
-import { useEffectsStore } from "@/features/text-effects/store/effectsStore";
 import { rasterizeTextLayer } from "@/core/render/textRasterizer";
+import { getFontLoader } from "@/core/fonts/FontLoader";
+import { traceTextRenderGeometry } from "@/core/render/textRenderTrace";
 
 export interface NativeTextRasterAsset {
   assetId: string;
@@ -57,6 +58,8 @@ export function buildNativeTextRasterKey(layer: EvaluatedTextLayer): string {
     lineHeight: layer.lineHeight,
     letterSpacing: layer.letterSpacing,
     styleId: layer.styleId,
+    styleVersion: layer.styleVersion,
+    parameterOverrides: layer.parameterOverrides,
     templateId: layer.templateId,
     customization: layer.customization,
     stroke: layer.stroke,
@@ -64,6 +67,11 @@ export function buildNativeTextRasterKey(layer: EvaluatedTextLayer): string {
     background: layer.background,
     styleDefinition: layer.styleDefinition,
   });
+}
+
+/** Resolve the immutable clip snapshot before consulting the live catalog. */
+export function resolveNativeTextEffectDefinition(layer: EvaluatedTextLayer) {
+  return resolveTextEffectDefinition(layer.styleId, layer.styleDefinition);
 }
 
 function createCanvas(width: number, height: number): HTMLCanvasElement | OffscreenCanvas {
@@ -87,9 +95,24 @@ function createCanvas(width: number, height: number): HTMLCanvasElement | Offscr
 export async function rasterizeTextLayerForNative(
   layer: EvaluatedTextLayer,
 ): Promise<NativeTextRasterAsset> {
-  const effectDefinition = layer.styleId
-    ? (useEffectsStore.getState().definitions[layer.styleId] ?? layer.styleDefinition)
-    : layer.styleDefinition;
+  // The raster must use the same font variant as Studio/source preview before
+  // any glyph metrics or effect bounds are computed.
+  if (layer.fontFamily) {
+    try {
+      await getFontLoader().ensureFont({
+        family: layer.fontFamily,
+        weight: layer.fontWeight,
+        style: layer.fontStyle,
+      });
+      if (typeof document !== "undefined" && document.fonts) {
+        await document.fonts.ready;
+      }
+    } catch (error) {
+      console.warn(`[NativeTextPreview] Failed to pre-load font "${layer.fontFamily}":`, error);
+    }
+  }
+
+  const effectDefinition = resolveNativeTextEffectDefinition(layer);
   const normalizedFontSize = normalizeFontSize(layer.fontSize);
   const metrics = getTextRenderMetrics(normalizedFontSize);
   const bleed = effectBleed({
@@ -109,6 +132,35 @@ export async function rasterizeTextLayerForNative(
   const bleedY = Math.max(metrics.paddingY, bleed.y);
   const width = Math.max(1, Math.ceil(layer.width + bleedX * 2));
   const height = Math.max(1, Math.ceil(layer.height + bleedY * 2));
+  traceTextRenderGeometry({
+    path: "program-preview",
+    assetId: layer.styleId,
+    revisionId: layer.styleRevisionId,
+    contentHash: layer.styleContentHash,
+    layer: {
+      layerId: layer.layerId,
+      x: layer.x,
+      y: layer.y,
+      width: layer.width,
+      height: layer.height,
+      fontFamily: layer.fontFamily,
+      fontSize: layer.fontSize,
+      fontWeight: layer.fontWeight,
+      fontStyle: layer.fontStyle,
+      textAlign: layer.textAlign,
+      verticalAlign: layer.verticalAlign,
+    },
+    render: {
+      bleedX,
+      bleedY,
+      rasterWidth: width,
+      rasterHeight: height,
+      rasterX: layer.x - bleedX,
+      rasterY: layer.y - bleedY,
+      renderer: "shared-text-effect-engine -> native-raster-composite",
+    },
+    authoredCanvas: (effectDefinition as any)?.scene?.canvas,
+  });
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d", { alpha: true });
   if (!ctx) throw new Error("Unable to create a 2D context for native text rasterization");

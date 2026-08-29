@@ -88,6 +88,13 @@ export interface CreateTextClipOptions {
   /** Effect definition for accurate bounding box calculation */
   effectDefinition?: TextEffectDefinition;
 
+  /** Effect catalog version to pin on the created clip. */
+  styleVersion?: number;
+  /** Immutable effect revision to pin on the created clip. */
+  styleRevisionId?: string;
+  styleContentHash?: string;
+  styleSnapshot?: import("@clypra-studio/engine").SceneDocument;
+
   /** Template definition/data for accurate content-bounds calculation */
   templateDefinition?: TextTemplate;
 }
@@ -103,6 +110,60 @@ export interface TextEffectBounds {
   measuredTextHeight: number;
   source: "panel" | "ink" | "plain" | "fallback";
   selectionInset: number;
+}
+
+export interface TextEffectTypography {
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: string | number;
+  fontStyle?: "normal" | "italic";
+  lineHeight?: number;
+  letterSpacing?: number;
+}
+
+/**
+ * Read runtime typography from the canonical scene first, then from the
+ * legacy definition shape. The scene is authoritative for published effects;
+ * legacy fields are only a compatibility fallback for old assets.
+ */
+export function resolveTextEffectTypography(
+  definition?: TextEffectDefinition,
+): TextEffectTypography {
+  const raw = definition as (TextEffectDefinition & {
+    fontFamily?: string;
+    fontSize?: number;
+    fontWeight?: string | number;
+    fontStyle?: "normal" | "italic";
+    lineHeight?: number;
+    letterSpacing?: number;
+  }) | undefined;
+  const sceneText = (raw as any)?.scene?.text;
+  const font = raw?.font;
+  const finitePositive = (value: unknown): number | undefined => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : undefined;
+  };
+
+  return {
+    fontFamily: sceneText?.fontFamily ?? raw?.fontFamily ?? font?.family,
+    fontSize:
+      finitePositive(sceneText?.fontSize) ??
+      finitePositive(raw?.fontSize),
+    fontWeight: sceneText?.fontWeight ?? raw?.fontWeight ?? font?.weight,
+    fontStyle: sceneText?.fontStyle ?? raw?.fontStyle ?? font?.style,
+    lineHeight:
+      finitePositive(sceneText?.lineHeight) ??
+      finitePositive(raw?.lineHeight) ??
+      finitePositive(font?.lineHeight),
+    letterSpacing:
+      Number.isFinite(Number(sceneText?.letterSpacing))
+        ? Number(sceneText.letterSpacing)
+        : Number.isFinite(Number(raw?.letterSpacing))
+          ? Number(raw?.letterSpacing)
+          : Number.isFinite(Number(font?.letterSpacing))
+            ? Number(font?.letterSpacing)
+            : undefined,
+  };
 }
 
 function measureTextInk(
@@ -495,15 +556,30 @@ export function calculateTextClipSize(options: {
   };
 }
 
-function resolveTextEffectDefinition(
+/**
+ * Resolve a text effect without allowing a live catalog entry to override a
+ * definition pinned to the clip. The live store fallback is retained only for
+ * legacy clips that predate pinned effect snapshots.
+ */
+export function resolveTextEffectDefinition(
   styleId?: string,
   effectDefinition?: TextEffectDefinition,
+  revisionId?: string,
+  contentHash?: string,
 ): TextEffectDefinition | undefined {
   if (effectDefinition) return effectDefinition;
   if (!styleId) return undefined;
-  return useEffectsStore.getState().definitions[styleId] as
+  const definition = useEffectsStore.getState().definitions[styleId] as
     | TextEffectDefinition
     | undefined;
+  if (!definition) return undefined;
+  const identity = useEffectsStore.getState().definitionRevisions?.[styleId] ?? {
+    revisionId: (definition as any).revisionId ?? (definition as any).revision?.revisionId,
+    contentHash: (definition as any).contentHash ?? (definition as any).revision?.contentHash,
+  };
+  if (revisionId && identity.revisionId !== revisionId) return undefined;
+  if (contentHash && identity.contentHash !== contentHash) return undefined;
+  return definition;
 }
 
 export interface TextTemplateContentSize {
@@ -781,6 +857,10 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     textRole,
     words,
     styleId,
+    styleVersion,
+    styleRevisionId,
+    styleContentHash,
+    styleSnapshot,
     templateId,
     customization,
     stroke,
@@ -789,6 +869,12 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     effectDefinition,
     templateDefinition,
   } = options;
+
+  const resolvedEffectDefinition = resolveTextEffectDefinition(
+    styleId,
+    effectDefinition,
+  );
+  const effectTypography = resolveTextEffectTypography(resolvedEffectDefinition);
 
   // For templates, calculate dimensions based on template's native aspect ratio
   // instead of text measurements to ensure professional full-canvas rendering
@@ -841,30 +927,21 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     };
   } else {
     // Regular text clips use text measurement
-    const resolvedEffectDefinition = resolveTextEffectDefinition(
-      styleId,
-      effectDefinition,
-    );
-    const definitionFontSize = (
-      resolvedEffectDefinition as
-        | (TextEffectDefinition & { fontSize?: number })
-        | undefined
-    )?.fontSize;
-    const defaultFontSize = definitionFontSize ?? (options.styleId ? 96 : 100);
+    const defaultFontSize = effectTypography.fontSize ?? (options.styleId ? 96 : 100);
     const fontSize = options.fontSize ?? defaultFontSize;
     const fontFamily =
       options.fontFamily ??
-      resolvedEffectDefinition?.font?.family ??
+      effectTypography.fontFamily ??
       "Inter, system-ui, sans-serif";
     const fontWeight =
-      options.fontWeight ?? resolvedEffectDefinition?.font?.weight;
+      options.fontWeight ?? effectTypography.fontWeight;
     const fontStyle =
-      options.fontStyle ?? resolvedEffectDefinition?.font?.style;
+      options.fontStyle ?? effectTypography.fontStyle;
     const lineHeight =
-      options.lineHeight ?? resolvedEffectDefinition?.font?.lineHeight ?? 1.2;
+      options.lineHeight ?? effectTypography.lineHeight ?? 1.2;
     const letterSpacing =
       options.letterSpacing ??
-      resolvedEffectDefinition?.font?.letterSpacing ??
+      effectTypography.letterSpacing ??
       0;
 
     sizing = calculateTextClipSize({
@@ -899,28 +976,23 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     height = textPosition.height;
   }
 
-  const resolvedEffectDefinition = resolveTextEffectDefinition(
-    styleId,
-    effectDefinition,
-  );
-  const definitionFontSize = (
-    resolvedEffectDefinition as
-      | (TextEffectDefinition & { fontSize?: number })
-      | undefined
-  )?.fontSize;
-  const defaultFontSize = definitionFontSize ?? (options.styleId ? 96 : 100);
+  const defaultFontSize = effectTypography.fontSize ?? (options.styleId ? 96 : 100);
   const fontSize = options.fontSize ?? defaultFontSize;
   const fontFamily =
     options.fontFamily ??
-    resolvedEffectDefinition?.font?.family ??
+    effectTypography.fontFamily ??
     "Inter, system-ui, sans-serif";
   const fontWeight =
-    options.fontWeight ?? resolvedEffectDefinition?.font?.weight;
-  const fontStyle = options.fontStyle ?? resolvedEffectDefinition?.font?.style;
-  const lineHeight =
-    options.lineHeight ?? resolvedEffectDefinition?.font?.lineHeight ?? 1.2;
+    options.fontWeight ?? effectTypography.fontWeight;
+  const fontStyle = options.fontStyle ?? effectTypography.fontStyle;
+  const lineHeight = options.lineHeight ?? effectTypography.lineHeight ?? 1.2;
   const letterSpacing =
-    options.letterSpacing ?? resolvedEffectDefinition?.font?.letterSpacing ?? 0;
+    options.letterSpacing ?? effectTypography.letterSpacing ?? 0;
+  const resolvedStyleVersion =
+    styleVersion ?? (Number(resolvedEffectDefinition?.version) || 1);
+  const resolvedStyleRevisionId = styleRevisionId ?? (resolvedEffectDefinition as any)?.revisionId ?? (resolvedEffectDefinition as any)?.revision?.revisionId;
+  const resolvedStyleContentHash = styleContentHash ?? (resolvedEffectDefinition as any)?.contentHash ?? (resolvedEffectDefinition as any)?.revision?.contentHash;
+  const resolvedStyleSnapshot = styleSnapshot ?? (resolvedEffectDefinition as any)?.scene;
 
   const clip: TextClip = {
     id: generateId("text-clip"),
@@ -953,6 +1025,10 @@ export function createTextClip(options: CreateTextClipOptions): TextClip {
     textRole,
     words, // Include word-level timestamps for karaoke-style highlighting
     styleId,
+    styleVersion: resolvedStyleVersion,
+    styleRevisionId: resolvedStyleRevisionId,
+    styleContentHash: resolvedStyleContentHash,
+    styleSnapshot: resolvedStyleSnapshot,
     styleDefinition: resolvedEffectDefinition,
     templateId,
     customization,

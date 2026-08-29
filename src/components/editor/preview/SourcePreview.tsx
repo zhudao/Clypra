@@ -14,9 +14,8 @@ import type { SourcePlaybackContext } from "@/core/playback";
 import type { MediaAsset } from "@/types";
 import { formatTimecode } from "@/lib/utils/timeFormatting";
 import { PreviewTransport } from "./PreviewTransport";
-import { createTextClip } from "@/lib/text/textClip";
+import { createTextClip, resolveTextEffectDefinition } from "@/lib/text/textClip";
 import { TextSourcePreview } from "./TextSourcePreview";
-import { useEffectsStore } from "@/features/text-effects/store/effectsStore";
 import { useStickersStore } from "@/features/stickers/store/stickersStore";
 import { VideoSourcePreview } from "./VideoSourcePreview";
 import { AudioSourcePreview } from "./AudioSourcePreview";
@@ -304,6 +303,28 @@ export const SourcePreview: React.FC<SourcePreviewProps> = ({ claimTransportOnMo
 
       const preset = sourceTextPreset;
 
+      // Template previews must use the same compound instantiation path as
+      // sidebar insertion. Creating a plain text clip here would collapse the
+      // template composition and leave rendering dependent on the live catalog.
+      if (preset.presetType === "template") {
+        const { instantiateTemplate } = await import(
+          "@/features/text-templates/instantiateTemplate"
+        );
+        const templateClip = instantiateTemplate(
+          (preset.templateDefinition || preset) as any,
+          {
+            trackId: targetTrackId,
+            startTime,
+            canvasWidth: project.canvasWidth || 1920,
+            canvasHeight: project.canvasHeight || 1080,
+            customization: preset.customization,
+          },
+        );
+        addClip(templateClip);
+        exitSourceMode();
+        return;
+      }
+
       // Extract styleId for text effects
       // IMPORTANT: The preset is the full TextEffectDefinition that was fetched during preview.
       // The preview flow (EffectGrid.handlePreview) calls TextEffectsApi.getFullEffect() which:
@@ -315,7 +336,10 @@ export const SourcePreview: React.FC<SourcePreviewProps> = ({ claimTransportOnMo
 
       // Verify effect definition is loaded before creating clip
       // Get the effect definition for accurate bounding box calculation
-      const effectDefinition = styleId ? useEffectsStore.getState().definitions[styleId] : undefined;
+      const effectDefinition = resolveTextEffectDefinition(
+        styleId,
+        (preset as any).effectDefinition || (preset as any),
+      );
 
       // If styleId is present but definition is missing, show error
       if (styleId && !effectDefinition) {
@@ -324,14 +348,9 @@ export const SourcePreview: React.FC<SourcePreviewProps> = ({ claimTransportOnMo
         return;
       }
 
-      // When adding a text effect, we should NOT override individual properties
-      // because the rasterizer uses TextEffectBuilder.fromDefinition() which
-      // reads all styling from the cached effect definition.
-      // However, if individual properties (stroke, shadow, background) are explicitly
-      // set to undefined/null, the rasterizer DISABLES them (see lines 395-416 in rasterizer.ts).
-      //
-      // Solution: Only pass properties that are truly user overrides, not properties
-      // extracted from the effect definition itself.
+      // A text effect is inserted as a pinned canonical definition. Do not
+      // project duplicate flat font/effect fields into the clip; the scene
+      // snapshot is the single source of truth for rendering.
       const textClip = createTextClip({
         trackId: targetTrackId,
         startTime,
@@ -339,13 +358,11 @@ export const SourcePreview: React.FC<SourcePreviewProps> = ({ claimTransportOnMo
         text: preset.text || "CLYPRA",
         canvasWidth: project?.canvasWidth || 1920,
         canvasHeight: project?.canvasHeight || 1080,
-        // When styleId is present, the engine will use the effect definition for ALL styling
-        // Do NOT pass fontFamily, color, fontSize, fontWeight, fontStyle, stroke, shadow, background
-        // from the preset - let the definition be the source of truth
         styleId,
+        styleRevisionId: preset.revisionId ?? preset.revision?.revisionId,
+        styleContentHash: preset.contentHash ?? preset.revision?.contentHash,
+        styleSnapshot: preset.scene,
         templateId: preset.presetType === "template" ? preset.id : undefined,
-        // Only fontSize is needed to calculate the text bounding box
-        fontSize: preset.fontSize || (styleId ? 96 : 48),
         // Pass the effect definition for accurate bounding box calculation
         effectDefinition,
       });

@@ -6,14 +6,15 @@ import fs from "fs";
 
 const host = process.env.TAURI_DEV_HOST;
 
-// In local development, resolve packages from the sibling clypra-studio
+// In local development, resolve packages from the sibling clypra-packages
 // workspace source for hot-reload. In CI / production builds (where the
 // sibling repo doesn't exist), fall through to node_modules which holds
-// the published npm versions (@clypra/ui-color-picker@0.1.0, etc.).
-const workspacePackagesDir = path.resolve(
-  __dirname,
-  "../clypra-studio/packages",
-);
+// the published npm versions (@clypra/ui-color-picker@0.2.1, etc.).
+const packagesCandidate = path.resolve(__dirname, "../clypra-packages/packages");
+const legacyCandidate = path.resolve(__dirname, "../clypra-studio/packages");
+const workspacePackagesDir = fs.existsSync(packagesCandidate)
+  ? packagesCandidate
+  : legacyCandidate;
 const hasWorkspace = fs.existsSync(workspacePackagesDir);
 
 const workspaceAlias = hasWorkspace
@@ -31,6 +32,13 @@ const workspaceAlias = hasWorkspace
         "clypra-engine/src/transitions/index.ts",
       ),
       "@clypra/engine": path.resolve(
+        workspacePackagesDir,
+        "clypra-engine/src/index.ts",
+      ),
+      // Text effects must use the same sibling shared-engine source in local
+      // development as Studio; otherwise the editor silently tests the stale
+      // npm package and can diverge on contributor state/rendering.
+      "@clypra-studio/engine": path.resolve(
         workspacePackagesDir,
         "clypra-engine/src/index.ts",
       ),
@@ -104,7 +112,7 @@ export default defineConfig(async () => ({
     // and cannot leave a browser-only readiness timer behind after teardown.
     server: {
       deps: {
-        inline: ["@clypra-studio/engine"],
+        inline: ["@clypra-studio/engine", "@clypra/ui-color-picker", /@floating-ui/],
       },
     },
     // Some stores initialize background timers (e.g. AudioEngine, Zustand

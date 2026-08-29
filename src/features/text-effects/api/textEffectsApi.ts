@@ -10,19 +10,25 @@ export interface TextEffectSummary {
   tags: string[];
   thumbnail: string;
   description: string;
+  schemaVersion?: number;
+  revisionId?: string;
+  contentHash?: string;
+  rendererVersion?: string;
+  revision?: {
+    revisionId?: string;
+    contentHash?: string;
+    rendererVersion?: string;
+  };
 }
 
 const BASE = getApiBaseUrl();
 
-export const TEXT_EFFECT_CATEGORIES = [
-  "3d", // second most requested, used in thumbnails + titles
-  "neon", // highest demand on CapCut, defines "creator aesthetic"
-  "essentials", // plain bold/clean text — every editor's starting point
-  "glitch", // VHS/retro digital — consistent top performer
-  "gradient", // versatile, works across all content types
-  "outline", // clean, readable, popular for captions + lower thirds
-  "clean", // legacy published catalog category retained for backwards compatibility
-] as const;
+export {
+  TEXT_EFFECT_CATEGORY_IDS,
+  type TextEffectCategoryId,
+  TEXT_EFFECT_CATEGORY_OPTIONS,
+  TEXT_EFFECT_CATEGORIES,
+} from "@/constants/textEffectCategories";
 
 export const TextEffectsApi = {
   // In-memory cache map to avoid duplicate network calls when users toggle effects
@@ -87,6 +93,18 @@ export const TextEffectsApi = {
       }
 
       const data = await res.json();
+      // A catalog republish may keep the same asset id. Evict only the
+      // unpinned latest entry when the manifest advertises a new revision;
+      // revision-specific entries remain valid and immutable.
+      for (const item of data as TextEffectSummary[]) {
+        const cacheKey = `${category}:${item.id}:latest`;
+        const cached = this._effectsCache.get(cacheKey) as any;
+        const cachedRevisionId = cached?.revisionId ?? cached?.revision?.revisionId;
+        const manifestRevisionId = item.revisionId ?? item.revision?.revisionId;
+        if (cached && manifestRevisionId && cachedRevisionId !== manifestRevisionId) {
+          this._effectsCache.delete(cacheKey);
+        }
+      }
       console.log(`[TextEffectsApi] Successfully loaded ${data.length} effects for category: ${category}`);
       return data;
     } catch (error) {
@@ -99,14 +117,22 @@ export const TextEffectsApi = {
   },
 
   // 2. LAZY-LOAD heavy configurations on selection with RAM caching
-  async getFullEffect(category: string, id: string): Promise<TextEffectDefinition> {
-    const cacheKey = `${category}:${id}`;
+  async getFullEffect(
+    category: string,
+    id: string,
+    options: { forceRefresh?: boolean; revisionId?: string } = {},
+  ): Promise<TextEffectDefinition> {
+    const cacheKey = `${category}:${id}:${options.revisionId || "latest"}`;
     let data: TextEffectDefinition;
 
-    if (this._effectsCache.has(cacheKey)) {
+    if (!options.forceRefresh && this._effectsCache.has(cacheKey)) {
       data = this._effectsCache.get(cacheKey)!;
     } else {
-      const res = await fetch(`${BASE}/text-effects/${category}/${id}`, {
+      const endpoint = options.revisionId
+        ? `${BASE}/text-effects/${category}/${id}/revisions/${options.revisionId}`
+        : `${BASE}/text-effects/${category}/${id}`;
+      const res = await fetch(endpoint, {
+        cache: options.forceRefresh ? "no-store" : "default",
         headers: getApiHeaders(),
       });
       if (!res.ok) throw new Error(`Failed to load heavy configuration for effect: ${id}`);
@@ -120,6 +146,13 @@ export const TextEffectsApi = {
       const { useEffectsStore } = await import("../store/effectsStore");
       useEffectsStore.setState((state) => ({
         definitions: { ...state.definitions, [id]: data as any },
+        definitionRevisions: {
+          ...state.definitionRevisions,
+          [id]: {
+            revisionId: (data as any).revisionId ?? (data as any).revision?.revisionId,
+            contentHash: (data as any).contentHash ?? (data as any).revision?.contentHash,
+          },
+        },
       }));
     } catch (e) {
       console.warn("[TextEffectsApi] Failed to cache effect definition in store:", e);
@@ -142,17 +175,31 @@ export const TextEffectsApi = {
       headers: getApiHeaders(),
     });
     if (!res.ok) throw new Error(`Failed to load templates for category: ${category}`);
-    return res.json();
+    const data = await res.json() as TemplateDefinition[];
+    for (const item of data as any[]) {
+      const cacheKey = `${category}:${item.id}:latest`;
+      const cached = this._templateCache.get(cacheKey);
+      const cachedRevisionId = cached?.revisionId ?? cached?.revision?.revisionId;
+      const manifestRevisionId = item.revisionId ?? item.revision?.revisionId;
+      if (cached && manifestRevisionId && cachedRevisionId !== manifestRevisionId) {
+        this._templateCache.delete(cacheKey);
+      }
+    }
+    return data;
   },
 
   // 5. LAZY-LOAD heavy canvas templates on-timeline placement with RAM caching
-  async getTemplateData(category: string, id: string): Promise<any> {
-    const cacheKey = `${category}:${id}`;
-    if (this._templateCache.has(cacheKey)) {
+  async getTemplateData(category: string, id: string, options: { forceRefresh?: boolean; revisionId?: string } = {}): Promise<any> {
+    const cacheKey = `${category}:${id}:${options.revisionId || "latest"}`;
+    if (!options.forceRefresh && this._templateCache.has(cacheKey)) {
       return this._templateCache.get(cacheKey)!;
     }
 
-    const res = await fetch(`${BASE}/text-templates/${category}/${id}`, {
+    const endpoint = options.revisionId
+      ? `${BASE}/text-templates/${category}/${id}/revisions/${options.revisionId}`
+      : `${BASE}/text-templates/${category}/${id}`;
+    const res = await fetch(endpoint, {
+      cache: options.forceRefresh ? "no-store" : "default",
       headers: getApiHeaders(),
     });
     if (!res.ok) throw new Error(`Failed to load template payload for: ${id}`);
