@@ -19,12 +19,12 @@
  * - FFmpeg error logging
  */
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeBody, Request};
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 /// Export progress update.
@@ -149,10 +149,10 @@ pub struct ExportConfig {
 /// Active export session.
 struct ExportSession {
     /// FFmpeg child process
-    process: Child,
+    process: Option<Child>,
 
     /// Stdin handle for writing frames
-    stdin: tokio::process::ChildStdin,
+    stdin: Option<tokio::process::ChildStdin>,
 
     /// Current frame count
     current_frame: u32,
@@ -201,16 +201,88 @@ const PROGRESS_THROTTLE_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// `ffmpeg` and `ffprobe` (typically in /opt/homebrew/bin or /usr/local/bin)
 /// may not be found with the default PATH.
 pub(crate) fn augmented_path() -> String {
-    let current = std::env::var("PATH").unwrap_or_default();
-    if cfg!(target_os = "windows") {
-        return current;
+    crate::commands::binary_resolver::augmented_path()
+}
+
+/// Atomically commit an exported file by renaming, with fallback to copy+delete
+/// when crossing physical filesystems or volumes (EXDEV).
+pub(crate) async fn atomic_or_copy_commit(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> Result<(), String> {
+    if let Some(parent) = dst.parent() {
+        if !parent.exists() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create destination directory: {}", e))?;
+        }
     }
-    let extra = "/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin";
-    if current.is_empty() {
-        extra.to_string()
-    } else {
-        format!("{}:{}", current, extra)
+
+    match tokio::fs::rename(src, dst).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let is_cross_device = err.kind() == std::io::ErrorKind::CrossesDevices
+                || err.raw_os_error() == Some(18) // EXDEV on Unix
+                || err.raw_os_error() == Some(17); // EXDEV on Windows
+
+            if is_cross_device {
+                tokio::fs::copy(src, dst)
+                    .await
+                    .map_err(|e| format!("Failed to copy file across filesystems: {}", e))?;
+                let _ = tokio::fs::remove_file(src).await;
+                Ok(())
+            } else {
+                Err(format!("Failed to commit file: {}", err))
+            }
+        }
     }
+}
+
+/// Validate compositor export configuration parameters.
+pub(crate) fn validate_compositor_export_config(config: &ExportConfig) -> Result<(), String> {
+    if config.width == 0 || config.height == 0 {
+        return Err(format!(
+            "Invalid export dimensions: {}x{}",
+            config.width, config.height
+        ));
+    }
+    if config.width > 7680 || config.height > 4320 {
+        return Err(format!(
+            "Export dimensions too large: {}x{} (max 7680x4320)",
+            config.width, config.height
+        ));
+    }
+    if !config.frame_rate.is_finite() || config.frame_rate <= 0.0 || config.frame_rate > 240.0 {
+        return Err(format!("Invalid frame rate: {}", config.frame_rate));
+    }
+    if config.total_frames == 0 {
+        return Err("total_frames must be greater than 0".to_string());
+    }
+    if config.output_path.trim().is_empty() {
+        return Err("output_path cannot be empty".to_string());
+    }
+    if let Some(clips) = &config.audio_clips {
+        for clip in clips {
+            if !clip.duration.is_finite() || clip.duration <= 0.0 {
+                return Err(format!("Invalid audio clip duration: {}", clip.duration));
+            }
+            if !clip.trim_in.is_finite() || clip.trim_in < 0.0 {
+                return Err(format!("Invalid audio clip trim_in: {}", clip.trim_in));
+            }
+            if !clip.start_time.is_finite() || clip.start_time < 0.0 {
+                return Err(format!("Invalid audio clip start_time: {}", clip.start_time));
+            }
+            if !clip.volume.is_finite() || clip.volume < 0.0 {
+                return Err(format!("Invalid audio clip volume: {}", clip.volume));
+            }
+            if let Some(pan) = clip.pan {
+                if !pan.is_finite() || !(-1.0..=1.0).contains(&pan) {
+                    return Err(format!("Invalid audio clip pan: {}", pan));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Probe whether a media file has an audio stream.
@@ -220,10 +292,7 @@ pub(crate) fn augmented_path() -> String {
 /// Tokio async runtime for the entire duration of each ffprobe call —
 /// starving other concurrent async tasks (progress updates, IPC responses).
 async fn has_audio_stream(path: &str) -> bool {
-    let path_env = augmented_path();
-
-    let output = Command::new("ffprobe")
-        .env("PATH", &path_env)
+    let output = crate::commands::binary_resolver::create_async_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -257,8 +326,8 @@ async fn has_audio_stream(path: &str) -> bool {
         }
         Err(e) => {
             eprintln!(
-                "[has_audio_stream] Could not spawn ffprobe (PATH={}): {}",
-                path_env, e
+                "[has_audio_stream] Could not spawn ffprobe: {}",
+                e
             );
             false
         }
@@ -273,26 +342,14 @@ pub async fn start_video_export(
     config: ExportConfig,
     on_progress: Channel<ExportProgress>,
 ) -> Result<String, String> {
-    // Validate frame dimensions before starting export
-    if config.width == 0 || config.height == 0 {
-        return Err(format!(
-            "Invalid export dimensions: {}x{}",
-            config.width, config.height
-        ));
-    }
-    if config.width > 7680 || config.height > 4320 {
-        return Err(format!(
-            "Export dimensions too large: {}x{} (max 7680x4320)",
-            config.width, config.height
-        ));
-    }
+    // Validate export parameters
+    validate_compositor_export_config(&config)?;
 
     // Generate session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
     // Build FFmpeg command
-    let mut cmd = Command::new("ffmpeg");
-    cmd.env("PATH", augmented_path());
+    let mut cmd = crate::commands::binary_resolver::create_async_command("ffmpeg");
 
     // Input 0: raw RGBA frames from stdin
     cmd.arg("-thread_queue_size")
@@ -311,11 +368,19 @@ pub async fn start_video_export(
         .arg("-vsync")
         .arg("cfr");
 
-    // Filter out and collect audio clips that actually contain audio streams
+    // Filter out and collect audio clips that actually contain audio streams concurrently
     let mut valid_audio_clips = Vec::new();
     if let Some(clips) = &config.audio_clips {
+        let unique_paths: HashSet<String> = clips.iter().map(|c| c.path.clone()).collect();
+        let probe_futures = unique_paths.into_iter().map(|path| async move {
+            let has_audio = has_audio_stream(&path).await;
+            (path, has_audio)
+        });
+        let probe_results: HashMap<String, bool> =
+            futures_util::future::join_all(probe_futures).await.into_iter().collect();
+
         for clip in clips {
-            if has_audio_stream(&clip.path).await {
+            if *probe_results.get(&clip.path).unwrap_or(&false) {
                 valid_audio_clips.push(clip.clone());
             } else {
                 eprintln!(
@@ -596,8 +661,8 @@ pub async fn start_video_export(
 
     // Create session
     let session = ExportSession {
-        process: child,
-        stdin,
+        process: Some(child),
+        stdin: Some(stdin),
         current_frame: 0,
         total_frames: config.total_frames,
         start_time: std::time::Instant::now(),
@@ -712,17 +777,20 @@ pub async fn write_export_frame(request: Request<'_>) -> Result<(), String> {
     // MONITORING: Track frame write timing
     let write_start = std::time::Instant::now();
 
-    // Write frame data to FFmpeg stdin
-    session
+    let stdin = session
         .stdin
+        .as_mut()
+        .ok_or_else(|| "Export session stdin is closed or terminating".to_string())?;
+
+    // Write frame data to FFmpeg stdin
+    stdin
         .write_all(frame_data)
         .await
         .map_err(|e| format!("Failed to write frame: {}", e))?;
 
     // Flush stdin buffer after each frame to ensure FFmpeg processes it immediately
     // This prevents PTS discontinuities from buffering delays
-    session
-        .stdin
+    stdin
         .flush()
         .await
         .map_err(|e| format!("Failed to flush frame: {}", e))?;
@@ -884,15 +952,18 @@ pub async fn write_export_frames_batch(request: Request<'_>) -> Result<(), Strin
     // Write all frames in batch
     let write_start = std::time::Instant::now();
 
-    session
+    let stdin = session
         .stdin
+        .as_mut()
+        .ok_or_else(|| "Export session stdin is closed or terminating".to_string())?;
+
+    stdin
         .write_all(batch_data)
         .await
         .map_err(|e| format!("Failed to write batch: {}", e))?;
 
     // Flush after batch (not per frame - reduces syscalls)
-    session
-        .stdin
+    stdin
         .flush()
         .await
         .map_err(|e| format!("Failed to flush batch: {}", e))?;
@@ -972,25 +1043,21 @@ pub async fn finalize_video_export(session_id: String) -> Result<(), String> {
             .ok_or_else(|| format!("Export session not found: {}", session_id))?
     };
 
-    // Take exclusive ownership of the session by unwrapping the Arc.
-    // Since we just removed it from the map, no other holder exists.
-    let session = Arc::try_unwrap(session_arc)
-        .map_err(|_| "Export session is still referenced; cannot finalize".to_string())?
-        .into_inner();
-
-    // Destructure to obtain owned fields needed for async moves
-    let ExportSession {
-        process,
-        stdin,
-        current_frame,
-        start_time,
-        temp_output_path,
-        final_output_path,
-        ..
-    } = session;
+    // Lock session directly — waits for any concurrent in-flight batch write to complete
+    let mut session = session_arc.lock().await;
 
     // Close stdin to signal end of input
-    drop(stdin);
+    let _ = session.stdin.take();
+
+    let process = session
+        .process
+        .take()
+        .ok_or_else(|| "Export process has already been finalized or cancelled".to_string())?;
+
+    let temp_output_path = session.temp_output_path.clone();
+    let final_output_path = session.final_output_path.clone();
+    let start_time = session.start_time;
+    let current_frame = session.current_frame;
 
     // Wait for FFmpeg to finish
     let output = match process.wait_with_output().await {
@@ -1003,12 +1070,11 @@ pub async fn finalize_video_export(session_id: String) -> Result<(), String> {
     };
 
     let elapsed = start_time.elapsed();
-
     super::native_export::release_export_slot();
 
     if output.status.success() {
-        // Atomic commit: rename temporary file to destination path
-        if let Err(e) = tokio::fs::rename(&temp_output_path, &final_output_path).await {
+        // Atomic commit (with EXDEV cross-filesystem fallback)
+        if let Err(e) = atomic_or_copy_commit(&temp_output_path, &final_output_path).await {
             let _ = tokio::fs::remove_file(&temp_output_path).await;
             return Err(format!("Failed to commit final export file: {}", e));
         }
@@ -1038,37 +1104,37 @@ pub async fn finalize_video_export(session_id: String) -> Result<(), String> {
 pub async fn cancel_video_export(session_id: String) -> Result<(), String> {
     let session_arc = {
         let mut sessions = EXPORT_SESSIONS.lock().await;
-        sessions
-            .remove(&session_id)
-            .ok_or_else(|| format!("Export session not found: {}", session_id))?
+        sessions.remove(&session_id)
     };
 
-    // Take exclusive ownership of the session by unwrapping the Arc.
-    // Since we just removed it from the map, no other holder exists.
-    let session = Arc::try_unwrap(session_arc)
-        .map_err(|_| "Export session is still referenced; cannot cancel".to_string())?
-        .into_inner();
+    let Some(session_arc) = session_arc else {
+        // Session already cleaned up or never existed
+        return Ok(());
+    };
 
-    let ExportSession {
-        mut process,
-        current_frame,
-        temp_output_path,
-        ..
-    } = session;
+    let mut session = session_arc.lock().await;
 
-    // Kill FFmpeg process
-    if let Err(e) = process.kill().await {
-        eprintln!(
-            "[cancel_video_export] Could not kill FFmpeg (already exited?): {}",
-            e
-        );
+    // Drop stdin to terminate input pipe
+    let _ = session.stdin.take();
+
+    let process = session.process.take();
+    let temp_output_path = session.temp_output_path.clone();
+    let current_frame = session.current_frame;
+
+    // Kill FFmpeg process if running
+    if let Some(mut child) = process {
+        if let Err(e) = child.kill().await {
+            eprintln!(
+                "[cancel_video_export] Could not kill FFmpeg (already exited?): {}",
+                e
+            );
+        }
+
+        // CRITICAL: Reap child process and drain OS handles (especially on Windows).
+        let _ = child.wait().await;
     }
 
-    // CRITICAL: Reap child process and drain OS handles (especially on Windows).
-    // This prevents zombie PIDs on POSIX and file-lock lingering on Windows.
-    let _ = process.wait().await;
-
-    // Clean up temporary partial file (never touches the user's final path)
+    // Clean up temporary partial file
     if let Err(e) = tokio::fs::remove_file(&temp_output_path).await {
         eprintln!(
             "[cancel_video_export] Could not delete temporary file {:?}: {}",
@@ -1093,8 +1159,7 @@ pub async fn cancel_video_export(session_id: String) -> Result<(), String> {
 /// Check if FFmpeg is available on the system.
 #[tauri::command]
 pub async fn check_ffmpeg_available() -> Result<bool, String> {
-    let output = Command::new("ffmpeg")
-        .env("PATH", augmented_path())
+    let output = crate::commands::binary_resolver::create_async_command("ffmpeg")
         .arg("-version")
         .output()
         .await;
@@ -1108,8 +1173,7 @@ pub async fn check_ffmpeg_available() -> Result<bool, String> {
 /// Get FFmpeg version information.
 #[tauri::command]
 pub async fn get_ffmpeg_version() -> Result<String, String> {
-    let output = Command::new("ffmpeg")
-        .env("PATH", augmented_path())
+    let output = crate::commands::binary_resolver::create_async_command("ffmpeg")
         .arg("-version")
         .output()
         .await
@@ -1137,8 +1201,7 @@ pub async fn run_wgpu_smoke_test(output_path: String) -> Result<String, String> 
 
     let wgpu_renderer = crate::wgpu_compositor::NativeWgpuRenderer::new().await?;
 
-    let mut cmd = Command::new("ffmpeg");
-    cmd.env("PATH", augmented_path());
+    let mut cmd = crate::commands::binary_resolver::create_async_command("ffmpeg");
     cmd.arg("-thread_queue_size")
         .arg("8")
         .arg("-f")
@@ -1172,7 +1235,11 @@ pub async fn run_wgpu_smoke_test(output_path: String) -> Result<String, String> 
         .ok_or_else(|| "Failed to open FFmpeg stdin".to_string())?;
 
     for frame_idx in 0..total_frames {
-        let t = frame_idx as f64 / (total_frames - 1) as f64;
+        let t = if total_frames > 1 {
+            frame_idx as f64 / (total_frames - 1) as f64
+        } else {
+            0.0
+        };
         let rgba_buffer = wgpu_renderer
             .render_rectangle_frame(width, height, t)
             .await?;
@@ -1214,8 +1281,7 @@ pub async fn run_native_document_wgpu_export(
 
     let wgpu_renderer = crate::wgpu_compositor::NativeWgpuRenderer::new().await?;
 
-    let mut cmd = Command::new("ffmpeg");
-    cmd.env("PATH", augmented_path());
+    let mut cmd = crate::commands::binary_resolver::create_async_command("ffmpeg");
     cmd.arg("-thread_queue_size")
         .arg("8")
         .arg("-f")
@@ -1249,7 +1315,11 @@ pub async fn run_native_document_wgpu_export(
         .ok_or_else(|| "Failed to open FFmpeg stdin".to_string())?;
 
     for frame_idx in 0..total_frames {
-        let t = frame_idx as f64 / (total_frames - 1) as f64;
+        let t = if total_frames > 1 {
+            frame_idx as f64 / (total_frames - 1) as f64
+        } else {
+            0.0
+        };
         let rgba_buffer = wgpu_renderer.render_overlay_document(&doc, t).await?;
         stdin
             .write_all(&rgba_buffer)
@@ -1302,6 +1372,193 @@ mod tests {
         assert!(expression.contains("if(lt(t\\,2.000000)"));
         assert!(expression.contains("pow("));
         assert!(expression.contains("0.500000"));
+    }
+
+    fn base_test_config() -> ExportConfig {
+        ExportConfig {
+            output_path: "/tmp/test_export.mp4".to_string(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 30.0,
+            total_frames: 90,
+            codec: "h264".to_string(),
+            preset: "medium".to_string(),
+            crf: 23,
+            pixel_format: "yuv420p".to_string(),
+            audio_clips: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_compositor_export_config_valid() {
+        let config = base_test_config();
+        assert!(validate_compositor_export_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_compositor_export_config_invalid_dimensions() {
+        let mut config = base_test_config();
+        config.width = 0;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid export dimensions"));
+
+        config.width = 1920;
+        config.height = 0;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid export dimensions"));
+
+        config.width = 8000;
+        config.height = 1080;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Export dimensions too large"));
+    }
+
+    #[test]
+    fn test_validate_compositor_export_config_invalid_frame_rate() {
+        let mut config = base_test_config();
+        config.frame_rate = 0.0;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid frame rate"));
+
+        config.frame_rate = -24.0;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid frame rate"));
+
+        config.frame_rate = f64::NAN;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid frame rate"));
+
+        config.frame_rate = f64::INFINITY;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid frame rate"));
+
+        config.frame_rate = 300.0;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid frame rate"));
+    }
+
+    #[test]
+    fn test_validate_compositor_export_config_zero_frames() {
+        let mut config = base_test_config();
+        config.total_frames = 0;
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("total_frames must be greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_compositor_export_config_empty_output_path() {
+        let mut config = base_test_config();
+        config.output_path = "   ".to_string();
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("output_path cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_compositor_export_config_audio_bounds() {
+        let mut config = base_test_config();
+        config.audio_clips = Some(vec![ExportAudioClip {
+            path: "/tmp/audio.mp3".to_string(),
+            start_time: 0.0,
+            duration: -1.0,
+            trim_in: 0.0,
+            volume: 1.0,
+            fade_in: None,
+            fade_out: None,
+            fade_in_curve: None,
+            fade_out_curve: None,
+            pan: None,
+            eq_low: None,
+            eq_mid: None,
+            eq_high: None,
+            noise_suppression: None,
+            volume_keyframes: None,
+            channel_mode: None,
+            downmix: None,
+            channel_map: None,
+        }]);
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid audio clip duration"));
+
+        let mut config = base_test_config();
+        config.audio_clips = Some(vec![ExportAudioClip {
+            path: "/tmp/audio.mp3".to_string(),
+            start_time: -0.5,
+            duration: 1.0,
+            trim_in: 0.0,
+            volume: 1.0,
+            fade_in: None,
+            fade_out: None,
+            fade_in_curve: None,
+            fade_out_curve: None,
+            pan: None,
+            eq_low: None,
+            eq_mid: None,
+            eq_high: None,
+            noise_suppression: None,
+            volume_keyframes: None,
+            channel_mode: None,
+            downmix: None,
+            channel_map: None,
+        }]);
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid audio clip start_time"));
+
+        let mut config = base_test_config();
+        config.audio_clips = Some(vec![ExportAudioClip {
+            path: "/tmp/audio.mp3".to_string(),
+            start_time: 0.0,
+            duration: 1.0,
+            trim_in: 0.0,
+            volume: 1.0,
+            fade_in: None,
+            fade_out: None,
+            fade_in_curve: None,
+            fade_out_curve: None,
+            pan: Some(2.5),
+            eq_low: None,
+            eq_mid: None,
+            eq_high: None,
+            noise_suppression: None,
+            volume_keyframes: None,
+            channel_mode: None,
+            downmix: None,
+            channel_map: None,
+        }]);
+        assert!(validate_compositor_export_config(&config).unwrap_err().contains("Invalid audio clip pan"));
+    }
+
+    #[tokio::test]
+    async fn test_atomic_or_copy_commit_success() {
+        let dir = std::env::temp_dir().join(format!("clypra-test-commit-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let src = dir.join("test_src.tmp");
+        let dst = dir.join("subdir").join("test_dst.mp4");
+
+        tokio::fs::write(&src, b"video_data_123").await.unwrap();
+        assert!(src.exists());
+
+        let res = atomic_or_copy_commit(&src, &dst).await;
+        assert!(res.is_ok(), "Commit failed: {:?}", res);
+        assert!(!src.exists(), "Source should have been renamed or removed");
+        assert!(dst.exists(), "Destination should exist");
+        let data = tokio::fs::read(&dst).await.unwrap();
+        assert_eq!(data, b"video_data_123");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn test_smoke_test_normalized_t_underflow_guard() {
+        let total_frames = 1u32;
+        let t = if total_frames > 1 {
+            0.0 / (total_frames - 1) as f64
+        } else {
+            0.0
+        };
+        assert_eq!(t, 0.0);
+
+        let total_frames = 0u32;
+        let t = if total_frames > 1 {
+            0.0 / (total_frames - 1) as f64
+        } else {
+            0.0
+        };
+        assert_eq!(t, 0.0);
+
+        let total_frames = 5u32;
+        let t0 = 0.0 / (total_frames - 1) as f64;
+        let t_last = 4.0 / (total_frames - 1) as f64;
+        assert_eq!(t0, 0.0);
+        assert_eq!(t_last, 1.0);
     }
 
     /// GPU rendering tests — require a real hardware adapter.

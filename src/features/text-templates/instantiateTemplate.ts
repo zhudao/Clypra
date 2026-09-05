@@ -14,6 +14,7 @@ import type { Clip, TextClip } from "@/types";
 import { generateId } from "@/lib/utils/id";
 import { resolveTextEffectDefinition } from "@/lib/text/textClip";
 import type { TemplateDefinition, TemplateCustomization, TemplateElement } from "./types";
+import { resolveTextTemplateArtifact, type TextTemplateArtifact } from "@clypra-studio/engine";
 
 export interface InstantiateTemplateOptions {
   /** Target timeline track ID */
@@ -35,6 +36,12 @@ export function instantiateTemplate(
   template: TemplateDefinition,
   options: InstantiateTemplateOptions
 ): Clip {
+  // Legacy definitions still instantiate through the compatibility adapter;
+  // only a canonical artifact gets the first-class clip representation.
+  const artifact = resolveTextTemplateArtifact(template, { allowLegacy: false });
+  if (artifact) {
+    return instantiateTextTemplateArtifact(artifact, options);
+  }
   const compoundId = generateId("compound");
   const duration = template.defaultDuration || template.duration || 4.0;
   const canvasWidth = options.canvasWidth || template.canvasWidth || 1920;
@@ -103,6 +110,80 @@ export function instantiateTemplate(
 }
 
 /**
+ * Creates a first-class template instance. The artifact is pinned on the clip
+ * and materialized only by the timeline evaluator, so catalog republishing
+ * cannot mutate an existing edit.
+ */
+export function instantiateTextTemplateArtifact(
+  artifact: TextTemplateArtifact,
+  options: InstantiateTemplateOptions & { controlValues?: Record<string, unknown> },
+): Clip {
+  const controlValues: Record<string, unknown> = { ...(options.controlValues || {}) };
+  const textNodes = artifact.document.nodes.filter((node: any) => node.type === "text") as any[];
+  for (const control of artifact.controls) {
+    const node = artifact.document.nodes.find((candidate: any) => candidate.id === control.target.nodeId) as any;
+    const role = node?.role || "";
+    const nodeIndex = textNodes.findIndex((candidate) => candidate.id === control.target.nodeId);
+    if (control.type === "text") {
+      const value = options.customization?.layerTexts?.[control.target.nodeId]
+        ?? (role === "primary" ? options.customization?.primaryText : role === "secondary" ? options.customization?.secondaryText : role === "accent" ? options.customization?.accentText : undefined)
+        ?? (nodeIndex === 0 ? options.customization?.primaryText : nodeIndex === 1 ? options.customization?.secondaryText : nodeIndex === 2 ? options.customization?.accentText : undefined);
+      if (value !== undefined) controlValues[control.id] = value;
+    } else if (control.type === "color") {
+      const value = options.customization?.layerColors?.[control.target.nodeId]
+        ?? (role === "secondary" ? options.customization?.secondaryColor : options.customization?.primaryColor);
+      if (value !== undefined) controlValues[control.id] = value;
+    }
+  }
+  const duration = options.controlValues && artifact.timing.durationPolicy === "fixed"
+    ? artifact.timing.duration
+    : artifact.timing.duration;
+
+  const primaryText =
+    (Object.values(controlValues).find((val) => typeof val === "string" && val.trim().length > 0) as string) ||
+    textNodes[0]?.text ||
+    "";
+
+  const cleanLabel = artifact.metadata.label
+    ? artifact.metadata.label.replace(/^text-template-/, "").replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    : "Text Template";
+
+  return {
+    id: generateId("text-template"),
+    name: cleanLabel,
+    text: primaryText || cleanLabel,
+    kind: "text-template",
+    trackId: options.trackId,
+    startTime: options.startTime,
+    duration,
+    trimIn: 0,
+    trimOut: 0,
+    x: 0,
+    y: 0,
+    width: options.canvasWidth || artifact.document.canvas.width,
+    height: options.canvasHeight || artifact.document.canvas.height,
+    opacity: 1,
+    rotation: 0,
+    mediaId: `text-template-${artifact.metadata.id}`,
+    role: "text",
+    templateId: artifact.metadata.id,
+    templateVersion: artifact.document.templateVersion,
+    templateRevisionId: artifact.revision.revisionId,
+    templateContentHash: artifact.revision.contentHash,
+    templateSnapshot: cloneSerializable(artifact),
+    templateControlValues: cloneSerializable(controlValues),
+    templateDependencySnapshot: cloneSerializable(artifact.dependencies),
+    templateDependencies: artifact.dependencies.textEffects.map((dependency) => ({
+      effectId: dependency.effectId,
+      revisionId: dependency.revisionId,
+      contentHash: dependency.contentHash,
+      snapshot: dependency.snapshot as any,
+    })),
+    compoundPreview: artifact.previews?.thumbnailUrl,
+  } as Clip;
+}
+
+/**
  * Instantiates a single TemplateElement into a timeline child clip.
  */
 export function instantiateTemplateElement(
@@ -146,7 +227,7 @@ export function instantiateTemplateElement(
       color: "#FFFFFF",
     };
     const pinnedStyleDefinition = resolveTextEffectDefinition(
-      textProps.styleId,
+      textProps.styleId ?? textProps.styleRef?.effectId,
       textProps.styleDefinition,
     );
 
@@ -177,22 +258,40 @@ export function instantiateTemplateElement(
       fontSize: textProps.fontSize || 48,
       color: textProps.color || "#FFFFFF",
       align: textProps.align || "center",
-      valign: "middle",
+      valign: textProps.verticalAlign || "middle",
       paddingX: 0,
       paddingY: 0,
       fontWeight: textProps.fontWeight ?? 400,
       fontStyle: textProps.fontStyle || "normal",
       letterSpacing: textProps.letterSpacing ?? 0,
       lineHeight: textProps.lineHeight ?? 1.2,
-      styleId: textProps.styleId,
+      fontId: textProps.fontId,
+      maxWidth: textProps.maxWidth,
+      stroke: textProps.stroke,
+      shadow: textProps.shadow,
+      background: textProps.background,
+      backgroundColor: textProps.backgroundColor,
+      entranceAnimation: textProps.animation
+        ? {
+            type: textProps.animation.preset as any,
+            duration: textProps.animation.duration,
+            easing: "ease-out",
+          }
+        : undefined,
+      styleId: textProps.styleId ?? textProps.styleRef?.effectId,
       styleVersion:
         textProps.styleVersion ?? (Number(pinnedStyleDefinition?.version) || 1),
       parameterOverrides: textProps.parameterOverrides
         ? cloneSerializable(textProps.parameterOverrides)
-        : undefined,
+        : textProps.styleRef?.parameterOverrides
+          ? cloneSerializable(textProps.styleRef.parameterOverrides)
+          : undefined,
       styleDefinition: pinnedStyleDefinition
         ? cloneSerializable(pinnedStyleDefinition)
         : undefined,
+      styleRevisionId: textProps.styleRef?.revisionId ?? (textProps as any).styleRevisionId,
+      styleContentHash: textProps.styleRef?.contentHash ?? (textProps as any).styleContentHash,
+      styleSnapshot: textProps.styleRef?.snapshot ?? (textProps as any).styleSnapshot,
       templateId,
       templateVersion,
       templateRevisionId,
@@ -206,7 +305,7 @@ export function instantiateTemplateElement(
       rotation: 0,
       opacity: 1,
       zIndex: element.zIndex ?? (index + 1),
-      textRole: "title",
+      textRole: textProps.textRole || "title",
     };
 
     return textClip as Clip;
@@ -296,7 +395,7 @@ export function applyTemplateStyle(
     color: "#FFFFFF",
   };
   const pinnedStyleDefinition = resolveTextEffectDefinition(
-    textProps.styleId,
+    textProps.styleId ?? textProps.styleRef?.effectId,
     textProps.styleDefinition,
   );
 
@@ -308,22 +407,31 @@ export function applyTemplateStyle(
     fontSize: textProps.fontSize || targetClip.fontSize,
     color: textProps.color || targetClip.color,
     align: textProps.align || targetClip.align,
+    valign: textProps.verticalAlign ?? targetClip.valign,
     fontWeight: textProps.fontWeight ?? targetClip.fontWeight,
     fontStyle: textProps.fontStyle || targetClip.fontStyle,
     letterSpacing: textProps.letterSpacing ?? targetClip.letterSpacing,
     lineHeight: textProps.lineHeight ?? targetClip.lineHeight,
-    styleId: textProps.styleId,
+    fontId: textProps.fontId ?? targetClip.fontId,
+    maxWidth: textProps.maxWidth ?? targetClip.maxWidth,
+    stroke: textProps.stroke ?? targetClip.stroke,
+    shadow: textProps.shadow ?? targetClip.shadow,
+    background: textProps.background ?? targetClip.background,
+    backgroundColor: textProps.backgroundColor ?? targetClip.backgroundColor,
+    styleId: textProps.styleId ?? textProps.styleRef?.effectId,
     styleVersion:
       textProps.styleVersion ?? (Number(pinnedStyleDefinition?.version) || 1),
     parameterOverrides: textProps.parameterOverrides
       ? cloneSerializable(textProps.parameterOverrides)
-      : undefined,
-      styleDefinition: pinnedStyleDefinition
-        ? cloneSerializable(pinnedStyleDefinition)
+      : textProps.styleRef?.parameterOverrides
+        ? cloneSerializable(textProps.styleRef.parameterOverrides)
         : undefined,
-      styleRevisionId: textProps.styleRef?.revisionId ?? (textProps as any).styleRevisionId,
-      styleContentHash: textProps.styleRef?.contentHash ?? (textProps as any).styleContentHash,
-      styleSnapshot: textProps.styleRef?.snapshot ?? (textProps as any).styleSnapshot,
+    styleDefinition: pinnedStyleDefinition
+      ? cloneSerializable(pinnedStyleDefinition)
+      : undefined,
+    styleRevisionId: textProps.styleRef?.revisionId ?? (textProps as any).styleRevisionId,
+    styleContentHash: textProps.styleRef?.contentHash ?? (textProps as any).styleContentHash,
+    styleSnapshot: textProps.styleRef?.snapshot ?? (textProps as any).styleSnapshot,
   };
 }
 
@@ -391,11 +499,50 @@ function extractElementsFromLegacyTemplate(template: any): TemplateElement[] {
       textProperties: {
         text: layer.content || "Text",
         fontFamily: layer.fontFamily || "Inter Variable",
-        fontSize: layer.fontSize || 36,
-        color: layer.color || "#FFFFFF",
+        fontSize: typeof layer.fontSize === "number" ? layer.fontSize : 36,
+        color: typeof layer.color === "string" ? layer.color : "#FFFFFF",
         align: layer.align || "left",
-        fontWeight: layer.fontWeight || 400,
-        styleId: layer.styleId,
+        verticalAlign: layer.verticalAlign || "middle",
+        fontWeight: typeof layer.fontWeight === "number" ? layer.fontWeight : 400,
+        fontStyle: layer.fontStyle || "normal",
+        letterSpacing: typeof layer.letterSpacing === "number" ? layer.letterSpacing : 0,
+        lineHeight: typeof layer.lineHeight === "number" ? layer.lineHeight : 1.2,
+        styleId: layer.styleId ?? layer.styleRef?.effectId,
+        styleRef: layer.styleRef,
+        styleDefinition: layer.styleDefinition,
+        styleVersion: layer.styleVersion ?? (layer.styleRef ? 1 : undefined),
+        parameterOverrides: layer.parameterOverrides ?? layer.styleRef?.parameterOverrides,
+        stroke: layer.stroke
+          ? {
+              color: typeof layer.stroke.color === "string" ? layer.stroke.color : "#000000",
+              width: typeof layer.stroke.width === "number" ? layer.stroke.width : 1,
+            }
+          : undefined,
+        shadow: layer.shadow
+          ? {
+              color: typeof layer.shadow.color === "string" ? layer.shadow.color : "#000000",
+              blur: typeof layer.shadow.blur === "number" ? layer.shadow.blur : 0,
+              offsetX: typeof layer.shadow.offsetX === "number" ? layer.shadow.offsetX : 0,
+              offsetY: typeof layer.shadow.offsetY === "number" ? layer.shadow.offsetY : 0,
+            }
+          : undefined,
+        background: layer.backgroundColor
+          ? {
+              color: typeof layer.backgroundColor === "string" ? layer.backgroundColor : "#000000",
+              padding: typeof layer.padding === "number" ? layer.padding : 0,
+              borderRadius: typeof layer.backgroundRadius === "number" ? layer.backgroundRadius : 0,
+            }
+          : undefined,
+        backgroundColor: typeof layer.backgroundColor === "string" ? layer.backgroundColor : undefined,
+        fontId: layer.fontId,
+        maxWidth: typeof layer.maxWidth === "number" ? layer.maxWidth : undefined,
+        textRole: layer.role === "primary" || layer.role === "secondary" ? "title" : undefined,
+        animation: layer.animation
+          ? {
+              preset: layer.animation.in || "none",
+              duration: layer.animation.inDuration || 0.5,
+            }
+          : undefined,
       },
     };
   });

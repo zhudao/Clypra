@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { instantiateTemplate, applyTemplateStyle } from "../instantiateTemplate";
 import { expandCompoundClips } from "@/core/timeline/compoundClips";
+import { normalizeTextTemplateArtifact } from "@clypra-studio/engine";
 import type { TemplateDefinition } from "../types";
 import type { TextClip } from "@/types";
 
@@ -341,5 +342,81 @@ describe("Template Instantiation via Compound Clip Reuse (§1, §2, §3)", () =>
     expect(restyled.color).toBe("#FFFFFF");
     expect(restyled.fontWeight).toBe(700);
     expect(restyled.align).toBe("left");
+  });
+
+  it("keeps canonical template instances as one pinned clip through runtime evaluation", () => {
+    const artifact = normalizeTextTemplateArtifact({
+      id: "canonical-title",
+      label: "Canonical Title",
+      category: "title-card",
+      duration: 3,
+      nodes: [{ id: "headline", name: "Headline", type: "text", x: 0, y: 0, width: 800, height: 120, text: "Hello", style: { fontFamily: "Inter", fontSize: 64, textColor: "#fff" } }],
+    });
+    const clip = instantiateTemplate(artifact as any, { trackId: "track-1", startTime: 0 });
+    expect(clip.kind).toBe("text-template");
+    expect(clip.compoundChildren).toBeUndefined();
+    expect(expandCompoundClips([clip])[0]).toMatchObject({ kind: "text-template", templateId: "canonical-title" });
+  });
+
+  it("extracts and applies full text styling properties and styleRef from legacy template layers", () => {
+    const legacyTemplateWithEffects = {
+      id: "styled-template-v1",
+      version: 1,
+      duration: 4,
+      layers: [
+        {
+          id: "styled-layer-1",
+          kind: "text",
+          content: "Styled Text",
+          fontFamily: "Inter Variable",
+          fontId: "inter-variable",
+          fontSize: 50,
+          fontWeight: 800,
+          fontStyle: "italic",
+          color: "#ffffff",
+          align: "center",
+          verticalAlign: "middle",
+          letterSpacing: 2,
+          lineHeight: 1.4,
+          maxWidth: 900,
+          role: "primary",
+          stroke: { color: "#ff0000", width: 3 },
+          shadow: { color: "rgba(0,0,0,0.8)", blur: 5, offsetX: 3, offsetY: 3 },
+          backgroundColor: "rgba(0,0,0,0.5)",
+          backgroundRadius: 6,
+          padding: 10,
+          styleRef: {
+            effectId: "cyberpunk-glow",
+            revisionId: "v2",
+            contentHash: "hash-cyberpunk-v2",
+            parameterOverrides: { intensity: 1.5 },
+          },
+        },
+      ],
+    };
+
+    const compoundClip = instantiateTemplate(legacyTemplateWithEffects as any, {
+      trackId: "track-styled",
+      startTime: 1,
+    });
+    const child = compoundClip.compoundChildren![0] as TextClip;
+
+    expect(child.text).toBe("Styled Text");
+    expect(child.fontId).toBe("inter-variable");
+    expect(child.fontStyle).toBe("italic");
+    expect(child.fontWeight).toBe(800);
+    expect(child.letterSpacing).toBe(2);
+    expect(child.lineHeight).toBe(1.4);
+    expect(child.maxWidth).toBe(900);
+    expect(child.valign).toBe("middle");
+    expect(child.stroke).toEqual({ color: "#ff0000", width: 3 });
+    expect(child.shadow).toEqual({ color: "rgba(0,0,0,0.8)", blur: 5, offsetX: 3, offsetY: 3 });
+    expect(child.background).toEqual({ color: "rgba(0,0,0,0.5)", padding: 10, borderRadius: 6 });
+    expect(child.backgroundColor).toBe("rgba(0,0,0,0.5)");
+    expect(child.textRole).toBe("title");
+    expect(child.styleId).toBe("cyberpunk-glow");
+    expect(child.styleRevisionId).toBe("v2");
+    expect(child.styleContentHash).toBe("hash-cyberpunk-v2");
+    expect(child.parameterOverrides).toEqual({ intensity: 1.5 });
   });
 });

@@ -16,6 +16,7 @@
  */
 
 import { AUDIO_MODEL_VERSION, normalizeClipAudioProperties } from "./audio";
+import { CAPTION_MODEL_VERSION, type CaptionTrack } from "./captions";
 import type { Project, MediaAsset, Track, Clip, AspectRatio, TransitionTimelineItem, TimelineMarker, CanvasBackgroundConfig, MediaStreamInfo, DerivedMediaProvenance, ClipAudioProperties } from "./index";
 import type { Gap } from "./gap";
 
@@ -51,6 +52,8 @@ export interface RustProject {
   thumbnail?: string | null;
   timeline_schema_version?: number | null;
   audio_model_version?: number | null;
+  caption_model_version?: number | null;
+  caption_tracks?: any[] | null;
 }
 
 /**
@@ -155,6 +158,7 @@ export interface ProjectPersistenceSnapshot {
   transitions: TransitionTimelineItem[];
   gaps: Gap[];
   markers: TimelineMarker[];
+  captionTracks?: CaptionTrack[];
   timelineSchemaVersion: number;
   epoch?: number;
   migrated: boolean;
@@ -211,12 +215,52 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
   const gaps = (rust.gaps ?? []).map((gap: RustGap) => fromRustGap(gap));
   const markers = (rust.markers ?? []) as TimelineMarker[];
 
-  const ids = [...mediaAssets, ...tracks, ...clips, ...transitions, ...gaps, ...markers].map((item: any) => item?.id).filter(Boolean);
-  if (new Set(ids).size !== ids.length) throw new Error("Project contains duplicate editable item IDs");
+  // Detect and recover from duplicate IDs (can happen when concurrent timeline
+  // additions race before the serialization lock was in place). Keep only the
+  // first occurrence of each ID and mark the project as migrated so it is
+  // auto-saved in the repaired form.
+  const allItems = [...mediaAssets, ...tracks, ...clips, ...transitions, ...gaps, ...markers];
+  const ids = allItems.map((item: any) => item?.id).filter(Boolean);
+  let hasDuplicates = new Set(ids).size !== ids.length;
+  if (hasDuplicates) {
+    console.warn("[validateAndMigrateProjectPayload] Project contains duplicate editable item IDs — deduplicating for recovery");
+    const seenIds = new Set<string>();
+    const dedup = <T extends { id?: string }>(arr: T[]): T[] =>
+      arr.filter((item) => {
+        const id = (item as any).id;
+        if (!id || seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      });
+    // Re-assign deduplicated arrays (mutate local vars only)
+    const dedupedTracks = dedup(tracks as any[]) as typeof tracks;
+    const dedupedClips = dedup(clips as any[]) as typeof clips;
+    tracks.length = 0;
+    tracks.push(...dedupedTracks);
+    clips.length = 0;
+    clips.push(...dedupedClips);
+    // Force migrated=true below so the repaired project is auto-saved
+    hasDuplicates = true;
+  }
+
   const trackIds = new Set(tracks.map((track) => track.id));
+  // Drop orphan clips whose track was removed by deduplication
+  const orphanClipIds = clips.filter((c: any) => !trackIds.has(c.trackId)).map((c: any) => c.id);
+  if (orphanClipIds.length > 0) {
+    console.warn("[validateAndMigrateProjectPayload] Dropping orphan clips with missing track refs:", orphanClipIds);
+    const validClips = clips.filter((c: any) => trackIds.has(c.trackId));
+    clips.length = 0;
+    clips.push(...validClips);
+  }
   for (const clip of clips) {
     if (!trackIds.has(clip.trackId)) throw new Error(`Clip ${clip.id} refers to a missing track`);
   }
+
+  const captionTracks: CaptionTrack[] = Array.isArray(rust.caption_tracks)
+    ? (rust.caption_tracks as CaptionTrack[])
+    : Array.isArray(raw.captionTracks)
+      ? (raw.captionTracks as CaptionTrack[])
+      : [];
 
   const normalizedRust = toRustProject(project, {
     mediaAssets,
@@ -225,10 +269,11 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
     transitions,
     gaps,
     markers,
+    captionTracks,
     mainVideoTrackId: rust.main_video_track_id ?? null,
     updateModifiedTime: false,
   });
-  const migrated = JSON.stringify(normalizedRust) !== JSON.stringify(raw);
+  const migrated = hasDuplicates || JSON.stringify(normalizedRust) !== JSON.stringify(raw);
   return {
     project,
     mediaAssets,
@@ -237,6 +282,7 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
     transitions,
     gaps,
     markers,
+    captionTracks,
     timelineSchemaVersion: project.timelineSchemaVersion ?? 1,
     migrated,
     rustProject: normalizedRust,
@@ -275,6 +321,7 @@ export function fromRustProject(rust: RustProject): Project {
     thumbnail: rust.thumbnail ?? undefined,
     timelineSchemaVersion: rust.timeline_schema_version ?? 1,
     audioModelVersion: rust.audio_model_version ?? AUDIO_MODEL_VERSION,
+    captionModelVersion: rust.caption_model_version ?? CAPTION_MODEL_VERSION,
   };
 }
 
@@ -465,6 +512,7 @@ export function toRustProject(
     transitions?: TransitionTimelineItem[];
     gaps?: Gap[];
     markers?: TimelineMarker[];
+    captionTracks?: CaptionTrack[];
     mainVideoTrackId?: string | null;
     /** Update modification timestamp to current time (default: true, set false for round-trip serialization) */
     updateModifiedTime?: boolean;
@@ -491,6 +539,8 @@ export function toRustProject(
     thumbnail: frontend.thumbnail,
     timeline_schema_version: frontend.timelineSchemaVersion ?? 1,
     audio_model_version: frontend.audioModelVersion ?? AUDIO_MODEL_VERSION,
+    caption_model_version: frontend.captionModelVersion ?? CAPTION_MODEL_VERSION,
+    caption_tracks: options?.captionTracks ?? [],
     ...(options?.mainVideoTrackId !== undefined
       ? { main_video_track_id: options.mainVideoTrackId }
       : {}),

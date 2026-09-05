@@ -1,5 +1,6 @@
-import { TemplateRenderer } from "@clypra-studio/engine";
+import { renderTextTemplateToCanvas, resolveTextTemplateArtifact } from "@clypra-studio/engine";
 import { TextTemplate, TemplateCustomization, RenderedFrameSequence } from "./types";
+import { resolveTemplateControlValues } from "@/lib/text/templateControls";
 
 /**
  * Renders a complete Canvas template frame-by-frame to a sequence of PNG Blobs.
@@ -10,51 +11,32 @@ export async function renderToFrameSequence(
   customization: TemplateCustomization,
   onProgress?: (progress: number) => void
 ): Promise<RenderedFrameSequence> {
+  const artifact = resolveTextTemplateArtifact(template);
+  if (!artifact) throw new Error("Template does not contain a renderable text-template artifact");
+
   const canvas = document.createElement("canvas");
-  canvas.width = template.canvasWidth;
-  canvas.height = template.canvasHeight;
+  canvas.width = artifact.document.canvas.width;
+  canvas.height = artifact.document.canvas.height;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     throw new Error("Failed to get 2D context");
   }
 
-  const renderer = new TemplateRenderer(template as any);
-
-  // Apply customizations to the renderer's overrides
-  const layers = template.layers || [];
-  for (const layer of layers) {
-    if (layer.kind === "text") {
-      const changes: any = {};
-      if (layer.role === "primary") {
-        changes.content = customization.primaryText;
-        if (customization.primaryColor) changes.color = customization.primaryColor;
-      } else if (layer.role === "secondary") {
-        changes.content = customization.secondaryText ?? "";
-        if (customization.secondaryColor) changes.color = customization.secondaryColor;
-      } else if (layer.role === "accent") {
-        changes.content = customization.accentText ?? "";
-      }
-      renderer.updateLayer(layer.id, changes);
-    } else if (layer.kind === "shape") {
-      const colorOverride = layer.id === "primary-fill-layer" 
-        ? customization.primaryColor 
-        : layer.id === "secondary-fill-layer" 
-          ? customization.secondaryColor 
-          : undefined;
-      if (colorOverride) {
-        renderer.updateLayer(layer.id, { fill: colorOverride });
-      }
-    }
-  }
+  const controlValues = resolveTemplateControlValues(artifact, customization);
 
   const frames: Blob[] = [];
-  const fps = 30; // standard output frame rate
-  const duration = template.defaultDuration ?? template.duration ?? 3.0;
+  const fps = artifact.timing.fps;
+  const duration = artifact.timing.duration;
   const totalFrames = Math.round(duration * fps);
 
   for (let f = 0; f < totalFrames; f++) {
     const time = f / fps;
-    renderer.drawFrame(ctx, time);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    renderTextTemplateToCanvas(ctx, {
+      artifact,
+      context: { environment: "export", time, width: canvas.width, height: canvas.height, controlValues },
+    });
 
     const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((b) => {
@@ -73,8 +55,8 @@ export async function renderToFrameSequence(
   return {
     frames,
     fps,
-    width: template.canvasWidth,
-    height: template.canvasHeight,
+    width: artifact.document.canvas.width,
+    height: artifact.document.canvas.height,
     durationFrames: totalFrames,
   };
 }
