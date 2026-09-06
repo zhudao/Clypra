@@ -2386,16 +2386,17 @@ pub(crate) async fn present_native_frame_internal(
             request.contract_version
         ));
     }
-    let generation = request.generation.unwrap_or(0);
-    if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
-        if !queue
-            .inner()
-            .clone()
-            .lock()
-            .await
-            .is_generation_current(generation)
-        {
-            return Err("Native preview frame request is stale".to_string());
+    if let Some(generation) = request.generation {
+        if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+            if !queue
+                .inner()
+                .clone()
+                .lock()
+                .await
+                .is_generation_current(generation)
+            {
+                return Err("Native preview frame request is stale".to_string());
+            }
         }
     }
     let legacy_request = to_video_project_request(&request)?;
@@ -2418,10 +2419,10 @@ pub(crate) async fn present_native_frame_internal(
             } else if is_playback_mode {
                 let notify = q.notify();
                 drop(q);
-                // In continuous playback, give in-flight lookahead up to 35ms to finish
+                // In continuous playback, give in-flight lookahead up to 75ms to finish
                 // rather than launching a competing cold decode that thrashes the decoder GOP.
                 let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(35),
+                    std::time::Duration::from_millis(75),
                     notify.notified(),
                 )
                 .await;
@@ -2431,7 +2432,7 @@ pub(crate) async fn present_native_frame_internal(
                 let notify = q.notify();
                 drop(q);
                 let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(35),
+                    std::time::Duration::from_millis(75),
                     notify.notified(),
                 )
                 .await;
@@ -2467,30 +2468,32 @@ pub(crate) async fn present_native_frame_internal(
                 )
             }
         };
-    if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
-        if !queue
-            .inner()
-            .clone()
-            .lock()
-            .await
-            .is_generation_current(generation)
-        {
-            record_native_surface_sample(
-                &app,
-                &request,
-                request_started_at,
-                decode_timings,
-                queue_hit,
-                scheduler_wait_us,
-                None,
-                None,
-                None,
-                None,
-                false,
-                true,
-                Some("stale"),
-            );
-            return Err("Native preview frame request is stale".to_string());
+    if let Some(generation) = request.generation {
+        if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+            if !queue
+                .inner()
+                .clone()
+                .lock()
+                .await
+                .is_generation_current(generation)
+            {
+                record_native_surface_sample(
+                    &app,
+                    &request,
+                    request_started_at,
+                    decode_timings,
+                    queue_hit,
+                    scheduler_wait_us,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true,
+                    Some("stale"),
+                );
+                return Err("Native preview frame request is stale".to_string());
+            }
         }
     }
 
@@ -2938,16 +2941,19 @@ pub async fn render_native_frame(
             request.contract_version
         ));
     }
-    let generation = request.generation.unwrap_or(0);
-    if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
-        if !queue
-            .inner()
-            .clone()
-            .lock()
-            .await
-            .is_generation_current(generation)
-        {
-            return Err("Native preview frame request is stale".to_string());
+    if request.mode.as_deref() != Some("frameStep") {
+        if let Some(generation) = request.generation {
+            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+                if !queue
+                    .inner()
+                    .clone()
+                    .lock()
+                    .await
+                    .is_generation_current(generation)
+                {
+                    return Err("Native preview frame request is stale".to_string());
+                }
+            }
         }
     }
     if let Some(cache) = app.try_state::<tokio::sync::Mutex<NativeFrameService>>() {
@@ -2997,15 +3003,19 @@ pub async fn render_native_frame(
     let legacy_request = to_video_project_request(&request)?;
     let (rgba, stage_timings) =
         render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await?;
-    if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
-        if !queue
-            .inner()
-            .clone()
-            .lock()
-            .await
-            .is_generation_current(generation)
-        {
-            return Err("Native preview frame request is stale".to_string());
+    if request.mode.as_deref() != Some("frameStep") {
+        if let Some(generation) = request.generation {
+            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+                if !queue
+                    .inner()
+                    .clone()
+                    .lock()
+                    .await
+                    .is_generation_current(generation)
+                {
+                    return Err("Native preview frame request is stale".to_string());
+                }
+            }
         }
     }
     let packet = FramePacket {

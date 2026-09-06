@@ -115,4 +115,52 @@ describe("TimelinePlacementEngine", () => {
       expect(trackIds.has(clip.trackId)).toBe(true);
     }
   });
+
+  it("preserves styleId, effectDefinition, and styleSnapshot when adding a text effect", async () => {
+    const mockScene = { effectLayers: [{ type: "gradient" }] };
+    const mockDef = { id: "gradient-punch", name: "Gradient Punch", scene: mockScene };
+
+    const res = await TimelinePlacementEngine.addToTimeline({
+      item: {
+        name: "Gradient Punch",
+        text: "CLYPRA",
+        presetType: "effect",
+        styleId: "gradient-punch",
+        styleSnapshot: mockScene,
+        effectDefinition: mockDef,
+      },
+      type: "text",
+    });
+
+    expect(res.success).toBe(true);
+    const clips = useTimelineStore.getState().clips;
+    const clip = clips.find((c) => c.kind === "text") as any;
+    expect(clip).toBeDefined();
+    expect(clip.styleId).toBe("gradient-punch");
+    expect(clip.styleSnapshot).toEqual(mockScene);
+    expect(clip.styleDefinition).toEqual(mockDef);
+    expect(clip.text).toBe("CLYPRA");
+  });
+
+  it("quantizes continuous playhead time to the frame start boundary so clips are visible immediately when paused", async () => {
+    // Existing 10s video on timeline
+    useTimelineStore.setState((s) => ({
+      ...s,
+      clips: [{ id: "c1", trackId: "track-video-1", startTime: 0, duration: 10.0, trimIn: 0, trimOut: 10.0, kind: "video" } as any],
+    }));
+
+    // Continuous hardware playback time paused at 6.002847s (which falls in frame 180 at 30fps: 180 / 30 = 6.0s)
+    const res = await TimelinePlacementEngine.addToTimeline({
+      item: { text: "Immediate Preview Text" },
+      type: "text",
+      playheadTime: 6.002847,
+    });
+
+    expect(res.success).toBe(true);
+    const clips = useTimelineStore.getState().clips;
+    const textClip = clips.find((c) => (c as any).text === "Immediate Preview Text");
+    expect(textClip).toBeDefined();
+    // Must be quantized exactly to frame 180 start (6.000000s), NOT 6.002847s
+    expect(textClip!.startTime).toBe(6.0);
+  });
 });
