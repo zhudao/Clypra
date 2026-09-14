@@ -55,7 +55,9 @@ export type EffectRenderer =
   | "body-segmentation-glow"
   | "body_glow"
   | "body_outline"
-  | "body_particles";
+  | "body_particles"
+  | "body_cutout"
+  | "subject_cutout";
 
 export interface EffectPreset {
   id: string;
@@ -86,6 +88,16 @@ export interface EffectPreset {
   requirements?: {
     bodySegmentation?: boolean;
     minConfidence?: number;
+    minEngineVersion?: string;
+    captureType?: "silhouette_mask" | "skeletal_pose" | "hybrid_body" | string;
+    maskCategory?: "person" | "hair" | "face" | "clothing" | string;
+    keypoints?: string[];
+  };
+
+  compositing?: {
+    primitive: string;
+    layerZOrder: "behind-subject" | "in-front";
+    blendMode?: string;
   };
 }
 
