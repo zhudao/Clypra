@@ -205,6 +205,7 @@ fn configure_surface(
             .decorations(false)
             .transparent(true)
             .shadow(false)
+            // The preview is a retained child surface parented to the main WebView window.
             // The preview is a retained child surface parented to the main window.
             // It must NOT use always_on_top so it does not float over modals, dialogs,
             // or other application windows.

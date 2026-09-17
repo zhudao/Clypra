@@ -1,3 +1,4 @@
+use super::preview_capabilities::PreviewCapabilities;
 use serde::{Deserialize, Serialize};
 use wgpu::{Adapter, Device, DeviceType, Instance, Queue, Surface};
 
@@ -12,8 +13,6 @@ pub struct SelectedGpuInfo {
     pub is_discrete: bool,
 }
 
-use crate::wgpu_compositor::capabilities::PreviewCapabilities;
-
 pub struct GpuContext {
     pub instance: Instance,
     pub adapter: Adapter,
@@ -21,6 +20,7 @@ pub struct GpuContext {
     pub capabilities: PreviewCapabilities,
     pub device: Device,
     pub queue: Queue,
+    pub nv12_supported: bool,
 }
 
 impl GpuContext {
@@ -162,12 +162,13 @@ impl GpuContext {
             .await
             .map_err(|e| format!("Failed to request wgpu device: {}", e))?;
 
-        let capabilities = PreviewCapabilities::negotiate(&available_features, &gpu_info.backend);
+        let nv12_supported = device.features().contains(wgpu::Features::TEXTURE_FORMAT_NV12);
+        let capabilities = PreviewCapabilities::probe(&best_adapter, &device);
 
         log::info!(
             "🚀 Negotiated Preview Capabilities: NV12={}, DXGI ZeroCopy={}, HW Decode={}, Native Surface={}, HDR={}",
             capabilities.wgpu_nv12,
-            capabilities.dxgi_import_capable,
+            capabilities.dxgi_import,
             capabilities.hw_decode,
             capabilities.native_surface,
             capabilities.hdr,
@@ -180,6 +181,7 @@ impl GpuContext {
             capabilities,
             device,
             queue,
+            nv12_supported,
         })
     }
 }

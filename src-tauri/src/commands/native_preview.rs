@@ -1670,12 +1670,15 @@ async fn render_native_video_project_frame_bytes_timed(
     let can_attempt_dxgi = !request.layers.is_empty()
         && {
             let session = state.lock().await;
-            session.dxgi_state == DxgiImportState::Unknown
-                || session.dxgi_state == DxgiImportState::Supported
+            session.dxgi_state.is_usable()
         };
 
     #[cfg(target_os = "windows")]
-    let dxgi_frames_result = if can_attempt_dxgi {
+    let dxgi_env_disabled = std::env::var("CLYPRA_DISABLE_DXGI").as_deref() == Ok("1")
+        || std::env::var("CLYPRA_DISABLE_DXGI_ZERO_COPY").as_deref() == Ok("1");
+
+    #[cfg(target_os = "windows")]
+    let dxgi_frames_result = if can_attempt_dxgi && !dxgi_env_disabled {
         use crate::thumbnail_engine::decoder::DecodeFrameOptions;
         let decode_options = DecodeFrameOptions {
             allow_keyframe_approx: request.allow_keyframe_approx.unwrap_or(false)
@@ -1750,58 +1753,77 @@ async fn render_native_video_project_frame_bytes_timed(
     let mut render_path = FrameRenderPath::GpuUploadRing;
 
     #[cfg(target_os = "windows")]
-    if let Some((frames, max_dec_us, total_wait_us)) = dxgi_frames_result {
-        if !session.gpu.capabilities.wgpu_nv12 {
-            log::warn!("DXGI zero-copy import skipped: device does not support TEXTURE_FORMAT_NV12. Latching DXGI to Failed.");
-            session.dxgi_state = DxgiImportState::Failed;
-        } else {
-            use crate::wgpu_compositor::dxgi_import;
-            let mut import_all_ok = true;
-            for (layer, (shared, width, height, color)) in request.layers.iter().zip(frames.into_iter()) {
-                let layer_key = if !layer.layer_id.is_empty() {
-                    &layer.layer_id
-                } else {
-                    &layer.video_path
-                };
-                let params = match color_params(&color) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!("Color param generation failed for layer {}: {}. Latching DXGI to Failed.", layer_key, e);
-                        session.dxgi_state = DxgiImportState::Failed;
-                        import_all_ok = false;
-                        break;
-                    }
-                };
-                if let Some(imported) = dxgi_import::import_into_wgpu(&session.gpu.device, shared) {
-                    match session.render_nv12_from_imported_texture(layer_key, width, height, &imported, &params) {
-                        Ok(texture) => {
-                            views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
-                            textures.push(texture);
-                        }
+    let can_use_dxgi = session.gpu.capabilities.zero_copy_available()
+        && session.dxgi_state.is_usable()
+        && !dxgi_env_disabled;
+
+    #[cfg(target_os = "windows")]
+    if can_use_dxgi {
+        if let Some((frames, max_dec_us, total_wait_us)) = dxgi_frames_result {
+            if !session.gpu.capabilities.wgpu_nv12 {
+                log::warn!("DXGI zero-copy import skipped: device does not support TEXTURE_FORMAT_NV12. Latching DXGI to Failed.");
+                session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::UnsupportedFormat);
+            } else {
+                use crate::wgpu_compositor::dxgi_import;
+                let mut import_all_ok = true;
+                for (layer, (shared, width, height, color)) in request.layers.iter().zip(frames.into_iter()) {
+                    let layer_key = if !layer.layer_id.is_empty() {
+                        &layer.layer_id
+                    } else {
+                        &layer.video_path
+                    };
+                    let params = match color_params(&color) {
+                        Ok(p) => p,
                         Err(e) => {
-                            log::warn!("DXGI imported texture render failed for layer {}: {}. Latching DXGI to Failed.", layer_key, e);
-                            session.dxgi_state = DxgiImportState::Failed;
+                            log::warn!("Color param generation failed for layer {}: {}. Latching DXGI to Failed.", layer_key, e);
+                            session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::ImportFailed);
+                            import_all_ok = false;
+                            break;
+                        }
+                    };
+                    match dxgi_import::import_into_wgpu(&session.gpu.device, shared) {
+                        Ok(imported) => {
+                            match session.render_nv12_from_imported_texture(layer_key, width, height, &imported, &params) {
+                                Ok(texture) => {
+                                    views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                                    textures.push(texture);
+                                }
+                                Err(render_error) => {
+                                    match render_error {
+                                        crate::wgpu_compositor::PreviewRenderError::UnsupportedFeature(_) => {
+                                            session.mark_dxgi_disabled(crate::wgpu_compositor::DisableReason::UnsupportedFeature);
+                                        }
+                                        crate::wgpu_compositor::PreviewRenderError::DimensionMismatch { .. } => {
+                                            session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::DimensionMismatch);
+                                        }
+                                        _ => {
+                                            session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::ImportFailed);
+                                        }
+                                    }
+                                    import_all_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            session.mark_dxgi_failed(reason);
                             import_all_ok = false;
                             break;
                         }
                     }
-                } else {
-                    log::warn!("DXGI import_into_wgpu returned None for layer {}. Latching DXGI to Failed.", layer_key);
-                    session.dxgi_state = DxgiImportState::Failed;
-                    import_all_ok = false;
-                    break;
                 }
-            }
 
-            if import_all_ok {
-                decode_time_us = max_dec_us;
-                decoder_mutex_wait_us = total_wait_us;
-                session.dxgi_state = DxgiImportState::Supported;
-                render_path = FrameRenderPath::ZeroCopyDxgi;
-            } else {
-                views.clear();
-                textures.clear();
-                render_path = FrameRenderPath::GpuUploadRing;
+                if import_all_ok {
+                    session.mark_dxgi_supported();
+                    decode_time_us = max_dec_us;
+                    decoder_mutex_wait_us = total_wait_us;
+                    dxgi_active = true;
+                    render_path = FrameRenderPath::ZeroCopyDxgi;
+                } else {
+                    views.clear();
+                    textures.clear();
+                    render_path = FrameRenderPath::GpuUploadRing;
+                }
             }
         }
     }
@@ -3473,6 +3495,8 @@ pub async fn get_native_frame_service_samples(
 ///    frame rejection does not carry over to the next project.
 /// 5. Stops and resets the native audio clock clip state.
 /// 6. Stops and resets the native playback session.
+/// 7. Resets the DXGI import state so a fresh project does not inherit a
+///    sticky `DxgiImportState::Failed` from the previous session.
 #[tauri::command]
 pub async fn reset_native_preview_runtime(app: tauri::AppHandle) -> Result<(), String> {
     if let Ok(mut worker) = LOOKAHEAD_WORKER.lock() {
@@ -3514,6 +3538,14 @@ pub async fn reset_native_preview_runtime(app: tauri::AppHandle) -> Result<(), S
         if let Ok(mut p) = playback.inner().clone().lock() {
             p.reset();
         }
+    }
+
+    // 7. Reset the DXGI import state so the next project does not inherit a
+    //    sticky DxgiImportState::Failed from this session.
+    if let Some(preview_session) =
+        app.try_state::<Arc<tokio::sync::Mutex<NativePreviewSession>>>()
+    {
+        preview_session.inner().clone().lock().await.reset_dxgi_state();
     }
 
     Ok(())
@@ -3807,4 +3839,55 @@ mod tests {
         assert_eq!(raster.display_width(), 80.0);
         assert_eq!(raster.display_height(), 20.0);
     }
+}
+
+// ── Phase 5: Session performance telemetry ───────────────────────────────────
+
+/// Return a snapshot of the session-level rendering performance statistics.
+///
+/// This aggregates every frame that passed through [`PerformanceManager::record`]
+/// since the session started (or the last `reset_session` call). Unlike the
+/// rolling [`FrameTelemetryRing`] (which holds ~300 samples), the session
+/// snapshot accumulates lifetime totals: frames produced, dropped, deadline
+/// misses, peak latencies, source-path breakdown, and policy events.
+///
+/// All latency values are in **microseconds**.
+///
+/// # Frontend usage
+/// ```ts
+/// const stats = await invoke<SessionSnapshot>('get_session_telemetry');
+/// console.log(`${stats.frames_produced} frames, miss rate ${stats.miss_rate_pct?.toFixed(2)}%`);
+/// ```
+#[tauri::command]
+pub async fn get_session_telemetry(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    use crate::wgpu_compositor::SessionTelemetryCollector;
+
+    // The SessionTelemetryCollector is managed Tauri state registered at startup.
+    // If not yet registered (headless test environments), return an empty snapshot.
+    let snapshot = if let Some(state) = app.try_state::<std::sync::Arc<SessionTelemetryCollector>>() {
+        state.snapshot()
+    } else {
+        SessionTelemetryCollector::new().snapshot()
+    };
+
+    serde_json::to_value(snapshot).map_err(|e| e.to_string())
+}
+
+/// Reset the session-level telemetry accumulator.
+///
+/// Clears all lifetime totals and restarts the session clock. Call on project
+/// open when you want per-project (rather than per-app-session) statistics.
+/// Does NOT affect the rolling [`FrameTelemetryRing`] or [`PolicyState`].
+#[tauri::command]
+pub async fn reset_session_telemetry(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    use crate::wgpu_compositor::SessionTelemetryCollector;
+
+    if let Some(state) = app.try_state::<std::sync::Arc<SessionTelemetryCollector>>() {
+        state.reset_session();
+    }
+    Ok(())
 }
