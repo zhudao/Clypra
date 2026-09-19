@@ -576,7 +576,11 @@ impl VideoDecoder {
             width: frame.width(),
             height: frame.height(),
             pixel_format: pixel_format_name(frame),
-            linesize_y: frame.stride(0).min(i32::MAX as usize) as i32,
+            linesize_y: if frame.planes() > 0 {
+                frame.stride(0).min(i32::MAX as usize) as i32
+            } else {
+                0
+            },
             // RGB/still-image frames can have one packed plane. UV stride is
             // only meaningful for planar YUV formats.
             linesize_uv: if frame.planes() > 1 {
@@ -636,22 +640,100 @@ impl VideoDecoder {
         30.0
     }
 
+    /// Select the only hardware frame type backed by the device attached to
+    /// this process. A codec can offer several hardware types; choosing an
+    /// arbitrary one produces frames with no compatible device context.
+    fn platform_hw_pixel_format() -> Option<ffmpeg::ffi::AVPixelFormat> {
+        #[cfg(target_os = "macos")]
+        {
+            Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
+    /// FFmpeg's get_format callback must always return one of the formats it
+    /// was offered. Returning AV_PIX_FMT_NONE means "no format", not "use
+    /// software", and can leave a decoder producing an invalid AVFrame.
+    fn select_decoder_pixel_format(
+        offered: &[ffmpeg::ffi::AVPixelFormat],
+        preferred_hardware_format: Option<ffmpeg::ffi::AVPixelFormat>,
+    ) -> ffmpeg::ffi::AVPixelFormat {
+        if let Some(preferred) = preferred_hardware_format {
+            if offered.contains(&preferred) {
+                return preferred;
+            }
+        }
+
+        offered
+            .iter()
+            .copied()
+            .find(|format| *format != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE)
+            .unwrap_or(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE)
+    }
+
     unsafe extern "C" fn get_hw_format(
         _ctx: *mut ffmpeg::ffi::AVCodecContext,
         pix_fmts: *const ffmpeg::ffi::AVPixelFormat,
     ) -> ffmpeg::ffi::AVPixelFormat {
-        let mut p = pix_fmts;
-        while !p.is_null() && *p != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
-            if *p == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX
-                || *p == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11
-                || *p == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI
-                || *p == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA
-            {
-                return *p;
-            }
-            p = p.add(1);
+        if pix_fmts.is_null() {
+            return ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE;
         }
-        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
+
+        // FFmpeg guarantees a NONE-terminated list. Materialize it before
+        // selection so the policy is independently testable and never falls
+        // through to an invalid format.
+        let mut offered = Vec::new();
+        let mut current = pix_fmts;
+        while *current != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            offered.push(*current);
+            current = current.add(1);
+        }
+        Self::select_decoder_pixel_format(&offered, Self::platform_hw_pixel_format())
+    }
+
+    /// A hardware device is attached only when the selected codec explicitly
+    /// supports that device through AVCodecContext::hw_device_ctx.
+    fn codec_supports_hw_device(
+        ctx: &ffmpeg::codec::context::Context,
+        hw_type: ffmpeg::ffi::AVHWDeviceType,
+    ) -> bool {
+        unsafe {
+            let raw_ctx = ctx.as_ptr();
+            let mut codec = (*raw_ctx).codec;
+            if codec.is_null() {
+                codec = ffmpeg::ffi::avcodec_find_decoder((*raw_ctx).codec_id);
+            }
+            if codec.is_null() {
+                return false;
+            }
+
+            let required_method =
+                ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32;
+            let mut index = 0;
+            loop {
+                let config = ffmpeg::ffi::avcodec_get_hw_config(codec, index);
+                if config.is_null() {
+                    return false;
+                }
+                if (*config).device_type == hw_type
+                    && ((*config).methods & required_method) != 0
+                {
+                    return true;
+                }
+                index += 1;
+            }
+        }
     }
 
     fn open_software_codec(
@@ -678,8 +760,13 @@ impl VideoDecoder {
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         let hw_types: &[ffmpeg::ffi::AVHWDeviceType] = &[];
 
-        let mut _hw_attached = false;
         for &hw_type in hw_types {
+            if !Self::codec_supports_hw_device(&ctx, hw_type) {
+                log::debug!(
+                    "[VideoDecoder] codec has no compatible hardware-device configuration for {hw_type:?}; using software decode"
+                );
+                continue;
+            }
             unsafe {
                 let mut hw_ctx = std::ptr::null_mut();
                 let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
@@ -693,17 +780,18 @@ impl VideoDecoder {
                     (*ctx.as_mut_ptr()).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_ctx);
                     ffmpeg::ffi::av_buffer_unref(&mut hw_ctx);
                     (*ctx.as_mut_ptr()).get_format = Some(Self::get_hw_format);
-                    _hw_attached = true;
-                    break;
+                    let decoder = ctx.decoder().video().map_err(|e| e.to_string())?;
+                    let w = decoder.width();
+                    let h = decoder.height();
+                    return Ok((decoder, w, h));
                 }
             }
         }
 
-        let decoder = ctx.decoder().video().map_err(|e| e.to_string())?;
-        let w = decoder.width();
-        let h = decoder.height();
-
-        Ok((decoder, w, h))
+        // No compatible device is an expected capability outcome, not a
+        // partially initialized decoder. Re-open using the normal software
+        // format negotiation path.
+        Self::open_software_codec(ctx)
     }
 
     /// Decode a single frame at full display resolution (no thumbnail scaling).
@@ -1230,11 +1318,55 @@ impl VideoDecoder {
         Ok(rgba)
     }
 
+    /// Validate the native frame before any safe-wrapper code hands it to
+    /// libswscale. FFmpeg asserts (and on Windows terminates the process) when
+    /// asked to scale AV_PIX_FMT_NONE or a hardware surface directly.
+    fn validate_software_frame(frame: &ffmpeg::frame::Video) -> Result<(), String> {
+        let raw = unsafe { &*frame.as_ptr() };
+        if raw.width <= 0 || raw.height <= 0 {
+            return Err(format!(
+                "Decoded frame has invalid dimensions {}x{}",
+                raw.width, raw.height
+            ));
+        }
+        if raw.width as u32 > MAX_DISPLAY_DIMENSION || raw.height as u32 > MAX_DISPLAY_DIMENSION {
+            return Err(format!(
+                "Decoded frame dimensions {}x{} exceed the supported limit",
+                raw.width, raw.height
+            ));
+        }
+        if raw.format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE as i32 {
+            return Err("Decoder produced AV_PIX_FMT_NONE instead of a software frame".to_string());
+        }
+
+        let descriptor = frame
+            .format()
+            .descriptor()
+            .ok_or_else(|| format!("Decoder produced unknown pixel format {}", raw.format))?;
+        if unsafe {
+            ((*descriptor.as_ptr()).flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL as u64) != 0
+        } {
+            return Err("Hardware frame reached the software conversion boundary".to_string());
+        }
+        if raw.data[0].is_null() || raw.linesize[0] == 0 {
+            return Err("Decoded software frame has no primary image plane".to_string());
+        }
+        Ok(())
+    }
+
     fn hw_to_cpu_frame(frame: ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, String> {
-        if frame.format() == ffmpeg::format::Pixel::VIDEOTOOLBOX
-            || frame.format() == ffmpeg::format::Pixel::D3D11
-            || frame.format() == ffmpeg::format::Pixel::VAAPI
+        let source_format = unsafe { (*frame.as_ptr()).format };
+        let cpu_frame = if source_format
+            == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32
+            || source_format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32
+            || source_format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI as i32
         {
+            log::debug!(
+                "[VideoDecoder] Transferring hardware frame ({:?}, {}x{}) to host CPU memory",
+                frame.format(),
+                frame.width(),
+                frame.height()
+            );
             let mut cpu_frame = ffmpeg::frame::Video::empty();
             unsafe {
                 // VideoToolbox/D3D11 require explicit destination pixel format
@@ -1246,6 +1378,10 @@ impl VideoDecoder {
                     0,
                 );
                 if ret < 0 {
+                    log::debug!(
+                        "[VideoDecoder] NV12 HW transfer failed (ret={}), falling back to YUV420P",
+                        ret
+                    );
                     (*cpu_frame.as_mut_ptr()).format =
                         ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as i32;
                     ret = ffmpeg::ffi::av_hwframe_transfer_data(
@@ -1255,13 +1391,24 @@ impl VideoDecoder {
                     );
                 }
                 if ret < 0 {
+                    log::error!(
+                        "[VideoDecoder] Hardware frame transfer failed completely with ret={}",
+                        ret
+                    );
                     return Err(format!("HW frame transfer failed (ret={})", ret));
                 }
             }
-            Ok(cpu_frame)
+            log::debug!(
+                "[VideoDecoder] Hardware frame successfully transferred to CPU (format={:?}, planes={})",
+                cpu_frame.format(),
+                cpu_frame.planes()
+            );
+            cpu_frame
         } else {
-            Ok(frame)
-        }
+            frame
+        };
+        Self::validate_software_frame(&cpu_frame)?;
+        Ok(cpu_frame)
     }
 
     fn to_cpu_frame(&self, frame: ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, String> {
@@ -1301,9 +1448,21 @@ impl VideoDecoder {
         &self,
         frame: &ffmpeg::frame::Video,
     ) -> Option<(Vec<u8>, Vec<u8>, u32, u32)> {
+        let width = frame.width() as usize;
+        let height = frame.height() as usize;
+        // Sanity-check dimensions before any plane access.
+        if width == 0 || height == 0 {
+            return None;
+        }
+
         if frame.format() == ffmpeg::format::Pixel::NV12 {
-            let width = frame.width() as usize;
-            let height = frame.height() as usize;
+            // Guard: NV12 needs exactly 2 planes (Y + interleaved UV).
+            // av_hwframe_transfer_data can produce a frame whose format is
+            // reported as NV12 but whose linesize[1] is 0 (UV plane absent),
+            // which would panic in ffmpeg-next's stride() bounds check.
+            if frame.planes() < 2 {
+                return None;
+            }
             let y_stride = frame.stride(0);
             let uv_stride = frame.stride(1);
             let y_data = frame.data(0);
@@ -1312,7 +1471,11 @@ impl VideoDecoder {
             let mut y_plane = Vec::with_capacity(width * height);
             for y in 0..height {
                 let row_start = y * y_stride;
-                y_plane.extend_from_slice(&y_data[row_start..row_start + width]);
+                let row_end = row_start + width;
+                if row_end > y_data.len() {
+                    return None;
+                }
+                y_plane.extend_from_slice(&y_data[row_start..row_end]);
             }
 
             let uv_height = height.div_ceil(2);
@@ -1322,7 +1485,11 @@ impl VideoDecoder {
             for y in 0..uv_height {
                 let row_start = y * uv_stride;
                 let copy_len = width.min(uv_packed_stride);
-                uv_plane.extend_from_slice(&uv_data[row_start..row_start + copy_len]);
+                let row_end = row_start + copy_len;
+                if row_end > uv_data.len() {
+                    return None;
+                }
+                uv_plane.extend_from_slice(&uv_data[row_start..row_end]);
                 if copy_len < uv_packed_stride {
                     uv_plane.extend(std::iter::repeat_n(0u8, uv_packed_stride - copy_len));
                 }
@@ -1330,9 +1497,11 @@ impl VideoDecoder {
 
             Some((y_plane, uv_plane, width as u32, height as u32))
         } else if frame.format() == ffmpeg::format::Pixel::YUV420P {
-            // Direct zero-swscale conversion: interleave planar U and V into NV12 directly
-            let width = frame.width() as usize;
-            let height = frame.height() as usize;
+            // Direct zero-swscale conversion: interleave planar U and V into NV12 directly.
+            // Guard: YUV420P needs 3 planes (Y, U, V).
+            if frame.planes() < 3 {
+                return None;
+            }
             let y_stride = frame.stride(0);
             let u_stride = frame.stride(1);
             let v_stride = frame.stride(2);
@@ -1343,7 +1512,11 @@ impl VideoDecoder {
             let mut y_plane = Vec::with_capacity(width * height);
             for y in 0..height {
                 let row_start = y * y_stride;
-                y_plane.extend_from_slice(&y_data[row_start..row_start + width]);
+                let row_end = row_start + width;
+                if row_end > y_data.len() {
+                    return None;
+                }
+                y_plane.extend_from_slice(&y_data[row_start..row_end]);
             }
 
             let uv_height = height.div_ceil(2);
@@ -1354,6 +1527,9 @@ impl VideoDecoder {
             for y in 0..uv_height {
                 let u_row = y * u_stride;
                 let v_row = y * v_stride;
+                if u_row + uv_width > u_data.len() || v_row + uv_width > v_data.len() {
+                    return None;
+                }
                 for x in 0..uv_width {
                     uv_plane.push(u_data[u_row + x]);
                     uv_plane.push(v_data[v_row + x]);
@@ -1849,8 +2025,16 @@ impl VideoDecoder {
 
             if let Some(shared) = Self::try_extract_dxgi_shared_handle(&best_frame) {
                 // Zero-copy succeeded — return the handle without touching CPU.
+                log::debug!(
+                    "[VideoDecoder] D3D11VA zero-copy shared handle extracted successfully for {}x{}",
+                    *out_width,
+                    *out_height
+                );
                 return Ok(Some(shared));
             }
+            log::warn!(
+                "[VideoDecoder] D3D11VA zero-copy handle extraction returned None; falling back to CPU copy"
+            );
             // If CreateSharedHandle failed (e.g., Optimus with cross-adapter),
             // fall through to the CPU copy path below.
         }
@@ -1907,6 +2091,10 @@ impl VideoDecoder {
         let mut out = ffmpeg::frame::Video::empty();
         scaler.run(frame, &mut out).map_err(|e| e.to_string())?;
 
+        if out.planes() == 0 {
+            return Err("Scaled RGBA output has no image planes".to_string());
+        }
+
         // FFmpeg frame data may have stride padding - copy tightly packed RGBA
         let stride = out.stride(0);
         let width = out.width() as usize;
@@ -1917,6 +2105,9 @@ impl VideoDecoder {
         let mut rgba = Vec::with_capacity(width * height * 4);
         for y in 0..height {
             let row_start = y * stride;
+            if row_start + (width * 4) > src_data.len() {
+                return Err("Scaled RGBA buffer smaller than expected".to_string());
+            }
             let row_pixels = &src_data[row_start..row_start + (width * 4)];
             rgba.extend_from_slice(row_pixels);
         }
@@ -1938,6 +2129,9 @@ impl VideoDecoder {
 
         // Create a temporary frame from RGBA buffer
         let mut src_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, src_w, src_h);
+        if src_frame.planes() == 0 {
+            return Err("Failed to allocate src_frame for scale_rgba_buffer".to_string());
+        }
 
         // Copy RGBA data into frame (row-by-row to handle stride alignment)
         let stride = src_frame.stride(0);
@@ -1947,6 +2141,9 @@ impl VideoDecoder {
         for y in 0..height {
             let row_start = y * stride;
             let src_row_start = y * width * 4;
+            if src_row_start + (width * 4) > rgba.len() || row_start + (width * 4) > src_data.len() {
+                return Err("Source buffer smaller than expected in scale_rgba_buffer".to_string());
+            }
             src_data[row_start..row_start + (width * 4)]
                 .copy_from_slice(&rgba[src_row_start..src_row_start + (width * 4)]);
         }
@@ -1968,6 +2165,10 @@ impl VideoDecoder {
             .run(&src_frame, &mut dst_frame)
             .map_err(|e| e.to_string())?;
 
+        if dst_frame.planes() == 0 {
+            return Err("Scaled dst_frame has no image planes in scale_rgba_buffer".to_string());
+        }
+
         // Extract tightly packed RGBA
         let stride = dst_frame.stride(0);
         let width = dst_frame.width() as usize;
@@ -1977,6 +2178,9 @@ impl VideoDecoder {
         let mut result = Vec::with_capacity(width * height * 4);
         for y in 0..height {
             let row_start = y * stride;
+            if row_start + (width * 4) > dst_data.len() {
+                return Err("Scaled dst_data buffer smaller than expected in scale_rgba_buffer".to_string());
+            }
             let row_pixels = &dst_data[row_start..row_start + (width * 4)];
             result.extend_from_slice(row_pixels);
         }
@@ -2471,6 +2675,37 @@ mod display_dimensions_tests {
 #[cfg(test)]
 mod still_image_tests {
     use super::{normalize_converted_nv12_color, VideoColorMetadata, VideoDecoder};
+
+    #[test]
+    fn hardware_format_negotiation_falls_back_to_an_offered_software_format() {
+        use ffmpeg_next as ffmpeg;
+
+        let selected = VideoDecoder::select_decoder_pixel_format(
+            &[
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE,
+            ],
+            Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11),
+        );
+
+        assert_eq!(selected, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P);
+    }
+
+    #[test]
+    fn hardware_format_negotiation_prefers_the_attached_device_format() {
+        use ffmpeg_next as ffmpeg;
+
+        let selected = VideoDecoder::select_decoder_pixel_format(
+            &[
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11,
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE,
+            ],
+            Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11),
+        );
+
+        assert_eq!(selected, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11);
+    }
 
     #[test]
     fn rgb_still_image_metadata_becomes_native_sdr_nv12_metadata() {

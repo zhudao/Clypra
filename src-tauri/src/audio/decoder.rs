@@ -83,7 +83,15 @@ fn decode_audio_clip_sync(
             decode_with_ffmpeg_cli(path, &config, target_sample_rate, target_channels)
         }
         Err(err) => {
-            let _ = err;
+            // If there is simply no audio stream in the media container, do not attempt CLI decode.
+            if err.contains("No audio stream found") {
+                return Ok(DecodedAudioClip {
+                    config,
+                    sample_rate: target_sample_rate,
+                    channels: target_channels,
+                    samples: Arc::from(Vec::<f32>::new()),
+                });
+            }
             decode_with_ffmpeg_cli(path, &config, target_sample_rate, target_channels)
         }
     }
@@ -414,6 +422,15 @@ fn decode_with_ffmpeg_cli(
     target_channels: u16,
 ) -> Result<DecodedAudioClip, String> {
     use std::process::Stdio;
+
+    // Use binary_resolver which verifies genuine executables (rejecting non-PE batch stubs on Windows)
+    // and checks bundled ffmpeg-static/bin/, application directory, augmented system PATH, etc.
+    if crate::commands::binary_resolver::resolve_binary_path("ffmpeg").is_none() {
+        return Err(
+            "FFmpeg executable not found on system. Please install FFmpeg or run scripts/setup-sidecars.ps1"
+                .to_string(),
+        );
+    }
 
     let mut command = crate::commands::binary_resolver::create_std_command("ffmpeg");
     command
