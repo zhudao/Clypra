@@ -13,19 +13,20 @@ use crate::native_core::{
     NATIVE_CORE_CONTRACT_VERSION,
 };
 use crate::sync_metrics::SYNC_METRICS;
+#[cfg(target_os = "windows")]
+use crate::thumbnail_engine::decoder::get_preview_decoder_for_stream;
 use crate::thumbnail_engine::decoder::{
-    get_preview_decoder, get_preview_decoder_for_stream, DecodeFrameOptions, VideoColorMetadata,
+    get_preview_decoder, DecodeFrameOptions, VideoColorMetadata,
 };
 use crate::wgpu_compositor::multi_track_composer::TransitionUniforms;
+#[cfg(target_os = "windows")]
+#[allow(unused_imports)]
+use crate::wgpu_compositor::DxgiImportState;
 use crate::wgpu_compositor::{
     BlendMode, BodyEffectUniforms, ChromaKeyUniforms, ColorGradeUniforms, ColorTransformUniforms,
     CompositeLayer, CropMargins, FrameRenderPath, LayerTransform, NativePreviewSession,
     NativeWgpuRenderer,
 };
-#[cfg(target_os = "windows")]
-#[allow(unused_imports)]
-use crate::wgpu_compositor::DxgiImportState;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -36,11 +37,6 @@ use tauri::{Emitter, Manager};
 
 type DecodedNativeVideoFrame = (Arc<[u8]>, Arc<[u8]>, u32, u32, VideoColorMetadata);
 static NATIVE_SURFACE_PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-static VERBOSE_PREVIEW_LOGS: Lazy<bool> = Lazy::new(|| {
-    std::env::var("CLYPRA_VERBOSE_PREVIEW")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-});
 
 /// Register an editor font before a frame request references it. The native
 /// renderer never substitutes a different family for an unregistered font.
@@ -115,6 +111,7 @@ pub fn clear_native_font_warnings() -> Result<(), String> {
 struct NativeDecodeTimings {
     decode_time_us: u32,
     decoder_mutex_wait_us: u64,
+    actor_wait_us: Option<u64>,
 }
 
 struct QueuedNativeFrame {
@@ -122,8 +119,18 @@ struct QueuedNativeFrame {
     decoded_frames: Vec<DecodedNativeVideoFrame>,
     decode_timings: NativeDecodeTimings,
     queued_at: Instant,
+    /// Recorded after decode completes, so queue telemetry excludes decoder
+    /// work and measures only the wait for a ready frame to be presented.
+    ready_at: Instant,
     scheduler_wait_us: u64,
 }
+
+/// Never make a frame ready so far ahead that lookahead itself becomes a
+/// visible latency buffer. This is intentionally a presentation-latency budget,
+/// not a cache-capacity limit: the cache can retain decoded frames, but the
+/// playback queue must stay close to the audio clock.
+const MAX_LOOKAHEAD_RESIDENCY_US: u64 = 100_000;
+const MIN_LOOKAHEAD_FRAMES: usize = 2;
 
 fn native_presentation_timing(
     app: &tauri::AppHandle,
@@ -152,13 +159,11 @@ fn native_presentation_timing(
     // Pass the median inter-callback spacing from the lock-free ring buffer.
     // This is the correct interval measure for the freshness threshold — the
     // actual hardware cadence, not a processing-duration proxy.
-    SYNC_METRICS
-        .av_drift
-        .record_with_freshness(
-            frame_position_ticks.saturating_sub(status.audio_position_ticks as i64),
-            status.clock_freshness_us,
-            status.median_callback_interval_us,
-        );
+    SYNC_METRICS.av_drift.record_with_freshness(
+        frame_position_ticks.saturating_sub(status.audio_position_ticks as i64),
+        status.clock_freshness_us,
+        status.median_callback_interval_us,
+    );
     let age = status.audio_position_ticks as i128 - frame_position_ticks as i128;
     let frame_age_ticks = age.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     let decision = decide_native_presentation_timing(
@@ -205,6 +210,9 @@ fn record_native_surface_sample(
     decode_timings: NativeDecodeTimings,
     queue_hit: bool,
     scheduler_wait_us: u64,
+    lookahead_wait_us: Option<u64>,
+    cold_start_init_us: Option<u64>,
+    queue_residency_us: Option<u64>,
     conversion_upload_us: Option<u64>,
     compose_us: Option<u64>,
     surface_acquire_us: Option<u64>,
@@ -212,6 +220,8 @@ fn record_native_surface_sample(
     dropped: bool,
     stale: bool,
     drop_reason: Option<&str>,
+    capability_policy: Option<String>,
+    capability_probe_us: Option<u64>,
 ) {
     let Some(service) = app.try_state::<tokio::sync::Mutex<NativeFrameService>>() else {
         return;
@@ -257,12 +267,28 @@ fn record_native_surface_sample(
         readback_us: None,
         present_us: submit_present_us,
         scheduler_wait_us: Some(scheduler_wait_us),
+        lookahead_wait_us,
+        cold_start_init_us,
+        queue_residency_us,
         ipc_wait_us: None,
         decoder_mutex_wait_us: Some(decode_timings.decoder_mutex_wait_us),
+        actor_wait_us: decode_timings.actor_wait_us,
         gpu_queue_wait_us: None,
         surface_acquire_us,
         submit_present_us,
+        capability_policy,
+        capability_probe_us,
     });
+}
+
+/// A decoded lookahead frame can sit in the bounded preview queue while the
+/// audio clock advances. That delay is neither decode time nor GPU time, yet
+/// it is often the dominant contributor to a visibly slow preview.
+fn queue_residency_us(ready_at: Instant, presentation_started: Instant) -> u64 {
+    presentation_started
+        .saturating_duration_since(ready_at)
+        .as_micros()
+        .min(u64::MAX as u128) as u64
 }
 
 /// Bounded native decode-ahead storage for continuous preview playback.
@@ -279,6 +305,11 @@ pub struct NativePreviewFrameQueue {
     latest_generation: Arc<AtomicU64>,
     notify: Arc<tokio::sync::Notify>,
     highest_frame_index: Option<u64>,
+    decode_ewma_us: Option<u64>,
+    /// Monotonically changes whenever playback ownership changes. Async
+    /// decodes keep the epoch from their reservation and may only complete
+    /// into the same queue lifetime.
+    lifecycle_epoch: u64,
 }
 
 impl NativePreviewFrameQueue {
@@ -291,6 +322,8 @@ impl NativePreviewFrameQueue {
             latest_generation: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(tokio::sync::Notify::new()),
             highest_frame_index: None,
+            decode_ewma_us: None,
+            lifecycle_epoch: 0,
         }
     }
 
@@ -318,9 +351,48 @@ impl NativePreviewFrameQueue {
         self.highest_frame_index
     }
 
+    fn estimated_decode_us(&self) -> Option<u64> {
+        self.decode_ewma_us
+    }
+
+    fn discard_before(&mut self, frame_index: u64) {
+        let stale: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|&(_, frame)| frame.frame_index < frame_index)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.entries.remove(&key);
+            self.order.retain(|entry| entry != &key);
+        }
+    }
+
+    fn discard_expired(&mut self, presentation_started: Instant) {
+        let expired: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|&(_, frame)| {
+                queue_residency_us(frame.ready_at, presentation_started)
+                    > MAX_LOOKAHEAD_RESIDENCY_US
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.entries.remove(&key);
+            self.order.retain(|entry| entry != &key);
+        }
+    }
+
+    fn lifecycle_epoch(&self) -> u64 {
+        self.lifecycle_epoch
+    }
+
     pub fn observe_frame_index(&mut self, frame_index: u64) {
-        self.highest_frame_index =
-            Some(self.highest_frame_index.map_or(frame_index, |m| m.max(frame_index)));
+        self.highest_frame_index = Some(
+            self.highest_frame_index
+                .map_or(frame_index, |m| m.max(frame_index)),
+        );
     }
 
     fn observe_generation(&self, generation: u64) {
@@ -342,16 +414,29 @@ impl NativePreviewFrameQueue {
         }
         self.pending.insert(key.to_string());
         if let Some(idx) = frame_index {
-            self.highest_frame_index =
-                Some(self.highest_frame_index.map_or(idx, |m| m.max(idx)));
+            self.highest_frame_index = Some(self.highest_frame_index.map_or(idx, |m| m.max(idx)));
         }
         true
     }
 
-    fn complete(&mut self, key: String, frame: QueuedNativeFrame) {
+    fn complete(&mut self, key: String, frame: QueuedNativeFrame, lifecycle_epoch: u64) -> bool {
+        if lifecycle_epoch != self.lifecycle_epoch {
+            return false;
+        }
         let frame_idx = frame.frame_index;
-        self.highest_frame_index =
-            Some(self.highest_frame_index.map_or(frame_idx, |m| m.max(frame_idx)));
+        let elapsed_us = frame
+            .ready_at
+            .saturating_duration_since(frame.queued_at)
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
+        self.decode_ewma_us = Some(match self.decode_ewma_us {
+            Some(previous) => previous.saturating_mul(7).saturating_add(elapsed_us) / 8,
+            None => elapsed_us,
+        });
+        self.highest_frame_index = Some(
+            self.highest_frame_index
+                .map_or(frame_idx, |m| m.max(frame_idx)),
+        );
         self.pending.remove(&key);
         self.order.retain(|entry| entry != &key);
         self.entries.insert(key.clone(), frame);
@@ -363,6 +448,7 @@ impl NativePreviewFrameQueue {
             self.entries.remove(&oldest);
         }
         self.notify.notify_waiters();
+        true
     }
 
     fn fail(&mut self, key: &str) {
@@ -376,7 +462,11 @@ impl NativePreviewFrameQueue {
         Some(decoded)
     }
 
-    fn take_matching_or_closest(&mut self, key: &str, target_frame_index: u64) -> Option<QueuedNativeFrame> {
+    fn take_matching_or_closest(
+        &mut self,
+        key: &str,
+        target_frame_index: u64,
+    ) -> Option<QueuedNativeFrame> {
         if let Some(frame) = self.take(key) {
             return Some(frame);
         }
@@ -408,8 +498,28 @@ impl NativePreviewFrameQueue {
         self.order.clear();
         self.pending.clear();
         self.highest_frame_index = None;
+        self.decode_ewma_us = None;
+        self.lifecycle_epoch = self.lifecycle_epoch.wrapping_add(1);
         self.latest_generation.store(0, Ordering::Release);
     }
+}
+
+fn deadline_aware_lookahead_count(
+    frame_rate: u32,
+    configured_count: usize,
+    estimated_decode_us: Option<u64>,
+) -> usize {
+    let frame_budget_us = 1_000_000u64 / u64::from(frame_rate.max(1));
+    let latency_cap = (MAX_LOOKAHEAD_RESIDENCY_US / frame_budget_us).max(1) as usize;
+    let decode_coverage = estimated_decode_us
+        .map(|decode_us| decode_us.div_ceil(frame_budget_us) as usize)
+        .unwrap_or(MIN_LOOKAHEAD_FRAMES)
+        .max(MIN_LOOKAHEAD_FRAMES);
+
+    configured_count
+        .min(latency_cap.max(MIN_LOOKAHEAD_FRAMES))
+        .min(decode_coverage)
+        .max(1)
 }
 
 fn default_clear_color() -> [f32; 4] {
@@ -418,6 +528,50 @@ fn default_clear_color() -> [f32; 4] {
 
 fn default_opacity() -> f32 {
     1.0
+}
+
+/// Prepare the compositor graph before a render session is allowed to start.
+///
+/// This is intentionally awaited by playback configuration, not spawned from
+/// surface configuration. On older Windows Intel drivers pipeline creation can
+/// take seconds; allowing it to race the first visible presentation held the
+/// shared session lock and let audio advance against a blank surface.
+/// `NativePreviewSession` owns the graph cache, so the warm check and creation
+/// are serialized under the same ownership boundary and duplicate callers are
+/// no-ops after the first one completes.
+pub(crate) async fn prepare_native_preview_pipelines(
+    app: &tauri::AppHandle,
+    width: u32,
+    height: u32,
+    target_format: wgpu::TextureFormat,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("Native preview canvas dimensions must be non-zero".to_string());
+    }
+    let preview_state = app
+        .try_state::<Arc<tokio::sync::Mutex<NativePreviewSession>>>()
+        .ok_or_else(|| "Native preview GPU session is unavailable".to_string())?;
+    let preview_session = preview_state.inner().clone();
+    let mut session = preview_session.lock().await;
+    // The Windows native surface always presents Bgra8UnormSrgb. Do not warm
+    // an RGBA readback graph as part of this latency-critical path: each graph
+    // eagerly creates five blend/transition pipelines, and Intel D3D12 drivers
+    // can spend seconds compiling every one. Readback creates its RGBA graph on
+    // demand; native-surface startup compiles exactly the graph it presents.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = target_format;
+        let surface_format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        if !session.has_compositor(width, height, surface_format) {
+            session.warmup_native_surface_pipelines(width, height, surface_format);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if !session.has_compositor(width, height, target_format) {
+        session.warmup_gpu_pipelines(width, height, target_format);
+    }
+    Ok(())
 }
 
 fn default_blend_mode() -> String {
@@ -1140,7 +1294,11 @@ fn color_grade_from_snapshot(snapshot: Option<&ColorGradeSnapshot>) -> ColorGrad
             grade.chromatic_amount,
             grade.chromatic_angle,
             grade.chromatic_edge_feather,
-            if grade.chromatic_amount > 0.0 { 1.0 } else { 0.0 },
+            if grade.chromatic_amount > 0.0 {
+                1.0
+            } else {
+                0.0
+            },
         ],
         ..ColorGradeUniforms::default()
     })
@@ -1347,7 +1505,7 @@ fn color_params(color: &VideoColorMetadata) -> Result<ColorTransformUniforms, St
 
 /// Prefer metadata attached to the decoded frame, while retaining stream-level
 /// values when a decoder leaves an individual field unspecified.
-fn merge_color_metadata(
+pub(crate) fn merge_color_metadata(
     frame: VideoColorMetadata,
     stream: &VideoColorMetadata,
 ) -> VideoColorMetadata {
@@ -1668,11 +1826,10 @@ async fn render_native_video_project_frame_bytes_timed(
     // has previously failed or was disabled, immediately bypass DXGI extraction
     // and proceed directly via the GpuUploadRing / CPU transfer fallback.
     #[cfg(target_os = "windows")]
-    let can_attempt_dxgi = !request.layers.is_empty()
-        && {
-            let session = state.lock().await;
-            session.dxgi_state.is_usable()
-        };
+    let can_attempt_dxgi = !request.layers.is_empty() && {
+        let session = state.lock().await;
+        session.dxgi_state.is_usable()
+    };
 
     #[cfg(target_os = "windows")]
     let dxgi_env_disabled = std::env::var("CLYPRA_DISABLE_DXGI").as_deref() == Ok("1")
@@ -1765,12 +1922,14 @@ async fn render_native_video_project_frame_bytes_timed(
     if can_use_dxgi {
         if let Some((frames, max_dec_us, total_wait_us)) = dxgi_frames_result {
             if !session.gpu.capabilities.wgpu_nv12 {
-                log::warn!("DXGI zero-copy import skipped: device does not support TEXTURE_FORMAT_NV12. Latching DXGI to Failed.");
-                session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::UnsupportedFormat);
+                session
+                    .mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::UnsupportedFormat);
             } else {
                 use crate::wgpu_compositor::dxgi_import;
                 let mut import_all_ok = true;
-                for (layer, (shared, width, height, color)) in request.layers.iter().zip(frames.into_iter()) {
+                for (layer, (shared, width, height, color)) in
+                    request.layers.iter().zip(frames.into_iter())
+                {
                     let layer_key = if !layer.layer_id.is_empty() {
                         &layer.layer_id
                     } else {
@@ -1778,18 +1937,24 @@ async fn render_native_video_project_frame_bytes_timed(
                     };
                     let params = match color_params(&color) {
                         Ok(p) => p,
-                        Err(e) => {
-                            log::warn!("Color param generation failed for layer {}: {}. Latching DXGI to Failed.", layer_key, e);
-                            session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::ImportFailed);
+                        Err(_) => {
+                            session.mark_dxgi_failed(
+                                crate::wgpu_compositor::DxgiFailureReason::ImportFailed,
+                            );
                             import_all_ok = false;
                             break;
                         }
                     };
                     match dxgi_import::import_into_wgpu(&session.gpu.device, shared) {
                         Ok(imported) => {
-                            match session.render_nv12_from_imported_texture(layer_key, width, height, &imported, &params) {
+                            match session.render_nv12_from_imported_texture(
+                                layer_key, width, height, &imported, &params,
+                            ) {
                                 Ok(texture) => {
-                                    views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                                    views.push(
+                                        texture
+                                            .create_view(&wgpu::TextureViewDescriptor::default()),
+                                    );
                                     textures.push(texture);
                                 }
                                 Err(render_error) => {
@@ -1853,14 +2018,7 @@ async fn render_native_video_project_frame_bytes_timed(
                 &layer.video_path
             };
             let texture = session.render_nv12_frame_to_texture(
-                layer_key,
-                *width,
-                *height,
-                *width,
-                *height,
-                y_plane,
-                uv_plane,
-                &params,
+                layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
             )?;
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             textures.push(texture);
@@ -1929,10 +2087,7 @@ async fn render_native_video_project_frame_bytes_timed(
         .iter()
         .zip(views.iter().skip(request.layers.len()))
         .filter(|(layer, _)| {
-            layer.is_mask
-                && !evicted_mask_ids
-                    .iter()
-                    .any(|id| id == &layer.asset_id)
+            layer.is_mask && !evicted_mask_ids.iter().any(|id| id == &layer.asset_id)
         })
         .map(|(layer, view)| (layer.asset_id.as_str(), view))
         .collect();
@@ -2104,6 +2259,9 @@ async fn decode_native_video_layers(
         quality: request.quality,
     };
 
+    let is_prefetch = request.mode.as_deref() == Some("prefetch");
+    let generation = cancellation.as_ref().map(|(_, g)| *g).unwrap_or(0);
+
     if request.layers.len() == 1 {
         let layer = &request.layers[0];
         let stream_id = if !layer.layer_id.is_empty() {
@@ -2111,34 +2269,24 @@ async fn decode_native_video_layers(
         } else {
             ""
         };
-        let decoder = get_preview_decoder_for_stream(&layer.video_path, stream_id).await?;
-        let mutex_started = Instant::now();
-        let mut guard = decoder.lock().await;
-        let mutex_wait_us = mutex_started.elapsed().as_micros() as u64;
-        let decode_started = Instant::now();
-        let stream_color = guard.metadata().color;
-        let cancel = cancellation;
-        let (y_plane, uv_plane, width, height, frame_color) = guard
-            .decode_frame_raw_nv12_with_options(layer.time_secs, decode_options, || {
-                cancel
-                    .as_ref()
-                    .map(|(latest, generation)| latest.load(Ordering::Acquire) > *generation)
-                    .unwrap_or(false)
-            })?;
-        let decode_us =
-            decode_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        let decoded = (
-            y_plane,
-            uv_plane,
-            width,
-            height,
-            merge_color_metadata(frame_color, &stream_color),
-        );
+        let actor = crate::thumbnail_engine::stream_actor::get_preview_decoder_actor_for_stream(
+            &layer.video_path,
+            stream_id,
+        )
+        .await?;
+        let actor_frame = actor
+            .decode_frame(layer.time_secs, decode_options, is_prefetch, generation)
+            .await?;
+        let decode_us = actor_frame.decode_us;
+        let mutex_wait_us = actor_frame.decoder_mutex_wait_us;
+        let actor_wait_us = actor_frame.actor_wait_us;
+        let decoded = actor_frame.into_native_video_frame();
         return Ok((
             vec![decoded],
             NativeDecodeTimings {
                 decode_time_us: decode_us,
                 decoder_mutex_wait_us: mutex_wait_us,
+                actor_wait_us: Some(actor_wait_us),
             },
         ));
     }
@@ -2149,14 +2297,12 @@ async fn decode_native_video_layers(
     // Layers sharing the exact same video file and timestamp (such as synthesized
     // :subject-cutout foreground layers) share the decoded NV12 planes without leasing
     // a second FFmpeg decoder.
-    let decode_wall_started = Instant::now();
     let mut unique_tasks = Vec::new();
     let mut layer_to_unique_idx = Vec::with_capacity(request.layers.len());
 
     for (layer_idx, layer) in request.layers.iter().enumerate() {
         let duplicate_of = request.layers[..layer_idx].iter().position(|prev| {
-            prev.video_path == layer.video_path
-                && (prev.time_secs - layer.time_secs).abs() < 0.0001
+            prev.video_path == layer.video_path && (prev.time_secs - layer.time_secs).abs() < 0.0001
         });
 
         if let Some(prev_idx) = duplicate_of {
@@ -2169,7 +2315,6 @@ async fn decode_native_video_layers(
             let video_path = layer.video_path.clone();
             let layer_id = layer.layer_id.clone();
             let time_secs = layer.time_secs;
-            let cancel = cancellation.clone();
 
             unique_tasks.push(tauri::async_runtime::spawn(async move {
                 let stream_id = if !layer_id.is_empty() {
@@ -2177,23 +2322,20 @@ async fn decode_native_video_layers(
                 } else {
                     ""
                 };
-                let decoder = get_preview_decoder_for_stream(&video_path, stream_id).await?;
-                let mutex_started = Instant::now();
-                let mut guard = decoder.lock().await;
-                let mutex_wait_us = mutex_started.elapsed().as_micros() as u64;
-                let decode_started = Instant::now();
-                let stream_color = guard.metadata().color;
-                let (y_plane, uv_plane, width, height, frame_color) = guard
-                    .decode_frame_raw_nv12_with_options(time_secs, decode_options, || {
-                        cancel
-                            .as_ref()
-                            .map(|(latest, generation)| latest.load(Ordering::Acquire) > *generation)
-                            .unwrap_or(false)
-                    })?;
-                let decode_us =
-                    decode_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-                let color = merge_color_metadata(frame_color, &stream_color);
-                Ok::<_, String>(((y_plane, uv_plane, width, height, color), decode_us, mutex_wait_us, width, height, layer_id))
+                let actor =
+                    crate::thumbnail_engine::stream_actor::get_preview_decoder_actor_for_stream(
+                        &video_path,
+                        stream_id,
+                    )
+                    .await?;
+                let actor_frame = actor
+                    .decode_frame(time_secs, decode_options, is_prefetch, generation)
+                    .await?;
+                let decode_us = actor_frame.decode_us;
+                let mutex_wait_us = actor_frame.decoder_mutex_wait_us;
+                let actor_wait_us = actor_frame.actor_wait_us;
+                let decoded = actor_frame.into_native_video_frame();
+                Ok::<_, String>((decoded, decode_us, mutex_wait_us, actor_wait_us, layer_id))
             }));
         }
     }
@@ -2201,6 +2343,7 @@ async fn decode_native_video_layers(
     let mut unique_results = Vec::with_capacity(unique_tasks.len());
     let mut max_decode_us = 0u32;
     let mut total_mutex_wait_us = 0u64;
+    let mut max_actor_wait_us = 0u64;
 
     for task in unique_tasks {
         let res = task
@@ -2208,41 +2351,14 @@ async fn decode_native_video_layers(
             .map_err(|e| format!("Decode worker task failed: {e}"))??;
         max_decode_us = max_decode_us.max(res.1);
         total_mutex_wait_us = total_mutex_wait_us.saturating_add(res.2);
+        max_actor_wait_us = max_actor_wait_us.max(res.3);
         unique_results.push(res);
     }
 
     let mut decoded_frames = Vec::with_capacity(request.layers.len());
-    let mut layer_details = Vec::with_capacity(request.layers.len());
-
-    for (layer_idx, &unique_idx) in layer_to_unique_idx.iter().enumerate() {
-        let (ref frame, decode_us, mutex_wait_us, width, height, ref task_layer_id) = unique_results[unique_idx];
-        let layer_id = &request.layers[layer_idx].layer_id;
-        let is_duplicate = task_layer_id != layer_id;
-
+    for &unique_idx in &layer_to_unique_idx {
+        let (ref frame, ..) = unique_results[unique_idx];
         decoded_frames.push(frame.clone());
-        if is_duplicate {
-            layer_details.push((layer_id.clone(), width, height, 0u32, 0u64));
-        } else {
-            layer_details.push((layer_id.clone(), width, height, decode_us, mutex_wait_us));
-        }
-    }
-
-    let decode_wall_time_ms = decode_wall_started.elapsed().as_secs_f64() * 1000.0;
-    if layer_details.len() > 1 || decode_wall_time_ms > 16.6 {
-        let layer_summaries: Vec<String> = layer_details
-            .iter()
-            .map(|(id, w, h, dec_us, _)| {
-                let id_short = if id.len() > 16 { &id[..16] } else { id.as_str() };
-                format!("{id_short} ({w}x{h}): {:.1}ms", (*dec_us as f64) / 1000.0)
-            })
-            .collect();
-        eprintln!(
-            "[NativeDecode] {} layers decoded in {:.2}ms (max: {:.2}ms) | {}",
-            layer_details.len(),
-            decode_wall_time_ms,
-            (max_decode_us as f64) / 1000.0,
-            layer_summaries.join(" | ")
-        );
     }
 
     Ok((
@@ -2250,6 +2366,7 @@ async fn decode_native_video_layers(
         NativeDecodeTimings {
             decode_time_us: max_decode_us,
             decoder_mutex_wait_us: total_mutex_wait_us,
+            actor_wait_us: Some(max_actor_wait_us),
         },
     ))
 }
@@ -2265,7 +2382,9 @@ pub async fn queue_native_frame(
 ) -> Result<(), String> {
     let command_started = Instant::now();
     request.validate().map_err(|error| error.to_string())?;
-    let key = request.decode_cache_key().map_err(|error| error.to_string())?;
+    let key = request
+        .decode_cache_key()
+        .map_err(|error| error.to_string())?;
     let legacy_request = to_video_project_request(&request)?;
     validate_video_project_request(&legacy_request)?;
 
@@ -2281,6 +2400,7 @@ pub async fn queue_native_frame(
     let is_prefetch = request.mode.as_deref() == Some("prefetch");
     let generation = request.generation.unwrap_or(0);
     let cancellation_generation;
+    let lifecycle_epoch;
     let scheduler_wait_started = Instant::now();
     let scheduler_wait_us;
     {
@@ -2295,6 +2415,7 @@ pub async fn queue_native_frame(
         if !queue_state.begin(&key, Some(request.frame_time.frame_index)) {
             return Ok(());
         }
+        lifecycle_epoch = queue_state.lifecycle_epoch();
         cancellation_generation = queue_state.latest_generation.clone();
     }
 
@@ -2335,18 +2456,24 @@ pub async fn queue_native_frame(
     }
     match decode_native_video_layers(&legacy_request, cancellation).await {
         Ok((decoded_frames, decode_timings)) => {
+            // Start this clock as soon as decoding is complete, before taking
+            // the queue lock. A contended producer lock should be visible as
+            // part of the time the decoded result is unavailable to present.
+            let ready_at = Instant::now();
             let mut queue_state = queue.lock().await;
             if is_prefetch || queue_state.is_generation_current(generation) {
                 pending_guard.key = None;
-                queue_state.complete(
+                let _ = queue_state.complete(
                     key,
                     QueuedNativeFrame {
                         frame_index: request.frame_time.frame_index,
                         decoded_frames,
                         decode_timings,
                         queued_at: command_started,
+                        ready_at,
                         scheduler_wait_us,
                     },
+                    lifecycle_epoch,
                 );
             } else {
                 pending_guard.key = None;
@@ -2379,13 +2506,15 @@ pub(crate) fn schedule_lookahead_predecode(
     app: tauri::AppHandle,
     base_request: FrameRequest,
     lookahead_count: usize,
+    quality_override: Option<crate::native_core::QualityTier>,
 ) {
     if base_request.project.video_layers.is_empty() || lookahead_count == 0 {
         return;
     }
 
     let generation = base_request.generation.unwrap_or(0);
-    let fps = base_request.project.frame_rate.max(1) as f64;
+    let frame_rate = base_request.project.frame_rate.max(1);
+    let fps = frame_rate as f64;
 
     let mut worker_guard = match LOOKAHEAD_WORKER.lock() {
         Ok(guard) => guard,
@@ -2395,7 +2524,9 @@ pub(crate) fn schedule_lookahead_predecode(
     // If an active worker for the SAME generation is already busy pre-decoding upcoming frames,
     // do NOT abort it! Let it continue its sequential decoding pipeline uninterrupted.
     if let Some(active) = worker_guard.as_ref() {
-        if active.generation == generation && !active.finished.load(std::sync::atomic::Ordering::Acquire) {
+        if active.generation == generation
+            && !active.finished.load(std::sync::atomic::Ordering::Acquire)
+        {
             return;
         }
     }
@@ -2408,19 +2539,20 @@ pub(crate) fn schedule_lookahead_predecode(
     }
 
     // Anchor current audio playback position
-    let (current_audio_frame, _current_audio_secs) =
-        if let Ok(audio_time) = crate::commands::native_playback::audio_clock_time(&app, true, false) {
-            let audio_secs = (audio_time.ticks as f64) / (audio_time.timescale.max(1) as f64);
-            let audio_frame = (audio_secs * fps).round() as u64;
-            (audio_frame, audio_secs)
-        } else {
-            let base_time_secs = (base_request.frame_time.ticks as f64)
-                / (base_request.frame_time.timescale.max(1) as f64);
-            (base_request.frame_time.frame_index, base_time_secs)
-        };
+    let (current_audio_frame, _current_audio_secs) = if let Ok(audio_time) =
+        crate::commands::native_playback::audio_clock_time(&app, true, false)
+    {
+        let audio_secs = (audio_time.ticks as f64) / (audio_time.timescale.max(1) as f64);
+        let audio_frame = (audio_secs * fps).round() as u64;
+        (audio_frame, audio_secs)
+    } else {
+        let base_time_secs = (base_request.frame_time.ticks as f64)
+            / (base_request.frame_time.timescale.max(1) as f64);
+        (base_request.frame_time.frame_index, base_time_secs)
+    };
 
-    let _base_timeline_secs = (base_request.frame_time.ticks as f64)
-        / (base_request.frame_time.timescale.max(1) as f64);
+    let _base_timeline_secs =
+        (base_request.frame_time.ticks as f64) / (base_request.frame_time.timescale.max(1) as f64);
 
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_finished = finished.clone();
@@ -2432,17 +2564,26 @@ pub(crate) fn schedule_lookahead_predecode(
         // so the decoder moves strictly FORWARD in 11ms sequential steps.
         let (start_frame_index, target_end_frame_index) = {
             let queue_opt = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>();
-            let highest = if let Some(queue) = &queue_opt {
-                queue.lock().await.highest_frame_index()
+            let (highest, effective_lookahead_count) = if let Some(queue) = &queue_opt {
+                let queue_state = queue.lock().await;
+                (
+                    queue_state.highest_frame_index(),
+                    deadline_aware_lookahead_count(
+                        frame_rate,
+                        lookahead_count,
+                        queue_state.estimated_decode_us(),
+                    ),
+                )
             } else {
-                None
+                (
+                    None,
+                    deadline_aware_lookahead_count(frame_rate, lookahead_count, None),
+                )
             };
 
-            let target_end = current_audio_frame.saturating_add(lookahead_count as u64);
+            let target_end = current_audio_frame.saturating_add(effective_lookahead_count as u64);
             let start = match highest {
-                Some(max_idx) if max_idx >= current_audio_frame => {
-                    max_idx.saturating_add(1)
-                }
+                Some(max_idx) if max_idx >= current_audio_frame => max_idx.saturating_add(1),
                 _ => current_audio_frame,
             };
 
@@ -2455,10 +2596,26 @@ pub(crate) fn schedule_lookahead_predecode(
 
         for target_frame_index in start_frame_index..=target_end_frame_index {
             // Check generation currency before each frame
-            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
+            {
                 let queue_state = queue.lock().await;
                 if !queue_state.is_generation_current(generation) {
                     break;
+                }
+            }
+
+            // A decode that has fallen behind the advancing audio clock is
+            // guaranteed to increase queue residency rather than help the
+            // visible frame. Skip it and let the next scheduler pass target
+            // the current playhead instead.
+            if let Ok(audio_time) =
+                crate::commands::native_playback::audio_clock_time(&app, true, false)
+            {
+                let live_frame = ((audio_time.ticks as f64 / audio_time.timescale.max(1) as f64)
+                    * fps)
+                    .round() as u64;
+                if target_frame_index < live_frame {
+                    continue;
                 }
             }
 
@@ -2486,7 +2643,9 @@ pub(crate) fn schedule_lookahead_predecode(
 
             // If already in queue or pending, skip
             if let Ok(key) = req.decode_cache_key() {
-                if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+                if let Some(queue) =
+                    app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
+                {
                     let queue_state = queue.lock().await;
                     if queue_state.contains(&key) {
                         continue;
@@ -2494,33 +2653,40 @@ pub(crate) fn schedule_lookahead_predecode(
                 }
             }
 
-            let predecode_started = Instant::now();
+            // Apply quality tier override from the capability probe. The probe
+            // runs at session start and selects Half/Quarter when the decoder
+            // cannot sustain full-quality decode within the frame deadline.
+            if let Some(quality) = quality_override {
+                req.quality = quality;
+            }
+
             let res = queue_native_frame(app.clone(), req).await;
-            let predecode_ms = predecode_started.elapsed().as_secs_f64() * 1000.0;
             if res.is_err() {
                 break;
-            }
-            let (cache_len, max_entries) = if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
-                let q = queue.lock().await;
-                (q.len(), q.max_entries())
-            } else {
-                (0, 16)
-            };
-            if *VERBOSE_PREVIEW_LOGS || predecode_ms > 33.33 {
-                eprintln!(
-                    "[NativeLookahead] Frame #{} (ahead: +{}) pre-decoded in {:.2}ms | Cache: {}/{} frames warm",
-                    target_frame_index,
-                    target_frame_index.saturating_sub(current_audio_frame),
-                    predecode_ms,
-                    cache_len,
-                    max_entries
-                );
             }
         }
         worker_finished.store(true, std::sync::atomic::Ordering::Release);
     });
 
-    *worker_guard = Some(LookaheadWorkerState { handle, generation, finished });
+    *worker_guard = Some(LookaheadWorkerState {
+        handle,
+        generation,
+        finished,
+    });
+}
+
+/// End a playback queue lifetime. Any asynchronous decode reserved before this
+/// call is rejected on completion, so it cannot be presented after a pause or
+/// render-worker replacement.
+pub(crate) async fn reset_native_preview_queue(app: &tauri::AppHandle) {
+    if let Ok(mut worker) = LOOKAHEAD_WORKER.lock() {
+        if let Some(previous) = worker.take() {
+            previous.handle.abort();
+        }
+    }
+    if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+        queue.inner().clone().lock().await.reset();
+    }
 }
 
 /// Mark all older native preview work stale. Decoder calls that cannot be
@@ -2563,7 +2729,9 @@ pub async fn register_native_raster_asset(
     }
     let raw_rgba = if let Some(b64) = &asset.rgba_base64 {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-        BASE64.decode(b64).map_err(|e| format!("Failed to decode base64 rgba: {e}"))?
+        BASE64
+            .decode(b64)
+            .map_err(|e| format!("Failed to decode base64 rgba: {e}"))?
     } else {
         asset.rgba
     };
@@ -2753,66 +2921,141 @@ pub(crate) async fn present_native_frame_internal(
             state
         })
         .runtime_epoch();
-    let queued_key = request.decode_cache_key().map_err(|error| error.to_string())?;
+    let queued_key = request
+        .decode_cache_key()
+        .map_err(|error| error.to_string())?;
     let is_playback_mode = request.mode.as_deref() == Some("playback");
+    let mut playback_lookahead_miss = false;
+    let lookahead_wait_us: u64 = 0;
     let queued_frame =
         if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
             let queue_arc = queue.inner().clone();
             let mut q = queue_arc.lock().await;
+            // A visible request establishes the current playback floor. Keep
+            // at most the two-frame tolerance used by the closest-frame
+            // fallback; older entries can never be presented and only turn a
+            // full queue into latency.
+            q.discard_before(request.frame_time.frame_index.saturating_sub(2));
+            // Frame proximity alone is insufficient after a pause, startup
+            // stall, or worker restart. Never present a frame that missed its
+            // wall-clock presentation deadline.
+            q.discard_expired(presentation_started);
             if let Some(frame) = q.take(&queued_key) {
                 Some(frame)
             } else if is_playback_mode {
-                let notify = q.notify();
-                drop(q);
-                // In continuous playback, give in-flight lookahead up to 75ms to finish
-                // rather than launching a competing cold decode that thrashes the decoder GOP.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(75),
-                    notify.notified(),
-                )
-                .await;
-                let mut q = queue_arc.lock().await;
-                q.take_matching_or_closest(&queued_key, request.frame_time.frame_index)
-            } else if q.is_pending(&queued_key) {
-                let notify = q.notify();
-                drop(q);
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(75),
-                    notify.notified(),
-                )
-                .await;
-                let mut q = queue_arc.lock().await;
-                q.take(&queued_key)
+                // A presentation tick is a deadline, not a decode request.
+                // Never wait for in-flight lookahead and never start a second
+                // foreground decode here: either use a recent completed frame
+                // or explicitly drop this tick. The worker keeps decoding the
+                // latest demand and will refill the queue for the next tick.
+                let frame = q.take_matching_or_closest(&queued_key, request.frame_time.frame_index);
+                playback_lookahead_miss = frame.is_none();
+                frame
             } else {
                 None
             }
         } else {
             None
         };
-    let (decoded_frames, decode_timings, scheduler_wait_us, request_started_at, queue_hit) =
-        match queued_frame {
-            Some(frame) => (
-                frame.decoded_frames,
-                frame.decode_timings,
-                frame.scheduler_wait_us,
-                frame.queued_at,
-                true,
-            ),
-            None => {
-                let (decoded_frames, decode_timings) =
-                    decode_native_video_layers(&legacy_request, None).await?;
-                if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
-                    queue.lock().await.observe_frame_index(request.frame_time.frame_index);
-                }
-                (
-                    decoded_frames,
-                    decode_timings,
-                    0,
-                    presentation_started,
-                    false,
-                )
+    if playback_lookahead_miss {
+        // A miss is intentionally non-blocking, but it must never become a
+        // terminal queue state. The normal refill call lives after a
+        // successful presentation, which this early return bypasses. Ensure
+        // the single bounded worker is running before reporting the drop so
+        // the next audio deadline can consume newly ready work. The scheduler
+        // coalesces an already-running worker for this generation.
+        schedule_lookahead_predecode(app.clone(), request.clone(), 16, None);
+        let probe = surface_state
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                let mut state = poisoned.into_inner();
+                state.handle_poison_recovery("present_native_frame_internal:lookahead_miss");
+                state
+            })
+            .probe()
+            .ok_or_else(|| "Native surface lost its readiness probe".to_string())?;
+        let (audio_position_ticks, frame_age_ticks, _) = native_presentation_timing(
+            &app,
+            request.frame_time.ticks,
+            request.frame_time.timescale,
+        );
+        SYNC_METRICS.record_dropped_frame();
+        record_native_surface_sample(
+            &app,
+            &request,
+            presentation_started,
+            NativeDecodeTimings::default(),
+            false,
+            0,
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some("lookahead-miss"),
+            None,
+            None,
+        );
+        return Ok(NativeSurfacePresentation {
+            contract_version: NATIVE_CORE_CONTRACT_VERSION,
+            request_id: request.request_id,
+            frame_index: request.frame_time.frame_index,
+            presented: false,
+            dropped: true,
+            audio_position_ticks,
+            frame_age_ticks,
+            surface: probe,
+            generation: request.generation,
+            mode: request.mode,
+            stale: false,
+            cancelled: false,
+            drop_reason: Some("lookahead-miss".to_string()),
+            timings: None,
+        });
+    }
+    let (
+        decoded_frames,
+        decode_timings,
+        scheduler_lock_wait_us,
+        ready_at,
+        request_started_at,
+        queue_hit,
+    ) = match queued_frame {
+        Some(frame) => (
+            frame.decoded_frames,
+            frame.decode_timings,
+            frame.scheduler_wait_us,
+            Some(frame.ready_at),
+            frame.queued_at,
+            true,
+        ),
+        None => {
+            let (decoded_frames, decode_timings) =
+                decode_native_video_layers(&legacy_request, None).await?;
+            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
+            {
+                queue
+                    .lock()
+                    .await
+                    .observe_frame_index(request.frame_time.frame_index);
             }
-        };
+            (
+                decoded_frames,
+                decode_timings,
+                0,
+                None,
+                presentation_started,
+                false,
+            )
+        }
+    };
+    let queue_residency_us =
+        ready_at.map(|ready_at| queue_residency_us(ready_at, presentation_started));
+    let scheduler_wait_us = scheduler_lock_wait_us;
     if let Some(generation) = request.generation {
         if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
             if !queue
@@ -2829,6 +3072,9 @@ pub(crate) async fn present_native_frame_internal(
                     decode_timings,
                     queue_hit,
                     scheduler_wait_us,
+                    Some(lookahead_wait_us),
+                    None,
+                    queue_residency_us,
                     None,
                     None,
                     None,
@@ -2836,6 +3082,8 @@ pub(crate) async fn present_native_frame_internal(
                     false,
                     true,
                     Some("stale"),
+                    None,
+                    None,
                 );
                 return Err("Native preview frame request is stale".to_string());
             }
@@ -2849,15 +3097,22 @@ pub(crate) async fn present_native_frame_internal(
         .try_state::<Arc<LutCache>>()
         .map(|state| state.inner().clone());
 
+    let session_lock_started = Instant::now();
     let mut session = preview_state.lock().await;
+    let session_lock_wait_us = session_lock_started
+        .elapsed()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    // Carry the session decision on each sampled frame. The frontend samples
+    // nominal frames adaptively, so a one-shot field can otherwise disappear.
+    let (capability_policy_value, capability_probe_us_value) = session.capability_probe();
+    let capability_policy_str = capability_policy_value.map(|p| p.as_str().to_string());
     let gpu = Arc::clone(&session.gpu);
-    let mut surface = surface_state
-        .lock()
-        .unwrap_or_else(|poisoned| {
-            let mut state = poisoned.into_inner();
-            state.handle_poison_recovery("present_native_frame_internal:present");
-            state
-        });
+    let mut surface = surface_state.lock().unwrap_or_else(|poisoned| {
+        let mut state = poisoned.into_inner();
+        state.handle_poison_recovery("present_native_frame_internal:present");
+        state
+    });
     if surface.runtime_epoch() != presentation_epoch {
         return Err("Native preview frame request is stale".to_string());
     }
@@ -2888,6 +3143,9 @@ pub(crate) async fn present_native_frame_internal(
             decode_timings,
             queue_hit,
             scheduler_wait_us,
+            Some(lookahead_wait_us),
+            None,
+            queue_residency_us,
             None,
             None,
             None,
@@ -2895,6 +3153,8 @@ pub(crate) async fn present_native_frame_internal(
             true,
             false,
             Some("stale"),
+            capability_policy_str.clone(),
+            capability_probe_us_value,
         );
         return Ok(NativeSurfacePresentation {
             contract_version: NATIVE_CORE_CONTRACT_VERSION,
@@ -2924,6 +3184,9 @@ pub(crate) async fn present_native_frame_internal(
             decode_timings,
             queue_hit,
             scheduler_wait_us,
+            Some(lookahead_wait_us),
+            None,
+            queue_residency_us,
             None,
             None,
             None,
@@ -2931,6 +3194,8 @@ pub(crate) async fn present_native_frame_internal(
             true,
             false,
             Some("late-for-audio"),
+            capability_policy_str.clone(),
+            capability_probe_us_value,
         );
         return Ok(NativeSurfacePresentation {
             contract_version: NATIVE_CORE_CONTRACT_VERSION,
@@ -2964,15 +3229,6 @@ pub(crate) async fn present_native_frame_internal(
     // slightly different from the sRGB path but the preview will be visible.
     // This commonly occurs on Windows with certain WDDM drivers that do not
     // advertise Bgra8UnormSrgb as a supported swapchain format.
-    if !matches!(
-        target_format,
-        wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
-    ) {
-        log::warn!(
-            "[NativePresent] Surface format {target_format:?} is not sRGB — \
-             colours may differ slightly. Consider updating GPU drivers."
-        );
-    }
     // On Windows/WebView2, an owned native window can reject its first DXGI
     // back-buffer acquisition while it is hidden. Reveal it before acquiring
     // the swapchain texture so the production first frame follows the same
@@ -2992,14 +3248,20 @@ pub(crate) async fn present_native_frame_internal(
         Vec::with_capacity(legacy_request.layers.len() + legacy_request.raster_layers.len());
     let mut views: Vec<wgpu::TextureView> =
         Vec::with_capacity(legacy_request.layers.len() + legacy_request.raster_layers.len());
-    for (layer_idx, (layer, (y_plane, uv_plane, width, height, color))) in
-        legacy_request.layers.iter().zip(decoded_frames.iter()).enumerate()
+    for (layer_idx, (layer, (y_plane, uv_plane, width, height, color))) in legacy_request
+        .layers
+        .iter()
+        .zip(decoded_frames.iter())
+        .enumerate()
     {
-        let duplicate_of = legacy_request.layers[..layer_idx].iter().enumerate().position(|(prev_idx, prev)| {
-            prev.video_path == layer.video_path
-                && (prev.time_secs - layer.time_secs).abs() < 0.0001
-                && Arc::ptr_eq(&decoded_frames[prev_idx].0, y_plane)
-        });
+        let duplicate_of = legacy_request.layers[..layer_idx]
+            .iter()
+            .enumerate()
+            .position(|(prev_idx, prev)| {
+                prev.video_path == layer.video_path
+                    && (prev.time_secs - layer.time_secs).abs() < 0.0001
+                    && Arc::ptr_eq(&decoded_frames[prev_idx].0, y_plane)
+            });
 
         if let Some(prev_idx) = duplicate_of {
             views.push(views[prev_idx].clone());
@@ -3012,14 +3274,7 @@ pub(crate) async fn present_native_frame_internal(
                 &layer.video_path
             };
             let texture = session.render_nv12_frame_to_texture(
-                layer_key,
-                *width,
-                *height,
-                *width,
-                *height,
-                y_plane,
-                uv_plane,
-                &params,
+                layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
             )?;
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             textures.push(texture);
@@ -3073,11 +3328,26 @@ pub(crate) async fn present_native_frame_internal(
 
     let conversion_upload_us = conversion_started.elapsed().as_micros() as u64;
     let compose_started = Instant::now();
+    let compositor_was_warm = session.has_compositor(
+        legacy_request.canvas_width,
+        legacy_request.canvas_height,
+        target_format,
+    );
+    let compositor_init_started = Instant::now();
     let compositor = session.get_or_create_compositor(
         legacy_request.canvas_width,
         legacy_request.canvas_height,
         target_format,
     );
+    let compositor_init_us = compositor_init_started
+        .elapsed()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    // This is intentionally reported only when a visible frame paid a
+    // first-use cost. Normal session mutex contention belongs elsewhere and
+    // should not pollute cold-start diagnostics.
+    let cold_start_init_us = (!compositor_was_warm || session_lock_wait_us >= 1_000)
+        .then_some(session_lock_wait_us.saturating_add(compositor_init_us));
     let mut specs = Vec::with_capacity(
         legacy_request.layers.len()
             + legacy_request.raster_layers.len()
@@ -3088,10 +3358,7 @@ pub(crate) async fn present_native_frame_internal(
         .iter()
         .zip(views.iter().skip(legacy_request.layers.len()))
         .filter(|(layer, _)| {
-            layer.is_mask
-                && !evicted_mask_ids
-                    .iter()
-                    .any(|id| id == &layer.asset_id)
+            layer.is_mask && !evicted_mask_ids.iter().any(|id| id == &layer.asset_id)
         })
         .map(|(layer, view)| (layer.asset_id.as_str(), view))
         .collect();
@@ -3251,6 +3518,9 @@ pub(crate) async fn present_native_frame_internal(
         decode_timings,
         queue_hit,
         scheduler_wait_us,
+        Some(lookahead_wait_us),
+        cold_start_init_us,
+        queue_residency_us,
         Some(conversion_upload_us),
         Some(compose_us),
         Some(surface_acquire_us),
@@ -3258,32 +3528,12 @@ pub(crate) async fn present_native_frame_internal(
         false,
         false,
         None,
+        capability_policy_str,
+        capability_probe_us_value,
     );
 
-    let total_ms = (request_started_at.elapsed().as_micros() as f64) / 1000.0;
-    let decode_ms = (decode_timings.decode_time_us as f64) / 1000.0;
-    let upload_ms = (conversion_upload_us as f64) / 1000.0;
-    let compose_ms = (compose_us as f64) / 1000.0;
-    let present_ms = (submit_present_us as f64) / 1000.0;
-    let hit_tag = if queue_hit { "QUEUE_HIT" } else { "COLD_DECODE" };
-    let layers_count = legacy_request.layers.len();
-
-    if layers_count > 0 && (*VERBOSE_PREVIEW_LOGS || !queue_hit || total_ms > 33.33) {
-        eprintln!(
-            "[NativePresent] Frame #{} [{}] total: {:.2}ms (decode: {:.2}ms, upload: {:.2}ms, compose: {:.2}ms, present: {:.2}ms) | layers: {}",
-            request.frame_time.frame_index,
-            hit_tag,
-            total_ms,
-            decode_ms,
-            upload_ms,
-            compose_ms,
-            present_ms,
-            layers_count
-        );
-    }
-
     if request.mode.as_deref() != Some("prefetch") && request.mode.as_deref() != Some("scrub") {
-        schedule_lookahead_predecode(app.clone(), request.clone(), 16);
+        schedule_lookahead_predecode(app.clone(), request.clone(), 16, None);
     }
 
     Ok(NativeSurfacePresentation {
@@ -3304,10 +3554,14 @@ pub(crate) async fn present_native_frame_internal(
             total_us: request_started_at.elapsed().as_micros() as u64,
             decode_us: decode_timings.decode_time_us,
             decoder_mutex_wait_us: decode_timings.decoder_mutex_wait_us,
+            actor_wait_us: decode_timings.actor_wait_us.unwrap_or(0),
             conversion_upload_us,
             compose_us,
             surface_acquire_us,
             submit_present_us,
+            lookahead_wait_us,
+            cold_start_init_us: cold_start_init_us.unwrap_or(0),
+            queue_residency_us: queue_residency_us.unwrap_or(0),
             queue_hit,
         }),
     })
@@ -3355,7 +3609,8 @@ pub async fn render_native_frame(
     }
     if request.mode.as_deref() != Some("frameStep") {
         if let Some(generation) = request.generation {
-            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
+            {
                 if !queue
                     .inner()
                     .clone()
@@ -3401,11 +3656,17 @@ pub async fn render_native_frame(
                 readback_us: None,
                 present_us: None,
                 scheduler_wait_us: None,
+                lookahead_wait_us: None,
+                cold_start_init_us: None,
+                queue_residency_us: None,
                 ipc_wait_us: None,
                 decoder_mutex_wait_us: None,
+                actor_wait_us: None,
                 gpu_queue_wait_us: None,
                 surface_acquire_us: None,
                 submit_present_us: None,
+                capability_policy: None,
+                capability_probe_us: None,
             });
             record_successful_readback_metrics(&app, &request);
             return Ok(tauri::ipc::Response::new(packet.data));
@@ -3417,7 +3678,8 @@ pub async fn render_native_frame(
         render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await?;
     if request.mode.as_deref() != Some("frameStep") {
         if let Some(generation) = request.generation {
-            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+            if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
+            {
                 if !queue
                     .inner()
                     .clone()
@@ -3472,11 +3734,17 @@ pub async fn render_native_frame(
             readback_us: Some(u64::from(stage_timings.readback_time_us)),
             present_us: None,
             scheduler_wait_us: None,
+            lookahead_wait_us: None,
+            cold_start_init_us: None,
+            queue_residency_us: None,
             ipc_wait_us: None,
             decoder_mutex_wait_us: Some(stage_timings.decoder_mutex_wait_us),
+            actor_wait_us: None,
             gpu_queue_wait_us: None,
             surface_acquire_us: None,
             submit_present_us: None,
+            capability_policy: None,
+            capability_probe_us: None,
         });
     }
 
@@ -3574,10 +3842,14 @@ pub async fn reset_native_preview_runtime(app: tauri::AppHandle) -> Result<(), S
 
     // 7. Reset the DXGI import state so the next project does not inherit a
     //    sticky DxgiImportState::Failed from this session.
-    if let Some(preview_session) =
-        app.try_state::<Arc<tokio::sync::Mutex<NativePreviewSession>>>()
+    if let Some(preview_session) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewSession>>>()
     {
-        preview_session.inner().clone().lock().await.reset_dxgi_state();
+        preview_session
+            .inner()
+            .clone()
+            .lock()
+            .await
+            .reset_dxgi_state();
     }
 
     Ok(())
@@ -3586,10 +3858,11 @@ pub async fn reset_native_preview_runtime(app: tauri::AppHandle) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::{
-        color_params, compute_text_layer_scale, merge_color_metadata, parse_blend_mode,
-        project_layer_transform, validate_project_request, validate_video_project_request,
-        NativeDecodeTimings, NativePreviewFrameQueue, NativeProjectFrameRequest,
-        NativeVideoProjectFrameRequest, QueuedNativeFrame,
+        color_params, compute_text_layer_scale, deadline_aware_lookahead_count,
+        merge_color_metadata, parse_blend_mode, project_layer_transform, queue_residency_us,
+        validate_project_request, validate_video_project_request, NativeDecodeTimings,
+        NativePreviewFrameQueue, NativeProjectFrameRequest, NativeVideoProjectFrameRequest,
+        QueuedNativeFrame, MAX_LOOKAHEAD_RESIDENCY_US,
     };
     use crate::native_core::TextLayerSnapshot;
     use crate::thumbnail_engine::decoder::VideoColorMetadata;
@@ -3602,6 +3875,15 @@ mod tests {
         assert_eq!(params.color_space, 0);
         assert_eq!(params.range, 0);
         assert_eq!(params.tonemap_operator, 0);
+    }
+
+    #[test]
+    fn lookahead_is_bounded_by_the_presentation_latency_budget() {
+        // A 16-frame queue at 30 fps creates more than half a second of
+        // avoidable ready-frame delay. Keep only enough work to cover the
+        // measured decoder lead while bounding the display latency to 100ms.
+        assert_eq!(deadline_aware_lookahead_count(30, 16, Some(40_000)), 2);
+        assert_eq!(deadline_aware_lookahead_count(30, 16, Some(500_000)), 3);
     }
 
     #[test]
@@ -3783,24 +4065,100 @@ mod tests {
             decoded_frames: Vec::new(),
             decode_timings: NativeDecodeTimings::default(),
             queued_at: Instant::now(),
+            ready_at: Instant::now(),
             scheduler_wait_us: 0,
         };
         assert!(queue.begin("frame-1", None));
         assert!(!queue.begin("frame-1", None));
-        queue.complete("frame-1".to_string(), queued_frame());
+        queue.complete(
+            "frame-1".to_string(),
+            queued_frame(),
+            queue.lifecycle_epoch(),
+        );
         assert!(queue.contains("frame-1"));
         assert!(queue.take("frame-1").is_some());
         assert!(!queue.contains("frame-1"));
 
         assert!(queue.begin("frame-2", None));
-        queue.complete("frame-2".to_string(), queued_frame());
+        queue.complete(
+            "frame-2".to_string(),
+            queued_frame(),
+            queue.lifecycle_epoch(),
+        );
         assert!(queue.begin("frame-3", None));
-        queue.complete("frame-3".to_string(), queued_frame());
+        queue.complete(
+            "frame-3".to_string(),
+            queued_frame(),
+            queue.lifecycle_epoch(),
+        );
         assert!(queue.begin("frame-4", None));
-        queue.complete("frame-4".to_string(), queued_frame());
+        queue.complete(
+            "frame-4".to_string(),
+            queued_frame(),
+            queue.lifecycle_epoch(),
+        );
         assert!(!queue.contains("frame-2"));
         assert!(queue.contains("frame-3"));
         assert!(queue.contains("frame-4"));
+    }
+
+    #[test]
+    fn queue_residency_measures_only_ready_frame_wait() {
+        let ready_at = Instant::now();
+        let presentation_started = ready_at + std::time::Duration::from_micros(400_000);
+
+        assert_eq!(queue_residency_us(ready_at, presentation_started), 400_000);
+    }
+
+    #[test]
+    fn queue_residency_is_zero_when_a_ready_frame_is_immediately_presented() {
+        let now = Instant::now();
+        assert_eq!(queue_residency_us(now, now), 0);
+    }
+
+    #[test]
+    fn queue_rejects_entries_from_an_earlier_playback_lifetime() {
+        let mut queue = NativePreviewFrameQueue::new(2);
+        let stale_epoch = queue.lifecycle_epoch();
+        queue.reset();
+
+        assert!(!queue.complete(
+            "old-frame".to_string(),
+            QueuedNativeFrame {
+                frame_index: 1,
+                decoded_frames: Vec::new(),
+                decode_timings: NativeDecodeTimings::default(),
+                queued_at: Instant::now(),
+                ready_at: Instant::now(),
+                scheduler_wait_us: 0,
+            },
+            stale_epoch,
+        ));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn queue_discards_ready_frames_that_missed_the_latency_deadline() {
+        let mut queue = NativePreviewFrameQueue::new(2);
+        let epoch = queue.lifecycle_epoch();
+        let now = Instant::now();
+        assert!(queue.complete(
+            "expired-frame".to_string(),
+            QueuedNativeFrame {
+                frame_index: 1,
+                decoded_frames: Vec::new(),
+                decode_timings: NativeDecodeTimings::default(),
+                queued_at: now,
+                ready_at: now,
+                scheduler_wait_us: 0,
+            },
+            epoch,
+        ));
+
+        queue.discard_expired(
+            now + std::time::Duration::from_micros(MAX_LOOKAHEAD_RESIDENCY_US + 1),
+        );
+        assert!(queue.is_empty());
     }
 
     #[test]
@@ -3891,14 +4249,13 @@ mod tests {
 /// console.log(`${stats.frames_produced} frames, miss rate ${stats.miss_rate_pct?.toFixed(2)}%`);
 /// ```
 #[tauri::command]
-pub async fn get_session_telemetry(
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
+pub async fn get_session_telemetry(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     use crate::wgpu_compositor::SessionTelemetryCollector;
 
     // The SessionTelemetryCollector is managed Tauri state registered at startup.
     // If not yet registered (headless test environments), return an empty snapshot.
-    let snapshot = if let Some(state) = app.try_state::<std::sync::Arc<SessionTelemetryCollector>>() {
+    let snapshot = if let Some(state) = app.try_state::<std::sync::Arc<SessionTelemetryCollector>>()
+    {
         state.snapshot()
     } else {
         SessionTelemetryCollector::new().snapshot()
@@ -3913,9 +4270,7 @@ pub async fn get_session_telemetry(
 /// open when you want per-project (rather than per-app-session) statistics.
 /// Does NOT affect the rolling [`FrameTelemetryRing`] or [`PolicyState`].
 #[tauri::command]
-pub async fn reset_session_telemetry(
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn reset_session_telemetry(app: tauri::AppHandle) -> Result<(), String> {
     use crate::wgpu_compositor::SessionTelemetryCollector;
 
     if let Some(state) = app.try_state::<std::sync::Arc<SessionTelemetryCollector>>() {

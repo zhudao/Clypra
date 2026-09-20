@@ -116,8 +116,7 @@ pub use curves::{evaluate_monotone_spline, CurveLutTable, CurvePoint, CurvesData
 
 pub mod scopes;
 pub use scopes::{
-    compute_video_scopes, HistogramData, RgbParadeData, ScopeGridData, ScopeType,
-    VideoScopePayload,
+    compute_video_scopes, HistogramData, RgbParadeData, ScopeGridData, ScopeType, VideoScopePayload,
 };
 
 /// Zero-copy D3D11VA → wgpu texture import (Windows discrete GPU only).
@@ -154,6 +153,11 @@ pub struct NativePreviewSession {
     pub text_pipeline: TextEffectPipeline,
     matte_prefetchers: HashMap<String, Arc<crate::clymatte::MattePrefetcher>>,
     compositors: Vec<CachedCompositor>,
+    /// Set once by `probe_decode_capability` during session configuration.
+    /// Kept for the lifetime of the session so sampling cannot lose the
+    /// decision when the first present attempt is dropped or unsampled.
+    capability_policy: Option<crate::native_core::DecodeCapabilityPolicy>,
+    capability_probe_us: Option<u64>,
 }
 
 struct CachedCompositor {
@@ -280,6 +284,8 @@ impl NativePreviewSession {
             text_pipeline,
             matte_prefetchers: HashMap::new(),
             compositors: Vec::new(),
+            capability_policy: None,
+            capability_probe_us: None,
         }
     }
 
@@ -290,11 +296,36 @@ impl NativePreviewSession {
 
     pub fn mark_dxgi_disabled(&mut self, reason: DisableReason) {
         self.dxgi_state = DxgiImportState::Disabled { reason };
-        log::info!("[NativePreviewSession] DXGI zero-copy import administratively Disabled ({reason})");
+        log::info!(
+            "[NativePreviewSession] DXGI zero-copy import administratively Disabled ({reason})"
+        );
     }
 
     pub fn mark_dxgi_supported(&mut self) {
         self.dxgi_state = DxgiImportState::Supported;
+    }
+
+    /// Store the capability probe result. Called once by
+    /// `configure_native_playback_render` after `probe_decode_capability`.
+    pub fn set_capability_probe(
+        &mut self,
+        policy: crate::native_core::DecodeCapabilityPolicy,
+        probe_us: Option<u64>,
+    ) {
+        self.capability_policy = Some(policy);
+        self.capability_probe_us = probe_us;
+    }
+
+    /// Return the session's capability decision without consuming it. Native
+    /// telemetry is sampled adaptively, so keeping this on every sample is the
+    /// only reliable way to preserve the policy in durable session archives.
+    pub fn capability_probe(
+        &self,
+    ) -> (
+        Option<crate::native_core::DecodeCapabilityPolicy>,
+        Option<u64>,
+    ) {
+        (self.capability_policy, self.capability_probe_us)
     }
 
     pub fn reset_dxgi_state(&mut self) {
@@ -342,10 +373,32 @@ impl NativePreviewSession {
         &self.compositors[self.compositors.len().saturating_sub(1)].compositor
     }
 
+    pub fn has_compositor(
+        &self,
+        width: u32,
+        height: u32,
+        target_format: wgpu::TextureFormat,
+    ) -> bool {
+        self.compositors.iter().any(|entry| {
+            entry.width == width && entry.height == height && entry.target_format == target_format
+        })
+    }
+
     /// Pre-compile and prime Metal/wgpu render pipelines for the project canvas
     /// dimensions and surface target format. Calling this during session opening
     /// or surface configuration completely eliminates the ~70ms first-frame
     /// compilation spike from the playback presentation path.
+    ///
+    /// On Windows, DXGI swapchains always negotiate to `Bgra8UnormSrgb` (the
+    /// first preference in `choose_surface_format`). If this function is called
+    /// before the surface has stored its negotiated format — which happens when
+    /// `configure_native_playback_render`'s readiness gate runs before the
+    /// swapchain is configured — the caller passes `Rgba8UnormSrgb` as a safe
+    /// default. Frame 2 then finds no compositor for `Bgra8UnormSrgb` and is
+    /// forced to compile all five D3D12 pipelines synchronously inside the
+    /// presentation thread, producing the ~5s `coldStartInitUs` spike observed
+    /// on Intel HD 520. Warming both formats here removes the race regardless
+    /// of call order.
     pub fn warmup_gpu_pipelines(
         &mut self,
         width: u32,
@@ -357,10 +410,36 @@ impl NativePreviewSession {
         }
         // Pre-compile the surface presentation compositor (5 pipelines: normal, additive, multiply, screen, transition)
         let _ = self.get_or_create_compositor(width, height, target_format);
-        // Pre-compile the offscreen/readback compositor if distinct
+        // Pre-compile the offscreen/readback compositor if distinct from the surface format.
         if target_format != wgpu::TextureFormat::Rgba8UnormSrgb {
-            let _ = self.get_or_create_compositor(width, height, wgpu::TextureFormat::Rgba8UnormSrgb);
+            let _ =
+                self.get_or_create_compositor(width, height, wgpu::TextureFormat::Rgba8UnormSrgb);
         }
+        // On Windows, DXGI always prefers Bgra8UnormSrgb for the swapchain
+        // surface. Pre-compiling it here ensures that a Bgra8UnormSrgb surface
+        // presentation never pays a first-compile cost even when the readiness
+        // gate ran before the swapchain was fully negotiated.
+        #[cfg(target_os = "windows")]
+        if target_format != wgpu::TextureFormat::Bgra8UnormSrgb {
+            let _ =
+                self.get_or_create_compositor(width, height, wgpu::TextureFormat::Bgra8UnormSrgb);
+        }
+    }
+
+    /// Warm only the graph used by a native presentation surface. This keeps
+    /// the first preview bounded on older Windows D3D12 drivers: the RGBA
+    /// readback graph is not part of a native-surface frame and must not make
+    /// startup wait for a second full set of blend pipelines.
+    pub fn warmup_native_surface_pipelines(
+        &mut self,
+        width: u32,
+        height: u32,
+        target_format: wgpu::TextureFormat,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let _ = self.get_or_create_compositor(width, height, target_format);
     }
 
     /// Convert one decoded NV12 frame into a GPU texture for timeline compositing.
@@ -521,7 +600,8 @@ impl NativePreviewSession {
                         | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 }));
-                self.layer_textures.insert(layer_key.to_string(), Arc::clone(&t));
+                self.layer_textures
+                    .insert(layer_key.to_string(), Arc::clone(&t));
                 t
             }
         } else {
@@ -540,7 +620,8 @@ impl NativePreviewSession {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             }));
-            self.layer_textures.insert(layer_key.to_string(), Arc::clone(&t));
+            self.layer_textures
+                .insert(layer_key.to_string(), Arc::clone(&t));
             t
         };
 
@@ -556,39 +637,47 @@ impl NativePreviewSession {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.gpu.queue.write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(params));
+        self.gpu
+            .queue
+            .write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(params));
 
-        let bind_group = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DXGI YUV BindGroup"),
-            layout: &self.yuv_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&imported.y_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&imported.uv_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DXGI YUV BindGroup"),
+                layout: &self.yuv_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&imported.y_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&imported.uv_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
+                ],
+            });
 
         // Encode a single-pass YUV→RGBA render using the existing pipeline.
-        let mut encoder = self.gpu.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("DXGI YUV→RGBA") },
-        );
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("DXGI YUV→RGBA"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("DXGI YUV Render Pass"),
@@ -1211,18 +1300,21 @@ impl NativePreviewSession {
         let sampler = &self.sampler;
         let device = &self.gpu.device;
 
-        let ring = self.rings.entry("__single_frame__".to_string()).or_insert_with(|| {
-            YuvTextureRingBuffer::new(
-                device,
-                yuv_layout,
-                sampler,
-                sampler,
-                source_width,
-                source_height,
-                YuvPixelFormat::Nv12,
-                3,
-            )
-        });
+        let ring = self
+            .rings
+            .entry("__single_frame__".to_string())
+            .or_insert_with(|| {
+                YuvTextureRingBuffer::new(
+                    device,
+                    yuv_layout,
+                    sampler,
+                    sampler,
+                    source_width,
+                    source_height,
+                    YuvPixelFormat::Nv12,
+                    3,
+                )
+            });
         ring.ensure_dimensions_and_format(
             &self.gpu.device,
             &self.yuv_layout,
@@ -2361,7 +2453,10 @@ mod tests {
             }
         };
 
-        let nv12_supported = renderer.device.features().contains(wgpu::Features::TEXTURE_FORMAT_NV12);
+        let nv12_supported = renderer
+            .device
+            .features()
+            .contains(wgpu::Features::TEXTURE_FORMAT_NV12);
         let capabilities = PreviewCapabilities::probe(&renderer.adapter, &renderer.device);
         let gpu = Arc::new(GpuContext {
             instance: renderer.instance.clone(),
@@ -2403,7 +2498,10 @@ mod tests {
         let renderer = match NativeWgpuRenderer::new().await {
             Ok(renderer) => renderer,
             Err(error) => {
-                eprintln!("Skipping NV12 full quad coverage test (no GPU adapter): {}", error);
+                eprintln!(
+                    "Skipping NV12 full quad coverage test (no GPU adapter): {}",
+                    error
+                );
                 return;
             }
         };
@@ -2427,7 +2525,10 @@ mod tests {
         let tl_b = rgba[2];
         let tl_a = rgba[3];
         assert_eq!(tl_a, 255, "Top-left alpha must be 255");
-        assert!(tl_r > 0 && tl_g > 0 && tl_b > 0, "Top-left must not be black");
+        assert!(
+            tl_r > 0 && tl_g > 0 && tl_b > 0,
+            "Top-left must not be black"
+        );
 
         // Check bottom-right corner (second triangle, which failed when draw(0..3) was used)
         let br_offset = ((width * height - 1) * 4) as usize;
@@ -2435,7 +2536,10 @@ mod tests {
         let br_g = rgba[br_offset + 1];
         let br_b = rgba[br_offset + 2];
         let br_a = rgba[br_offset + 3];
-        assert_eq!(br_a, 255, "Bottom-right alpha must be 255 (full quad coverage)");
+        assert_eq!(
+            br_a, 255,
+            "Bottom-right alpha must be 255 (full quad coverage)"
+        );
         assert!(
             br_r > 0 && br_g > 0 && br_b > 0,
             "Bottom-right corner must be shaded (second triangle of fullscreen quad)"

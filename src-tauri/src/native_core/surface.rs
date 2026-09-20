@@ -168,10 +168,20 @@ pub struct NativeSurfacePresentationTimings {
     pub total_us: u64,
     pub decode_us: u32,
     pub decoder_mutex_wait_us: u64,
+    #[serde(default)]
+    pub actor_wait_us: u64,
     pub conversion_upload_us: u64,
     pub compose_us: u64,
     pub surface_acquire_us: u64,
     pub submit_present_us: u64,
+    #[serde(default)]
+    pub lookahead_wait_us: u64,
+    #[serde(default)]
+    pub cold_start_init_us: u64,
+    /// Time a ready lookahead frame waited in the decode-ahead queue before
+    /// surface presentation. Kept separate from decoder and GPU timings.
+    #[serde(default)]
+    pub queue_residency_us: u64,
     pub queue_hit: bool,
 }
 

@@ -123,16 +123,42 @@ pub struct PerformanceSample {
     pub present_us: Option<u64>,
     #[serde(default)]
     pub scheduler_wait_us: Option<u64>,
+    /// Time spent waiting for an in-flight lookahead decode before the
+    /// presentation path falls back to a cold decode.
+    #[serde(default)]
+    pub lookahead_wait_us: Option<u64>,
+    /// One-time initialization work observed on a visible presentation path,
+    /// such as waiting for pipeline warmup or creating a new compositor graph.
+    #[serde(default)]
+    pub cold_start_init_us: Option<u64>,
+    /// Time a fully decoded lookahead frame spent waiting in the preview queue
+    /// before presentation. This is distinct from lock/scheduler contention.
+    #[serde(default)]
+    pub queue_residency_us: Option<u64>,
     #[serde(default)]
     pub ipc_wait_us: Option<u64>,
     #[serde(default)]
     pub decoder_mutex_wait_us: Option<u64>,
+    /// Time spent waiting on the StreamDecoderActor for a frame.
+    /// When prime cache hits, this is nearly zero (<10µs).
+    #[serde(default)]
+    pub actor_wait_us: Option<u64>,
     #[serde(default)]
     pub gpu_queue_wait_us: Option<u64>,
     #[serde(default)]
     pub surface_acquire_us: Option<u64>,
     #[serde(default)]
     pub submit_present_us: Option<u64>,
+    /// Hardware decode capability policy selected by the session-start probe.
+    /// Repeated on native samples so adaptive telemetry sampling preserves the
+    /// session decision. One of `"full"`, `"reduced"`, or `"proxy"`.
+    #[serde(default)]
+    pub capability_policy: Option<String>,
+    /// Wall-clock duration of the capability probe keyframe decode, in
+    /// microseconds. Repeated alongside `capability_policy`; absent when the
+    /// first video layer has no renderable frames at `time_secs = 0.0`.
+    #[serde(default)]
+    pub capability_probe_us: Option<u64>,
 }
 
 impl PerformanceSample {
@@ -217,6 +243,9 @@ pub struct ModeStats {
     pub readback: StagePercentiles,
     pub present: StagePercentiles,
     pub scheduler_wait: StagePercentiles,
+    pub lookahead_wait: StagePercentiles,
+    pub cold_start_init: StagePercentiles,
+    pub queue_residency: StagePercentiles,
     pub ipc_wait: StagePercentiles,
     pub decoder_mutex_wait: StagePercentiles,
     pub gpu_queue_wait: StagePercentiles,
@@ -305,11 +334,17 @@ mod tests {
             readback_us: None,
             present_us: None,
             scheduler_wait_us: None,
+            lookahead_wait_us: None,
+            cold_start_init_us: None,
+            queue_residency_us: None,
             ipc_wait_us: None,
             decoder_mutex_wait_us: None,
+            actor_wait_us: None,
             gpu_queue_wait_us: None,
             surface_acquire_us: None,
             submit_present_us: None,
+            capability_policy: None,
+            capability_probe_us: None,
         };
         assert!(sample.exceeds_render_budget(&budget));
     }

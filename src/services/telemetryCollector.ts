@@ -62,6 +62,7 @@ export interface TelemetryVideoProfile {
 export interface TelemetryStageTimings {
   decodeUs?: number;
   decoderMutexWaitUs?: number;
+  actorWaitUs?: number;
   conversionUploadUs?: number;
   composeUs?: number;
   surfaceAcquireUs?: number;
@@ -69,6 +70,9 @@ export interface TelemetryStageTimings {
   readbackUs?: number;
   submitPresentUs?: number;
   schedulerWaitUs?: number;
+  lookaheadWaitUs?: number;
+  coldStartInitUs?: number;
+  queueResidencyUs?: number;
   ipcWaitUs?: number;
   transferUs?: number;
   canvasPaintUs?: number;
@@ -84,6 +88,7 @@ export interface TelemetryMetricPercentiles {
 export interface TelemetryStagePercentiles {
   decodeUs?: TelemetryMetricPercentiles;
   decoderMutexWaitUs?: TelemetryMetricPercentiles;
+  actorWaitUs?: TelemetryMetricPercentiles;
   conversionUploadUs?: TelemetryMetricPercentiles;
   composeUs?: TelemetryMetricPercentiles;
   surfaceAcquireUs?: TelemetryMetricPercentiles;
@@ -91,6 +96,9 @@ export interface TelemetryStagePercentiles {
   readbackUs?: TelemetryMetricPercentiles;
   submitPresentUs?: TelemetryMetricPercentiles;
   schedulerWaitUs?: TelemetryMetricPercentiles;
+  lookaheadWaitUs?: TelemetryMetricPercentiles;
+  coldStartInitUs?: TelemetryMetricPercentiles;
+  queueResidencyUs?: TelemetryMetricPercentiles;
   ipcWaitUs?: TelemetryMetricPercentiles;
   transferUs?: TelemetryMetricPercentiles;
   canvasPaintUs?: TelemetryMetricPercentiles;
@@ -324,6 +332,7 @@ export interface TelemetryEvent {
   frameSequence?: number;
   dropReason?: string;
   deadlineUs?: number;
+  interaction?: TelemetryInteraction;
   subsystem?: TelemetrySubsystem;
   forceSample?: boolean;
   appVersion: string;
@@ -347,6 +356,8 @@ export interface TelemetryEvent {
     peakVramMb?: number;
     cacheHitRatio: number;
     stageTimings: TelemetryStageTimings;
+    capabilityPolicy?: "full" | "reduced" | "proxy" | string;
+    capabilityProbeUs?: number;
     renderPercentiles?: TelemetryMetricPercentiles;
     stagePercentiles?: TelemetryStagePercentiles;
     firstFrameVisibleMs?: number;
@@ -405,6 +416,19 @@ export type TelemetrySampleKind =
   | "qualification-summary"
   | "interaction";
 
+export type TelemetryInteractionName = "play" | "pause" | "seek";
+export type TelemetryInteractionOutcome = "completed" | "superseded" | "failed";
+
+/** Bounded, content-free timing for one editor transport action. */
+export interface TelemetryInteraction {
+  id: string;
+  name: TelemetryInteractionName;
+  outcome: TelemetryInteractionOutcome;
+  queueWaitUs?: number;
+  audioSeekUs?: number;
+  audioTransportUs?: number;
+}
+
 export interface TelemetryPreviewContext {
   view: TelemetryPreviewView;
   surface: TelemetryPreviewSurface;
@@ -424,6 +448,9 @@ export interface TelemetryRenderOptions {
   deadlineUs?: number;
   forceSample?: boolean;
   cacheHit?: boolean;
+  capabilityPolicy?: "full" | "reduced" | "proxy" | string;
+  capabilityProbeUs?: number;
+  interaction?: TelemetryInteraction;
   /** Native samples are stage evidence for a frontend frame, not a second frame. */
   includeInRollup?: boolean;
 }
@@ -553,6 +580,7 @@ class SessionRollupAccumulator {
   private renderTimesUs: number[] = [];
   private decodeTimesUs: number[] = [];
   private decoderMutexWaitTimesUs: number[] = [];
+  private actorWaitTimesUs: number[] = [];
   private composeTimesUs: number[] = [];
   private uploadTimesUs: number[] = [];
   private surfaceAcquireTimesUs: number[] = [];
@@ -562,6 +590,9 @@ class SessionRollupAccumulator {
   private canvasPaintTimesUs: number[] = [];
   private presentTimesUs: number[] = [];
   private schedulerWaitTimesUs: number[] = [];
+  private lookaheadWaitTimesUs: number[] = [];
+  private coldStartInitTimesUs: number[] = [];
+  private queueResidencyTimesUs: number[] = [];
   private ipcWaitTimesUs: number[] = [];
   private driftSamplesMs: number[] = [];
   private seekLatenciesMs: number[] = [];
@@ -574,6 +605,8 @@ class SessionRollupAccumulator {
   private cacheMisses: number = 0;
   private firstFrameVisibleMs: number | undefined;
   private lastKnownVideoProfile: Partial<TelemetryVideoProfile> = {};
+  private capabilityPolicy?: "full" | "reduced" | "proxy" | string;
+  private capabilityProbeUs?: number;
 
   public recordFrame(
     timings: TelemetryStageTimings,
@@ -583,6 +616,8 @@ class SessionRollupAccumulator {
     isStale: boolean = false,
     isCancelled: boolean = false,
     cacheHit: boolean = true,
+    capabilityPolicy?: "full" | "reduced" | "proxy" | string,
+    capabilityProbeUs?: number,
   ): void {
     const now = Date.now();
 
@@ -616,6 +651,8 @@ class SessionRollupAccumulator {
         this.decodeTimesUs.push(timings.decodeUs);
       if (timings.decoderMutexWaitUs !== undefined)
         this.decoderMutexWaitTimesUs.push(timings.decoderMutexWaitUs);
+      if (timings.actorWaitUs !== undefined)
+        this.actorWaitTimesUs.push(timings.actorWaitUs);
       if (timings.composeUs !== undefined)
         this.composeTimesUs.push(timings.composeUs);
       if (timings.conversionUploadUs !== undefined)
@@ -634,6 +671,12 @@ class SessionRollupAccumulator {
         this.presentTimesUs.push(timings.submitPresentUs);
       if (timings.schedulerWaitUs !== undefined)
         this.schedulerWaitTimesUs.push(timings.schedulerWaitUs);
+      if (timings.lookaheadWaitUs !== undefined)
+        this.lookaheadWaitTimesUs.push(timings.lookaheadWaitUs);
+      if (timings.coldStartInitUs !== undefined)
+        this.coldStartInitTimesUs.push(timings.coldStartInitUs);
+      if (timings.queueResidencyUs !== undefined)
+        this.queueResidencyTimesUs.push(timings.queueResidencyUs);
       if (timings.ipcWaitUs !== undefined)
         this.ipcWaitTimesUs.push(timings.ipcWaitUs);
     }
@@ -648,6 +691,8 @@ class SessionRollupAccumulator {
         ...videoProfile,
       };
     }
+    if (capabilityPolicy) this.capabilityPolicy = capabilityPolicy;
+    if (capabilityProbeUs !== undefined) this.capabilityProbeUs = capabilityProbeUs;
   }
 
   public recordSeek(seekLatencyMs: number): void {
@@ -677,6 +722,8 @@ class SessionRollupAccumulator {
     stagePercentiles?: TelemetryStagePercentiles;
     firstFrameVisibleMs?: number;
     videoProfile: Partial<TelemetryVideoProfile>;
+    capabilityPolicy?: "full" | "reduced" | "proxy" | string;
+    capabilityProbeUs?: number;
   } | null {
     if (this.totalFrames === 0) {
       this.windowStartMs = Date.now();
@@ -716,6 +763,7 @@ class SessionRollupAccumulator {
     const stageTimings: TelemetryStageTimings = {
       decodeUs: mean(this.decodeTimesUs) || undefined,
       decoderMutexWaitUs: mean(this.decoderMutexWaitTimesUs) || undefined,
+      actorWaitUs: mean(this.actorWaitTimesUs) || undefined,
       composeUs: mean(this.composeTimesUs) || undefined,
       conversionUploadUs: mean(this.uploadTimesUs) || undefined,
       surfaceAcquireUs: mean(this.surfaceAcquireTimesUs) || undefined,
@@ -725,6 +773,9 @@ class SessionRollupAccumulator {
       canvasPaintUs: mean(this.canvasPaintTimesUs) || undefined,
       submitPresentUs: mean(this.presentTimesUs) || undefined,
       schedulerWaitUs: mean(this.schedulerWaitTimesUs) || undefined,
+      lookaheadWaitUs: mean(this.lookaheadWaitTimesUs) || undefined,
+      coldStartInitUs: mean(this.coldStartInitTimesUs) || undefined,
+      queueResidencyUs: mean(this.queueResidencyTimesUs) || undefined,
       ipcWaitUs: mean(this.ipcWaitTimesUs) || undefined,
       totalTimeUs,
     };
@@ -752,6 +803,7 @@ class SessionRollupAccumulator {
       stagePercentiles: {
         decodeUs: metricPercentiles(this.decodeTimesUs),
         decoderMutexWaitUs: metricPercentiles(this.decoderMutexWaitTimesUs),
+        actorWaitUs: metricPercentiles(this.actorWaitTimesUs),
         conversionUploadUs: metricPercentiles(this.uploadTimesUs),
         composeUs: metricPercentiles(this.composeTimesUs),
         surfaceAcquireUs: metricPercentiles(this.surfaceAcquireTimesUs),
@@ -761,11 +813,16 @@ class SessionRollupAccumulator {
         canvasPaintUs: metricPercentiles(this.canvasPaintTimesUs),
         submitPresentUs: metricPercentiles(this.presentTimesUs),
         schedulerWaitUs: metricPercentiles(this.schedulerWaitTimesUs),
+        lookaheadWaitUs: metricPercentiles(this.lookaheadWaitTimesUs),
+        coldStartInitUs: metricPercentiles(this.coldStartInitTimesUs),
+        queueResidencyUs: metricPercentiles(this.queueResidencyTimesUs),
         ipcWaitUs: metricPercentiles(this.ipcWaitTimesUs),
         totalTimeUs: metricPercentiles(this.renderTimesUs),
       },
       firstFrameVisibleMs: this.firstFrameVisibleMs,
       videoProfile: this.lastKnownVideoProfile,
+      capabilityPolicy: this.capabilityPolicy,
+      capabilityProbeUs: this.capabilityProbeUs,
     };
 
     this.windowStartMs = Date.now();
@@ -779,6 +836,7 @@ class SessionRollupAccumulator {
     this.renderTimesUs = [];
     this.decodeTimesUs = [];
     this.decoderMutexWaitTimesUs = [];
+    this.actorWaitTimesUs = [];
     this.composeTimesUs = [];
     this.uploadTimesUs = [];
     this.surfaceAcquireTimesUs = [];
@@ -788,10 +846,15 @@ class SessionRollupAccumulator {
     this.canvasPaintTimesUs = [];
     this.presentTimesUs = [];
     this.schedulerWaitTimesUs = [];
+    this.lookaheadWaitTimesUs = [];
+    this.coldStartInitTimesUs = [];
+    this.queueResidencyTimesUs = [];
     this.ipcWaitTimesUs = [];
     this.driftSamplesMs = [];
     this.seekLatenciesMs = [];
     this.firstFrameVisibleMs = undefined;
+    this.capabilityPolicy = undefined;
+    this.capabilityProbeUs = undefined;
 
     return result;
   }
@@ -809,6 +872,7 @@ class SessionRollupAccumulator {
     this.renderTimesUs = [];
     this.decodeTimesUs = [];
     this.decoderMutexWaitTimesUs = [];
+    this.actorWaitTimesUs = [];
     this.composeTimesUs = [];
     this.uploadTimesUs = [];
     this.surfaceAcquireTimesUs = [];
@@ -818,10 +882,15 @@ class SessionRollupAccumulator {
     this.canvasPaintTimesUs = [];
     this.presentTimesUs = [];
     this.schedulerWaitTimesUs = [];
+    this.lookaheadWaitTimesUs = [];
+    this.coldStartInitTimesUs = [];
+    this.queueResidencyTimesUs = [];
     this.ipcWaitTimesUs = [];
     this.driftSamplesMs = [];
     this.seekLatenciesMs = [];
     this.firstFrameVisibleMs = undefined;
+    this.capabilityPolicy = undefined;
+    this.capabilityProbeUs = undefined;
   }
 }
 
@@ -1311,6 +1380,8 @@ class TelemetryCollector {
         staleFrames > 0,
         cancelledFrames > 0,
         options.cacheHit ?? true,
+        options.capabilityPolicy,
+        options.capabilityProbeUs,
       );
 
       if (accumulator.shouldEmitRollup()) {
@@ -1344,6 +1415,7 @@ class TelemetryCollector {
       frameSequence: options.frameSequence,
       dropReason: options.dropReason,
       deadlineUs: options.deadlineUs,
+      interaction: options.interaction,
       appVersion: this.appVersion,
       appBuildNumber: import.meta.env.MODE || "prod",
       appEnvironment: import.meta.env.DEV ? "beta" : "production",
@@ -1370,11 +1442,48 @@ class TelemetryCollector {
         peakRamMb: 512,
         cacheHitRatio: 0.9,
         stageTimings: timings,
+        capabilityPolicy: options.capabilityPolicy,
+        capabilityProbeUs: options.capabilityProbeUs,
       },
       timestampMs: Date.now(),
     };
 
     this.enqueueEvent(event);
+  }
+
+  /** Records a play, pause, or seek interaction at 100% sampling. */
+  public recordPreviewInteraction(input: {
+    interaction: TelemetryInteraction;
+    totalTimeUs: number;
+    previewContext?: TelemetryPreviewContext;
+  }): void {
+    const mode: TelemetryOperationMode =
+      input.interaction.name === "seek" ? "seek-warm" : "playback";
+    this.recordRenderSpan(
+      {
+        schedulerWaitUs: input.interaction.queueWaitUs,
+        ipcWaitUs:
+          (input.interaction.audioSeekUs ?? 0) +
+            (input.interaction.audioTransportUs ?? 0) || undefined,
+        totalTimeUs: Math.max(0, Math.round(input.totalTimeUs)),
+      },
+      input.interaction.outcome === "failed" ? 1 : 0,
+      1,
+      {},
+      mode,
+      undefined,
+      0,
+      input.interaction.outcome === "superseded" ? 1 : 0,
+      {
+        measurementId: `interaction:${input.interaction.id}`,
+        measurementSource: "frontend-span",
+        sampleKind: "interaction",
+        forceSample: true,
+        includeInRollup: false,
+        previewContext: input.previewContext,
+        interaction: input.interaction,
+      },
+    );
   }
 
   /**
@@ -2063,14 +2172,20 @@ class TelemetryCollector {
         uploadTimeUs?: number;
         conversionUploadUs?: number;
         decoderMutexWaitUs?: number;
+        actorWaitUs?: number;
         gpuQueueWaitUs?: number;
         surfaceAcquireUs?: number;
         schedulerWaitUs?: number;
+        lookaheadWaitUs?: number;
+        coldStartInitUs?: number;
+        queueResidencyUs?: number;
         ipcWaitUs?: number;
         dropped?: boolean;
         stale?: boolean;
         cancelled?: boolean;
         dropReason?: string;
+        capabilityPolicy?: "full" | "reduced" | "proxy" | string;
+        capabilityProbeUs?: number;
       } | null;
       windowDroppedFrames?: number;
       windowStaleFrames?: number;
@@ -2099,6 +2214,7 @@ class TelemetryCollector {
     const timings: TelemetryStageTimings = {
       decodeUs: last.decodeTimeUs,
       decoderMutexWaitUs: last.decoderMutexWaitUs,
+      actorWaitUs: last.actorWaitUs,
       conversionUploadUs:
         last.conversionUploadUs ?? last.conversionTimeUs ?? last.uploadTimeUs,
       composeUs: last.composeTimeUs,
@@ -2106,6 +2222,9 @@ class TelemetryCollector {
       gpuQueueWaitUs: last.gpuQueueWaitUs,
       readbackUs: last.readbackTimeUs,
       schedulerWaitUs: last.schedulerWaitUs,
+      lookaheadWaitUs: last.lookaheadWaitUs,
+      coldStartInitUs: last.coldStartInitUs,
+      queueResidencyUs: last.queueResidencyUs,
       ipcWaitUs: last.ipcWaitUs,
       submitPresentUs: last.presentTimeUs,
       totalTimeUs: last.totalTimeUs,
@@ -2145,6 +2264,8 @@ class TelemetryCollector {
           : undefined,
         forceSample: previewContext?.scenario === "qualification",
         cacheHit: last.cacheHit,
+        capabilityPolicy: last.capabilityPolicy,
+        capabilityProbeUs: last.capabilityProbeUs,
         // The native session is the authoritative frame stream for the Native
         // path. Frontend spans are used for WebView and compatibility fallback
         // only, so Native samples can feed the session rollup without being
@@ -2202,6 +2323,8 @@ class TelemetryCollector {
           peakRamMb: 512,
           cacheHitRatio: rollup.cacheHitRatio,
           stageTimings: rollup.stageTimings,
+          capabilityPolicy: rollup.capabilityPolicy,
+          capabilityProbeUs: rollup.capabilityProbeUs,
           renderPercentiles: rollup.renderPercentiles,
           stagePercentiles: rollup.stagePercentiles,
           firstFrameVisibleMs: rollup.firstFrameVisibleMs,

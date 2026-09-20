@@ -109,6 +109,7 @@ class PerfLogService {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private syncPollTimer: ReturnType<typeof setInterval> | null = null;
   private diagnosticsUnlisten: (() => void) | null = null;
+  private playbackStartupUnlisten: (() => void) | null = null;
   private flushInFlight: Promise<void> | null = null;
   private closeInFlight: Promise<void> | null = null;
 
@@ -136,11 +137,14 @@ class PerfLogService {
       this.startFlushTimer();
       this.startSyncPollTimer();
       await this.subscribeToNativeDiagnostics();
+      await this.subscribeToNativePlaybackStartup();
 
       // Write a session-open marker so log consumers can correlate the
       // hardware context with subsequent entries without re-parsing the whole file.
+      // Uses "native-diagnostic" kind so it is stored in the R2 raw archive
+      // but never parsed as a telemetry event (it has no eventId/device/video/workload).
       this.enqueue({
-        kind: "frontend-rollup",
+        kind: "native-diagnostic",
         sessionId: this.sessionId,
         timestampEpochMs: Date.now(),
         payload: {
@@ -330,8 +334,9 @@ class PerfLogService {
     }
 
     // Write a session-close marker before the final flush.
+    // Uses "native-diagnostic" so it is stored in R2 but not parsed as a telemetry event.
     this.queue.push({
-      kind: "frontend-rollup",
+      kind: "native-diagnostic",
       sessionId,
       timestampEpochMs: Date.now(),
       payload: { marker: "session-close" },
@@ -350,6 +355,10 @@ class PerfLogService {
     if (this.diagnosticsUnlisten) {
       this.diagnosticsUnlisten();
       this.diagnosticsUnlisten = null;
+    }
+    if (this.playbackStartupUnlisten) {
+      this.playbackStartupUnlisten();
+      this.playbackStartupUnlisten = null;
     }
 
     // Tell Rust to close the file and get back the path.
@@ -526,6 +535,26 @@ class PerfLogService {
         "[PerfLogService] Failed to subscribe to native diagnostics:",
         err,
       );
+    }
+  }
+
+  /** Persists native readiness/first-frame milestones without terminal I/O. */
+  private async subscribeToNativePlaybackStartup(): Promise<void> {
+    try {
+      this.playbackStartupUnlisten = await tauriListen(
+        "clypra://native-playback-startup",
+        (payload) => {
+          if (!this.sessionId) return;
+          this.enqueue({
+            kind: "native-diagnostic",
+            sessionId: this.sessionId,
+            timestampEpochMs: Date.now(),
+            payload: { marker: "native-playback-startup", ...(payload as object) },
+          });
+        },
+      );
+    } catch {
+      // The event is optional on older builds; normal telemetry continues.
     }
   }
 

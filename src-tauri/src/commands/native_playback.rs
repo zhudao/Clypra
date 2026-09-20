@@ -1,11 +1,12 @@
 use crate::native_audio::NativeAudioClock;
 use crate::native_core::playback::frame_for_audio_position;
 use crate::native_core::{
-    FrameRequest, FrameTime, NativeCoreError, NativePlaybackFrameDemand, PlaybackPlan,
-    PlaybackSession, PlaybackState, DEFAULT_TIME_SCALE, NATIVE_CORE_CONTRACT_VERSION,
+    DecodeCapabilityPolicy, FrameRequest, FrameTime, NativeCoreError, NativePlaybackFrameDemand,
+    PlaybackPlan, PlaybackSession, PlaybackState, QualityTier, DEFAULT_TIME_SCALE,
+    NATIVE_CORE_CONTRACT_VERSION,
 };
 use crate::thumbnail_engine::decoder::{
-    acquire_preview_decoder_lease_for_stream, PreviewDecoderLease,
+    acquire_preview_decoder_lease_for_stream, get_preview_decoder_for_stream, PreviewDecoderLease,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -21,11 +22,26 @@ use tauri::{AppHandle, Emitter, Manager};
 struct NativeRenderSession {
     snapshot: Mutex<FrameRequest>,
     leases: Mutex<Vec<PreviewDecoderLease>>,
+    actors: Mutex<Vec<Arc<crate::thumbnail_engine::stream_actor::StreamDecoderActorHandle>>>,
     pending: Mutex<LatestPlaybackDemand>,
     notify: tokio::sync::Notify,
     running: AtomicBool,
     generation: AtomicU64,
     worker: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    configured_at: Instant,
+    ready_after_us: AtomicU64,
+    first_presented: AtomicBool,
+}
+
+/// One-shot, non-content startup milestones persisted by the frontend in the
+/// session archive. They expose the otherwise invisible interval between
+/// render-session configuration and first visible native frame.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativePlaybackStartupMilestone {
+    stage: &'static str,
+    elapsed_us: u64,
+    ready_after_us: Option<u64>,
 }
 
 #[derive(Default)]
@@ -44,10 +60,11 @@ impl LatestPlaybackDemand {
 }
 
 impl NativeRenderSession {
-    async fn new(snapshot: FrameRequest) -> Result<Arc<Self>, String> {
+    async fn new(snapshot: FrameRequest, configured_at: Instant) -> Result<Arc<Self>, String> {
         snapshot.validate().map_err(|error| error.to_string())?;
         let mut streams = HashSet::new();
         let mut leases = Vec::new();
+        let mut actors = Vec::new();
         for layer in &snapshot.project.video_layers {
             if layer.layer_id.ends_with(":subject-cutout") {
                 continue;
@@ -55,7 +72,11 @@ impl NativeRenderSession {
             let key = (layer.video_path.clone(), layer.layer_id.clone());
             if streams.insert(key) {
                 leases.push(
-                    acquire_preview_decoder_lease_for_stream(
+                    acquire_preview_decoder_lease_for_stream(&layer.video_path, &layer.layer_id)
+                        .await?,
+                );
+                actors.push(
+                    crate::thumbnail_engine::stream_actor::get_preview_decoder_actor_for_stream(
                         &layer.video_path,
                         &layer.layer_id,
                     )
@@ -66,23 +87,51 @@ impl NativeRenderSession {
         Ok(Arc::new(Self {
             snapshot: Mutex::new(snapshot),
             leases: Mutex::new(leases),
+            actors: Mutex::new(actors),
             pending: Mutex::new(LatestPlaybackDemand::default()),
             notify: tokio::sync::Notify::new(),
             running: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             worker: Mutex::new(None),
+            configured_at,
+            ready_after_us: AtomicU64::new(0),
+            first_presented: AtomicBool::new(false),
         }))
+    }
+
+    /// The startup probe chooses one quality policy for the complete
+    /// render-session revision. Persist it in the immutable render snapshot so
+    /// the worker's initial prime and every subsequent refill use the same
+    /// decode scale, rather than only the paused configuration path.
+    fn set_preview_quality(&self, quality: QualityTier) {
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.quality = quality;
+        }
+    }
+
+    fn mark_ready(&self) {
+        self.ready_after_us.store(
+            self.configured_at
+                .elapsed()
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+            Ordering::Release,
+        );
     }
 
     fn start(self: &Arc<Self>, app: AppHandle) {
         if self.running.swap(true, Ordering::AcqRel) {
             return;
         }
-        eprintln!("[NativePlayback] Persistent background render worker STARTED");
         if let Ok(snapshot_guard) = self.snapshot.lock() {
             let base_request = snapshot_guard.clone();
             drop(snapshot_guard);
-            crate::commands::native_preview::schedule_lookahead_predecode(app.clone(), base_request, 16);
+            crate::commands::native_preview::schedule_lookahead_predecode(
+                app.clone(),
+                base_request,
+                16,
+                None,
+            );
         }
         let session = Arc::clone(self);
         let handle = tauri::async_runtime::spawn(async move {
@@ -93,9 +142,8 @@ impl NativeRenderSession {
         }
     }
 
-    fn stop(&self) {
+    fn stop(&self, app: Option<AppHandle>) {
         self.running.store(false, Ordering::Release);
-        eprintln!("[NativePlayback] Persistent background render worker STOPPED");
         if let Ok(mut pending) = self.pending.lock() {
             pending.value = None;
         }
@@ -104,6 +152,19 @@ impl NativeRenderSession {
             if let Some(handle) = worker.take() {
                 handle.abort();
             }
+        }
+        if let Ok(actors) = self.actors.lock() {
+            for actor in actors.iter() {
+                let a = actor.clone();
+                tauri::async_runtime::spawn(async move {
+                    a.clear_prime_cache().await;
+                });
+            }
+        }
+        if let Some(app) = app {
+            tauri::async_runtime::spawn(async move {
+                crate::commands::native_preview::reset_native_preview_queue(&app).await;
+            });
         }
     }
 
@@ -121,6 +182,11 @@ impl NativeRenderSession {
                 .unwrap_or(false)
             {
                 pending.value = None;
+            }
+        }
+        if let Ok(actors) = self.actors.lock() {
+            for actor in actors.iter() {
+                actor.invalidate(generation);
             }
         }
         self.notify.notify_one();
@@ -175,7 +241,12 @@ impl NativeRenderSession {
             let base_demand_video_count = demand
                 .video_layers
                 .iter()
-                .filter(|l| !l.layer_id.as_deref().map(|id| id.ends_with(":subject-cutout")).unwrap_or(false))
+                .filter(|l| {
+                    !l.layer_id
+                        .as_deref()
+                        .map(|id| id.ends_with(":subject-cutout"))
+                        .unwrap_or(false)
+                })
                 .count();
 
             if demand.video_layers.len() == request.project.video_layers.len() {
@@ -201,8 +272,13 @@ impl NativeRenderSession {
                     }
                     if update.body_effect.is_some() {
                         layer.body_effect = update.body_effect.clone();
-                    } else if layer.layer_id.ends_with(":subject-cutout") && layer.body_effect.is_none() {
-                        let base_id = layer.layer_id.strip_suffix(":subject-cutout").unwrap_or(&layer.layer_id);
+                    } else if layer.layer_id.ends_with(":subject-cutout")
+                        && layer.body_effect.is_none()
+                    {
+                        let base_id = layer
+                            .layer_id
+                            .strip_suffix(":subject-cutout")
+                            .unwrap_or(&layer.layer_id);
                         layer.body_effect = Some(crate::native_core::BodyEffectSnapshot {
                             mask_asset_id: format!("{}_fx-body-cutout-{}", layer.layer_id, base_id),
                             renderer: "body_cutout".to_string(),
@@ -245,7 +321,12 @@ impl NativeRenderSession {
                         new_video_layers.push(layer);
                     } else if lid.ends_with(":subject-cutout") {
                         let base_id = lid.strip_suffix(":subject-cutout").unwrap_or("");
-                        if let Some(base_layer) = request.project.video_layers.iter().find(|l| l.layer_id == base_id) {
+                        if let Some(base_layer) = request
+                            .project
+                            .video_layers
+                            .iter()
+                            .find(|l| l.layer_id == base_id)
+                        {
                             let mut layer = base_layer.clone();
                             layer.layer_id = lid.to_string();
                             layer.source_time = update.source_time;
@@ -279,12 +360,14 @@ impl NativeRenderSession {
                     request.project.video_layers = new_video_layers;
                 } else {
                     return Err(
-                        "Native playback demand video layers could not be resolved from snapshot".to_string(),
+                        "Native playback demand video layers could not be resolved from snapshot"
+                            .to_string(),
                     );
                 }
             } else {
                 return Err(
-                    "Native playback demand does not match the configured render snapshot".to_string(),
+                    "Native playback demand does not match the configured render snapshot"
+                        .to_string(),
                 );
             }
 
@@ -476,10 +559,7 @@ impl NativeRenderSession {
 
             let base_request = match self.materialize_request(dynamic_demand.as_ref()) {
                 Ok(req) => req,
-                Err(error) => {
-                    log::debug!("native playback demand materialize failed: {error}");
-                    continue;
-                }
+                Err(_) => continue,
             };
 
             // Reading the lease collection here documents and enforces the
@@ -525,9 +605,9 @@ impl NativeRenderSession {
                             let base_source_time_secs = (layer.source_time.ticks as f64)
                                 / (layer.source_time.timescale.max(1) as f64);
                             let current_source_secs = (base_source_time_secs + delta_secs).max(0.0);
-                            let source_frame_index = (current_source_secs
-                                * request.project.frame_rate as f64)
-                                .round() as u64;
+                            let source_frame_index =
+                                (current_source_secs * request.project.frame_rate as f64).round()
+                                    as u64;
                             let ticks =
                                 (current_source_secs * DEFAULT_TIME_SCALE as f64).round() as i64;
                             if let Ok(ft) =
@@ -561,28 +641,13 @@ impl NativeRenderSession {
                             } else {
                                 30.0
                             };
-                            let hit_rate =
-                                (queue_hits as f64 / frames_rendered as f64) * 100.0;
+                            let hit_rate = (queue_hits as f64 / frames_rendered as f64) * 100.0;
                             let avg_total_ms =
                                 (total_time_sum_us as f64 / frames_rendered as f64) / 1000.0;
                             let avg_decode_ms =
                                 (decode_time_sum_us as f64 / frames_rendered as f64) / 1000.0;
                             let peak_ms = (max_frame_us as f64) / 1000.0;
                             let stream_count = _active_decoder_lease_count;
-
-                            eprintln!(
-                                "📊 [NativePlayback Summary] {} frames ({:.0}fps) | Lookahead Hit Rate: {:.1}% ({}/{}) | Avg Total: {:.2}ms | Avg Decode: {:.2}ms | Peak: {:.2}ms | Dropped: {} | Stacked Streams: {}",
-                                frames_rendered,
-                                fps,
-                                hit_rate,
-                                queue_hits,
-                                frames_rendered,
-                                avg_total_ms,
-                                avg_decode_ms,
-                                peak_ms,
-                                dropped_frames,
-                                stream_count
-                            );
 
                             #[derive(Clone, Serialize)]
                             #[serde(rename_all = "camelCase")]
@@ -641,12 +706,27 @@ impl NativeRenderSession {
             // audio-clock lateness decision in present_native_frame.
             return None;
         }
-        let frame_index = request.frame_time.frame_index;
         match crate::commands::native_preview::present_native_frame_internal(app.clone(), request)
             .await
         {
             Ok(presentation) => {
                 if presentation.presented {
+                    if !self.first_presented.swap(true, Ordering::AcqRel) {
+                        let ready_after_us = self.ready_after_us.load(Ordering::Acquire);
+                        let _ = app.emit(
+                            "clypra://native-playback-startup",
+                            NativePlaybackStartupMilestone {
+                                stage: "first-native-frame-presented",
+                                elapsed_us: self
+                                    .configured_at
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u64::MAX as u128)
+                                    as u64,
+                                ready_after_us: (ready_after_us > 0).then_some(ready_after_us),
+                            },
+                        );
+                    }
                     if let Some(surface) = app
                         .try_state::<Arc<Mutex<crate::commands::native_surface::NativeSurfaceRuntime>>>(
                         )
@@ -655,20 +735,10 @@ impl NativeRenderSession {
                             let _ = surface.show_surface();
                         }
                     }
-                } else if presentation.dropped {
-                    eprintln!(
-                        "[NativePlayback] frame #{} DROPPED (drop_reason: {:?})",
-                        frame_index, presentation.drop_reason
-                    );
                 }
                 Some(presentation)
             }
-            Err(error) => {
-                if !error.contains("stale") {
-                    log::warn!("[NativePlayback] frame #{} presentation failed: {error}", frame_index);
-                }
-                None
-            }
+            Err(_) => None,
         }
     }
 }
@@ -692,7 +762,7 @@ impl NativePlaybackRuntime {
 
     fn install_render_session(&mut self, render_session: Arc<NativeRenderSession>) {
         if let Some(previous) = self.render_session.take() {
-            previous.stop();
+            previous.stop(None);
         }
         self.render_session = Some(render_session);
     }
@@ -714,9 +784,9 @@ impl NativePlaybackRuntime {
         }
     }
 
-    pub fn stop_render(&self) {
+    pub fn stop_render(&self, app: AppHandle) {
         if let Some(session) = &self.render_session {
-            session.stop();
+            session.stop(Some(app));
         }
     }
 
@@ -762,11 +832,6 @@ impl NativePlaybackRuntime {
                     audio_track_count: 0,
                 }
             };
-            eprintln!(
-                "[NativePlayback] Self-healed unconfigured playback session (revision: {}, fps: {})",
-                plan.project_revision,
-                plan.frame_rate
-            );
             self.session = Some(PlaybackSession::new(plan)?);
         }
         Ok(self.session.as_mut().unwrap())
@@ -827,7 +892,7 @@ impl NativePlaybackRuntime {
     /// clean. Called as part of project-close runtime reset.
     pub fn reset(&mut self) {
         if let Some(render_session) = self.render_session.take() {
-            render_session.stop();
+            render_session.stop(None);
         }
         self.session = None;
     }
@@ -903,6 +968,62 @@ pub fn configure_native_playback(
     with_runtime(&app, |runtime| runtime.configure(plan))
 }
 
+/// Probe the hardware's decode capability for the first video layer in the
+/// snapshot. Decodes one keyframe at `time_secs = 0.0` with
+/// `allow_keyframe_approx: true` and maps the elapsed wall-clock time to a
+/// `DecodeCapabilityPolicy`. The probe is bounded by a 400 ms Tokio timeout;
+/// if the decoder does not return within that window the policy is `Proxy`.
+///
+/// The probe runs after `prepare_native_preview_pipelines` (GPU warm) and
+/// before `schedule_lookahead_predecode`. It must not be spawned in the
+/// background; awaiting it is what makes the quality policy available before
+/// the first lookahead frame is queued.
+async fn probe_decode_capability(snapshot: &FrameRequest) -> (DecodeCapabilityPolicy, Option<u64>) {
+    let layer = match snapshot.project.video_layers.first() {
+        Some(layer) => layer,
+        None => return (DecodeCapabilityPolicy::Full, None),
+    };
+
+    let stream_id = if !layer.layer_id.is_empty() {
+        layer.layer_id.as_str()
+    } else {
+        ""
+    };
+
+    let decoder = match get_preview_decoder_for_stream(&layer.video_path, stream_id).await {
+        Ok(d) => d,
+        Err(_) => return (DecodeCapabilityPolicy::Full, None),
+    };
+
+    let probe_options = crate::thumbnail_engine::decoder::DecodeFrameOptions {
+        allow_keyframe_approx: true,
+        quality: QualityTier::Full,
+    };
+
+    // Bound the probe to 400 ms so the session never hangs on a completely
+    // stuck hardware decoder (e.g., driver crash, permission issue).
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        tokio::task::spawn_blocking(move || {
+            let mut guard = decoder.blocking_lock();
+            guard.decode_frame_raw_nv12_with_options(0.0, probe_options, || false)
+        }),
+    )
+    .await;
+
+    let elapsed_us = started.elapsed().as_micros() as u64;
+
+    match result {
+        Ok(Ok(Ok(_))) => (
+            DecodeCapabilityPolicy::from_probe_us(elapsed_us),
+            Some(elapsed_us),
+        ),
+        // Timeout or decode error: conservative fallback
+        _ => (DecodeCapabilityPolicy::Proxy, Some(elapsed_us)),
+    }
+}
+
 /// Install the immutable Native render graph for one project/render revision.
 /// This payload is sent once; playback submits only compact frame demand.
 #[tauri::command]
@@ -910,6 +1031,9 @@ pub async fn configure_native_playback_render(
     app: AppHandle,
     snapshot: FrameRequest,
 ) -> Result<(), String> {
+    // This precedes decoder-lease acquisition so the startup milestone covers
+    // the full configuration path, not merely the final GPU readiness gate.
+    let startup_started_at = Instant::now();
     let state = runtime(&app)?;
     let previous = {
         let mut runtime = state
@@ -918,7 +1042,7 @@ pub async fn configure_native_playback_render(
         runtime.take_render_session()
     };
     if let Some(previous) = previous {
-        previous.stop();
+        previous.stop(Some(app.clone()));
         // Clear obsolete frames from previous configuration so newly configured
         // layers have immediate access to all queue capacity.
         if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<crate::commands::native_preview::NativePreviewFrameQueue>>>() {
@@ -931,12 +1055,23 @@ pub async fn configure_native_playback_render(
     // Acquire leases only after the previous revision has released its pins;
     // this prevents a project switch from temporarily growing the preview
     // decoder pool beyond its intended capacity.
-    let render_session = NativeRenderSession::new(snapshot).await?;
-    let mut runtime = state
-        .lock()
-        .map_err(|_| "Native playback runtime lock is poisoned".to_string())?;
-    runtime.install_render_session(render_session);
+    let render_session = NativeRenderSession::new(snapshot, startup_started_at).await?;
+    let _ = app.emit(
+        "clypra://native-playback-startup",
+        NativePlaybackStartupMilestone {
+            stage: "render-session-created",
+            elapsed_us: startup_started_at
+                .elapsed()
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+            ready_after_us: None,
+        },
+    );
     let should_start = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Native playback runtime lock is poisoned".to_string())?;
+        runtime.install_render_session(Arc::clone(&render_session));
         let audio_running = audio_clock_time(&app, true, false).is_ok();
         let session_running = runtime
             .session
@@ -951,26 +1086,87 @@ pub async fn configure_native_playback_render(
             .unwrap_or(false);
         audio_running || session_running
     };
-    if should_start {
-        runtime.start_render(app.clone());
-    } else {
-        // Pre-warm the lookahead queue while paused or settling so when Play is triggered,
-        // the initial frames are already resident in the queue.
-        crate::commands::native_preview::schedule_lookahead_predecode(app.clone(), snapshot_clone, 16);
-    }
-
-    let target_format = if let Some(surface_runtime) = app.try_state::<Arc<std::sync::Mutex<crate::commands::native_surface::NativeSurfaceRuntime>>>() {
-        surface_runtime.lock().ok().and_then(|s| s.configured_format())
+    let target_format = if let Some(surface_runtime) = app
+        .try_state::<Arc<std::sync::Mutex<crate::commands::native_surface::NativeSurfaceRuntime>>>()
+    {
+        surface_runtime
+            .lock()
+            .ok()
+            .and_then(|s| s.configured_format())
     } else {
         None
-    }.unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
+    }
+    .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
 
-    if let Some(preview_state) = app.try_state::<Arc<tokio::sync::Mutex<crate::wgpu_compositor::NativePreviewSession>>>() {
-        let preview_state_arc = preview_state.inner().clone();
-        tokio::spawn(async move {
-            let mut session = preview_state_arc.lock().await;
-            session.warmup_gpu_pipelines(canvas_w, canvas_h, target_format);
-        });
+    // This is a readiness gate, not background best-effort work. It makes
+    // expensive Windows pipeline compilation complete before the render worker
+    // (and therefore audio-driven presentation) starts.
+    crate::commands::native_preview::prepare_native_preview_pipelines(
+        &app,
+        canvas_w,
+        canvas_h,
+        target_format,
+    )
+    .await?;
+    let _ = app.emit(
+        "clypra://native-playback-startup",
+        NativePlaybackStartupMilestone {
+            stage: "gpu-pipelines-ready",
+            elapsed_us: startup_started_at
+                .elapsed()
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+            ready_after_us: None,
+        },
+    );
+
+    // Capability probe: decode one keyframe from the first video layer with a
+    // 400 ms timeout. This runs synchronously here — after the GPU readiness
+    // gate and before the first lookahead frame is queued — so the chosen
+    // quality tier takes effect immediately for the entire lookahead window.
+    let (capability_policy, capability_probe_us) = probe_decode_capability(&snapshot_clone).await;
+    let lookahead_quality = capability_policy.lookahead_quality();
+
+    // Apply the decision before the worker can start. This keeps the warmup
+    // request and the audio-driven refill path on the same quality policy.
+    render_session.set_preview_quality(lookahead_quality);
+    render_session.mark_ready();
+    let _ = app.emit(
+        "clypra://native-playback-startup",
+        NativePlaybackStartupMilestone {
+            stage: "decode-policy-ready",
+            elapsed_us: startup_started_at
+                .elapsed()
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+            ready_after_us: Some(render_session.ready_after_us.load(Ordering::Acquire)),
+        },
+    );
+
+    // Store the probe result in the preview session so every sampled native
+    // presentation can be attributed to the capability policy.
+    if let Some(preview_state) =
+        app.try_state::<Arc<tokio::sync::Mutex<crate::wgpu_compositor::NativePreviewSession>>>()
+    {
+        let arc = preview_state.inner().clone();
+        let mut session = arc.lock().await;
+        session.set_capability_probe(capability_policy, capability_probe_us);
+    }
+
+    if should_start {
+        state
+            .lock()
+            .map_err(|_| "Native playback runtime lock is poisoned".to_string())?
+            .start_render(app.clone());
+    } else {
+        // Prime the bounded decode queue only after the GPU graph is ready so
+        // no first visible frame competes with initialization for the session.
+        crate::commands::native_preview::schedule_lookahead_predecode(
+            app.clone(),
+            snapshot_clone,
+            16,
+            Some(lookahead_quality),
+        );
     }
     Ok(())
 }
@@ -1017,7 +1213,7 @@ pub fn native_pause(app: AppHandle, clock: FrameTime) -> Result<PlaybackState, S
             .clone()
             .lock()
             .map_err(|_| "Native playback runtime lock is poisoned".to_string())?
-            .stop_render();
+            .stop_render(app.clone());
     }
     Ok(state)
 }
@@ -1056,14 +1252,13 @@ pub fn native_play_from_audio(app: AppHandle) -> Result<PlaybackState, String> {
 
 #[tauri::command]
 pub fn native_pause_from_audio(app: AppHandle) -> Result<PlaybackState, String> {
-    let clock = audio_clock_time(&app, false, false).unwrap_or_else(|_| {
-        FrameTime::new(0, 0, DEFAULT_TIME_SCALE).unwrap()
-    });
+    let clock = audio_clock_time(&app, false, false)
+        .unwrap_or_else(|_| FrameTime::new(0, 0, DEFAULT_TIME_SCALE).unwrap());
     let state = with_runtime(&app, |runtime| runtime.pause(clock));
     let _ = set_audio_playing(&app, false);
     if let Some(runtime) = app.try_state::<Arc<Mutex<NativePlaybackRuntime>>>() {
         if let Ok(runtime) = runtime.inner().clone().lock() {
-            runtime.stop_render();
+            runtime.stop_render(app.clone());
         }
     }
     if let Some(surface) =
@@ -1234,17 +1429,25 @@ mod tests {
         s
     }
 
-    #[test]
-    fn materialize_request_handles_sdf_to_raster_transition() {
-        let session = NativeRenderSession {
-            snapshot: Mutex::new(test_snapshot_with_text()),
+    fn test_session(snapshot: FrameRequest) -> NativeRenderSession {
+        NativeRenderSession {
+            snapshot: Mutex::new(snapshot),
             leases: Mutex::new(Vec::new()),
+            actors: Mutex::new(Vec::new()),
             pending: Mutex::new(LatestPlaybackDemand::default()),
             notify: tokio::sync::Notify::new(),
             running: AtomicBool::new(false),
             generation: AtomicU64::new(1),
             worker: Mutex::new(None),
-        };
+            configured_at: Instant::now(),
+            ready_after_us: AtomicU64::new(0),
+            first_presented: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn materialize_request_handles_sdf_to_raster_transition() {
+        let session = test_session(test_snapshot_with_text());
 
         let mut d = demand("demand-1", 1);
         d.raster_layers = vec![crate::native_core::NativePlaybackRasterLayerUpdate {
@@ -1264,7 +1467,9 @@ mod tests {
         }];
         d.text_layers = Vec::new();
 
-        let materialized = session.materialize_request(Some(&d)).expect("transition should succeed");
+        let materialized = session
+            .materialize_request(Some(&d))
+            .expect("transition should succeed");
         assert_eq!(materialized.project.raster_layers.len(), 1);
         assert_eq!(materialized.project.text_layers.len(), 0);
         let raster = &materialized.project.raster_layers[0];
@@ -1275,15 +1480,7 @@ mod tests {
 
     #[test]
     fn materialize_request_retains_last_known_good_state_on_missed_demand_tick() {
-        let session = NativeRenderSession {
-            snapshot: Mutex::new(test_snapshot_with_text()),
-            leases: Mutex::new(Vec::new()),
-            pending: Mutex::new(LatestPlaybackDemand::default()),
-            notify: tokio::sync::Notify::new(),
-            running: AtomicBool::new(false),
-            generation: AtomicU64::new(1),
-            worker: Mutex::new(None),
-        };
+        let session = test_session(test_snapshot_with_text());
 
         // Tick 1: dynamic demand arrives with opacity 0.75
         let mut d = demand("demand-1", 1);
@@ -1308,15 +1505,7 @@ mod tests {
     #[test]
     fn materialize_request_dynamically_adds_and_removes_overlay_layers() {
         // Session configured with base video only (zero raster layers, zero text layers)
-        let session = NativeRenderSession {
-            snapshot: Mutex::new(test_snapshot()),
-            leases: Mutex::new(Vec::new()),
-            pending: Mutex::new(LatestPlaybackDemand::default()),
-            notify: tokio::sync::Notify::new(),
-            running: AtomicBool::new(false),
-            generation: AtomicU64::new(1),
-            worker: Mutex::new(None),
-        };
+        let session = test_session(test_snapshot());
 
         // Frame 114: text clip enters on the timeline
         let mut d1 = demand("demand-enter", 114);
@@ -1335,7 +1524,9 @@ mod tests {
             blend_mode: Some("screen".to_string()),
             is_mask: false,
         }];
-        let mat1 = session.materialize_request(Some(&d1)).expect("dynamic addition should succeed");
+        let mat1 = session
+            .materialize_request(Some(&d1))
+            .expect("dynamic addition should succeed");
         assert_eq!(mat1.project.raster_layers.len(), 1);
         let layer = &mat1.project.raster_layers[0];
         assert_eq!(layer.layer_id.as_deref(), Some("clip-title"));
@@ -1347,7 +1538,9 @@ mod tests {
         // Frame 428: text clip exits timeline
         let mut d2 = demand("demand-exit", 428);
         d2.raster_layers = Vec::new();
-        let mat2 = session.materialize_request(Some(&d2)).expect("dynamic removal should succeed");
+        let mat2 = session
+            .materialize_request(Some(&d2))
+            .expect("dynamic removal should succeed");
         assert_eq!(mat2.project.raster_layers.len(), 0);
 
         // Frame 429: missed tick after exit retains empty overlay state
@@ -1359,33 +1552,23 @@ mod tests {
     fn materialize_request_dynamically_adds_and_removes_subject_cutout_layers() {
         // Session configured with base video only (layer_id: "video-1")
         let mut snapshot = test_snapshot();
-        snapshot.project.video_layers = vec![
-            crate::native_core::VideoLayerSnapshot {
-                layer_id: "video-1".to_string(),
-                asset_id: "video-1".to_string(),
-                video_path: "/test/video.mp4".to_string(),
-                source_time: FrameTime::new(0, 0, 30).unwrap(),
-                x: 0.0,
-                y: 0.0,
-                width: 1920.0,
-                height: 1080.0,
-                rotation: 0.0,
-                opacity: 1.0,
-                z_index: 0,
-                blend_mode: "normal".to_string(),
-                color_grade: None,
-                body_effect: None,
-            },
-        ];
-        let session = NativeRenderSession {
-            snapshot: Mutex::new(snapshot),
-            leases: Mutex::new(Vec::new()),
-            pending: Mutex::new(LatestPlaybackDemand::default()),
-            notify: tokio::sync::Notify::new(),
-            running: AtomicBool::new(false),
-            generation: AtomicU64::new(1),
-            worker: Mutex::new(None),
-        };
+        snapshot.project.video_layers = vec![crate::native_core::VideoLayerSnapshot {
+            layer_id: "video-1".to_string(),
+            asset_id: "video-1".to_string(),
+            video_path: "/test/video.mp4".to_string(),
+            source_time: FrameTime::new(0, 0, 30).unwrap(),
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+            rotation: 0.0,
+            opacity: 1.0,
+            z_index: 0,
+            blend_mode: "normal".to_string(),
+            color_grade: None,
+            body_effect: None,
+        }];
+        let session = test_session(snapshot);
 
         // Frame 50: Behind-subject text clip begins -> cutout synthesized
         let mut d1 = demand("demand-cutout-enter", 50);
@@ -1417,35 +1600,44 @@ mod tests {
                 body_effect: None,
             },
         ];
-        let mat1 = session.materialize_request(Some(&d1)).expect("dynamic cutout addition should succeed");
+        let mat1 = session
+            .materialize_request(Some(&d1))
+            .expect("dynamic cutout addition should succeed");
         assert_eq!(mat1.project.video_layers.len(), 2);
         assert_eq!(mat1.project.video_layers[0].layer_id, "video-1");
-        assert_eq!(mat1.project.video_layers[1].layer_id, "video-1:subject-cutout");
+        assert_eq!(
+            mat1.project.video_layers[1].layer_id,
+            "video-1:subject-cutout"
+        );
         assert_eq!(mat1.project.video_layers[1].opacity, 0.0);
         assert!(mat1.project.video_layers[1].body_effect.is_some());
         assert_eq!(
-            mat1.project.video_layers[1].body_effect.as_ref().unwrap().renderer,
+            mat1.project.video_layers[1]
+                .body_effect
+                .as_ref()
+                .unwrap()
+                .renderer,
             "body_cutout"
         );
 
         // Frame 120: Cutout ends, reverting to single base video layer
         let mut d2 = demand("demand-cutout-exit", 120);
-        d2.video_layers = vec![
-            crate::native_core::NativePlaybackVideoLayerUpdate {
-                layer_id: Some("video-1".to_string()),
-                source_time: FrameTime::new(120, 120, 30).unwrap(),
-                x: 0.0,
-                y: 0.0,
-                width: 1920.0,
-                height: 1080.0,
-                rotation: 0.0,
-                opacity: 1.0,
-                z_index: 0,
-                color_grade: None,
-                body_effect: None,
-            },
-        ];
-        let mat2 = session.materialize_request(Some(&d2)).expect("dynamic cutout removal should succeed");
+        d2.video_layers = vec![crate::native_core::NativePlaybackVideoLayerUpdate {
+            layer_id: Some("video-1".to_string()),
+            source_time: FrameTime::new(120, 120, 30).unwrap(),
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+            rotation: 0.0,
+            opacity: 1.0,
+            z_index: 0,
+            color_grade: None,
+            body_effect: None,
+        }];
+        let mat2 = session
+            .materialize_request(Some(&d2))
+            .expect("dynamic cutout removal should succeed");
         assert_eq!(mat2.project.video_layers.len(), 1);
         assert_eq!(mat2.project.video_layers[0].layer_id, "video-1");
     }
@@ -1453,33 +1645,23 @@ mod tests {
     #[test]
     fn materialize_request_preserves_body_effect_on_cutout_layers_across_steady_playback() {
         let mut snapshot = test_snapshot();
-        snapshot.project.video_layers = vec![
-            crate::native_core::VideoLayerSnapshot {
-                layer_id: "vid-main".to_string(),
-                asset_id: "vid-main".to_string(),
-                video_path: "/test/v.mp4".to_string(),
-                source_time: FrameTime::new(0, 0, 30).unwrap(),
-                x: 0.0,
-                y: 0.0,
-                width: 1280.0,
-                height: 720.0,
-                rotation: 0.0,
-                opacity: 1.0,
-                z_index: 0,
-                blend_mode: "normal".to_string(),
-                color_grade: None,
-                body_effect: None,
-            },
-        ];
-        let session = NativeRenderSession {
-            snapshot: Mutex::new(snapshot),
-            leases: Mutex::new(Vec::new()),
-            pending: Mutex::new(LatestPlaybackDemand::default()),
-            notify: tokio::sync::Notify::new(),
-            running: AtomicBool::new(false),
-            generation: AtomicU64::new(1),
-            worker: Mutex::new(None),
-        };
+        snapshot.project.video_layers = vec![crate::native_core::VideoLayerSnapshot {
+            layer_id: "vid-main".to_string(),
+            asset_id: "vid-main".to_string(),
+            video_path: "/test/v.mp4".to_string(),
+            source_time: FrameTime::new(0, 0, 30).unwrap(),
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 720.0,
+            rotation: 0.0,
+            opacity: 1.0,
+            z_index: 0,
+            blend_mode: "normal".to_string(),
+            color_grade: None,
+            body_effect: None,
+        }];
+        let session = test_session(snapshot);
 
         // Tick 1: Behind-subject cutout enters with active body_effect mask
         let mut d1 = demand("demand-1", 100);

@@ -121,11 +121,20 @@ export interface NativePerformanceSample {
   readbackUs?: number;
   presentUs?: number;
   schedulerWaitUs?: number;
+  lookaheadWaitUs?: number;
+  coldStartInitUs?: number;
+  /** Time a decoded lookahead frame waited ready to be presented. */
+  queueResidencyUs?: number;
   ipcWaitUs?: number;
   decoderMutexWaitUs?: number;
+  actorWaitUs?: number;
   gpuQueueWaitUs?: number;
   surfaceAcquireUs?: number;
   submitPresentUs?: number;
+  /** Capability policy chosen once at native playback-session startup. */
+  capabilityPolicy?: "full" | "reduced" | "proxy" | string;
+  /** Duration of the startup capability probe, in microseconds. */
+  capabilityProbeUs?: number;
   dropReason?:
     | "stale"
     | "cancelled"
@@ -167,6 +176,9 @@ export interface NativeModeStats {
   readback: NativeStagePercentiles;
   present: NativeStagePercentiles;
   schedulerWait: NativeStagePercentiles;
+  lookaheadWait: NativeStagePercentiles;
+  coldStartInit: NativeStagePercentiles;
+  queueResidency: NativeStagePercentiles;
   ipcWait: NativeStagePercentiles;
   decoderMutexWait: NativeStagePercentiles;
   gpuQueueWait: NativeStagePercentiles;
@@ -251,11 +263,15 @@ export interface NativeSurfacePresentation {
     totalUs: number;
     decodeUs: number;
     decoderMutexWaitUs: number;
+    actorWaitUs?: number;
     conversionUploadUs: number;
     composeUs: number;
     surfaceAcquireUs: number;
     gpuQueueWaitUs?: number;
     submitPresentUs: number;
+    lookaheadWaitUs?: number;
+    coldStartInitUs?: number;
+    queueResidencyUs?: number;
     queueHit: boolean;
   };
 }
