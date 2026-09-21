@@ -32,6 +32,37 @@ use diagnostics::{
 };
 use thumbnail_engine::init_thumbnail_engine;
 
+/// Returns the current process resident set size (RSS) in megabytes.
+///
+/// Used by the TS telemetry layer to replace hard-coded `peakRamMb` placeholders
+/// with real measurements. Called at most once per flush interval (~30 s) so the
+/// syscall overhead is negligible.
+///
+/// Returns `0` on platforms where the measurement is unavailable.
+#[tauri::command]
+fn get_process_memory_mb() -> u64 {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        // SAFETY: rusage is a plain C struct; zero-initialising it is correct
+        // before passing to getrusage. The kernel fills it in atomically.
+        let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        if rc != 0 {
+            return 0;
+        }
+        // macOS reports ru_maxrss in bytes; Linux reports it in kilobytes.
+        #[cfg(target_os = "macos")]
+        let bytes = usage.ru_maxrss as u64;
+        #[cfg(target_os = "linux")]
+        let bytes = usage.ru_maxrss as u64 * 1024;
+        bytes / (1024 * 1024)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
+}
+
 #[tauri::command]
 fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     if let Some(menu) = app.menu() {
@@ -102,6 +133,81 @@ pub fn run() {
                 window
                     .set_decorations(false)
                     .map_err(|error| format!("failed to enable custom title bar: {error}"))?;
+            }
+
+            // Build desktop application menu with event-driven Undo/Redo.
+            // On macOS, predefined Undo/Redo menu items swallow Cmd+Z / Shift+Cmd+Z
+            // without forwarding to WKWebView unless an HTML input is active.
+            // Using custom menu items with accelerators ensures Cmd+Z and Shift+Cmd+Z
+            // are emitted to the webview and handle both editor timeline and text inputs.
+            {
+                use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+                let undo_item = MenuItemBuilder::new("Undo")
+                    .id("menu-undo")
+                    .accelerator("CmdOrCtrl+Z")
+                    .build(app)?;
+
+                let redo_item = MenuItemBuilder::new("Redo")
+                    .id("menu-redo")
+                    .accelerator("CmdOrCtrl+Shift+Z")
+                    .build(app)?;
+
+                let app_menu = SubmenuBuilder::new(app, "Clypra")
+                    .about(None)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+
+                let file_menu = SubmenuBuilder::new(app, "File").close_window().build()?;
+
+                let edit_menu = SubmenuBuilder::new(app, "Edit")
+                    .item(&undo_item)
+                    .item(&redo_item)
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+
+                let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+
+                let window_menu = SubmenuBuilder::new(app, "Window")
+                    .minimize()
+                    .separator()
+                    .build()?;
+
+                let help_menu = SubmenuBuilder::new(app, "Help").build()?;
+
+                let menu = MenuBuilder::new(app)
+                    .items(&[
+                        &app_menu,
+                        &file_menu,
+                        &edit_menu,
+                        &view_menu,
+                        &window_menu,
+                        &help_menu,
+                    ])
+                    .build()?;
+
+                app.set_menu(menu)?;
+
+                app.on_menu_event(move |app_handle, event| match event.id().as_ref() {
+                    "menu-undo" => {
+                        let _ = app_handle.emit("menu-undo", ());
+                    }
+                    "menu-redo" => {
+                        let _ = app_handle.emit("menu-redo", ());
+                    }
+                    _ => {}
+                });
             }
 
             // Initialize thumbnail engine
@@ -313,6 +419,7 @@ pub fn run() {
             get_native_surface_status,
             configure_native_playback,
             configure_native_playback_render,
+            update_native_playback_render,
             submit_native_playback_demand,
             get_native_playback_state,
             native_play,
@@ -356,6 +463,8 @@ pub fn run() {
             start_video_export,
             write_export_frame,
             write_export_frames_batch,
+            render_and_write_export_frame,
+            render_and_write_export_frames_batch,
             finalize_video_export,
             cancel_video_export,
             start_native_timeline_export,
@@ -438,6 +547,8 @@ pub fn run() {
             log_system_media_diagnostics,
             // ── Camera Recording Processing ──────────────────────────────────
             process_camera_recording,
+            // ── Process memory telemetry ────────────────────────────────────
+            get_process_memory_mb,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

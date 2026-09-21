@@ -26,6 +26,7 @@ pub struct CachedNv12Frame {
     pub width: u32,
     pub height: u32,
     pub color: VideoColorMetadata,
+    pub is_approximate: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -89,6 +90,10 @@ pub struct VideoStreamMetadata {
     pub sample_aspect_ratio_den: i32,
     pub rotation: u32,
     pub color: VideoColorMetadata,
+    #[serde(default)]
+    pub container_format: String,
+    #[serde(default)]
+    pub is_hardware_accelerated: bool,
 }
 
 /// Metadata for one decoded frame, including the timestamp selected by the
@@ -379,11 +384,37 @@ pub struct VideoDecoder {
     /// session is stopped and again when audio playback starts. Retain only
     /// the last raw frame so that boundary does not force a second FFmpeg
     /// seek/decode before playback has even begun.
-    last_raw_nv12: Option<(i64, Arc<[u8]>, Arc<[u8]>, u32, u32, VideoColorMetadata)>,
+    last_raw_nv12: Option<(
+        i64,
+        Arc<[u8]>,
+        Arc<[u8]>,
+        u32,
+        u32,
+        VideoColorMetadata,
+        bool,
+    )>,
     raw_nv12_cache: VecDeque<CachedNv12Frame>,
+    /// Accumulated microsecond duration spent demuxing packets from container I/O during the last decode request.
+    last_demux_us: u32,
 }
 
 impl VideoDecoder {
+    pub fn is_last_frame_approximate(&self) -> bool {
+        self.last_raw_nv12.as_ref().map(|f| f.6).unwrap_or(false)
+    }
+
+    pub fn container_format(&self) -> &str {
+        &self.stream_metadata.container_format
+    }
+
+    pub fn is_hardware_accelerated(&self) -> bool {
+        self.stream_metadata.is_hardware_accelerated
+    }
+
+    pub fn last_demux_us(&self) -> u32 {
+        self.last_demux_us
+    }
+
     fn clamp_timestamp(&self, timestamp_secs: f64) -> f64 {
         let timestamp_secs = timestamp_secs.max(0.0);
         // Still-image demuxers commonly report an unknown/zero container
@@ -510,10 +541,19 @@ impl VideoDecoder {
         let codec_ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .map_err(|e| e.to_string())?;
 
-        let (decoder, width, height) = if prefer_hardware {
+        // Option 3: Stream Discard Optimization
+        // Discard all non-video streams at the demuxer layer so libavformat skips
+        // audio, subtitle, and data packets at the lowest C demuxing layer.
+        let mut input_ctx = input_ctx;
+        crate::thumbnail_engine::demuxer::configure_stream_discard(&mut input_ctx, stream_index);
+
+        let container_format = input_ctx.format().name().to_string();
+
+        let (decoder, width, height, is_hardware_accelerated) = if prefer_hardware {
             Self::open_with_hw(codec_ctx)?
         } else {
-            Self::open_software_codec(codec_ctx)?
+            let (dec, w, h) = Self::open_software_codec(codec_ctx)?;
+            (dec, w, h, false)
         };
 
         let stream_metadata = VideoStreamMetadata {
@@ -532,6 +572,8 @@ impl VideoDecoder {
             sample_aspect_ratio_den: sar.1,
             rotation,
             color,
+            container_format,
+            is_hardware_accelerated,
         };
 
         Ok(Self {
@@ -548,6 +590,7 @@ impl VideoDecoder {
             state: DecoderState::new(),
             last_raw_nv12: None,
             raw_nv12_cache: VecDeque::with_capacity(MAX_RAW_NV12_CACHE_ENTRIES),
+            last_demux_us: 0,
         })
     }
 
@@ -705,8 +748,70 @@ impl VideoDecoder {
             .unwrap_or(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE)
     }
 
+    #[cfg(target_os = "windows")]
+    unsafe fn configure_d3d11va_shared_frames(
+        ctx: *mut ffmpeg::ffi::AVCodecContext,
+        chosen: ffmpeg::ffi::AVPixelFormat,
+    ) {
+        #[repr(C)]
+        struct AVD3D11VAFramesContext {
+            texture: *mut std::ffi::c_void,
+            bind_flags: u32,
+            misc_flags: u32,
+        }
+
+        if ctx.is_null() || (*ctx).hw_device_ctx.is_null() {
+            return;
+        }
+
+        if !(*ctx).hw_frames_ctx.is_null() {
+            ffmpeg::ffi::av_buffer_unref(&mut (*ctx).hw_frames_ctx);
+        }
+
+        let mut frames_ref = std::ptr::null_mut();
+        let ret = ffmpeg::ffi::avcodec_get_hw_frames_parameters(
+            ctx,
+            (*ctx).hw_device_ctx,
+            chosen,
+            &mut frames_ref,
+        );
+        if ret < 0 || frames_ref.is_null() {
+            log::debug!(
+                "[VideoDecoder] avcodec_get_hw_frames_parameters returned {ret}; using default hw frames"
+            );
+            return;
+        }
+
+        let frames_ctx = (*frames_ref).data as *mut ffmpeg::ffi::AVHWFramesContext;
+        if frames_ctx.is_null() {
+            ffmpeg::ffi::av_buffer_unref(&mut frames_ref);
+            return;
+        }
+
+        let hwctx = (*frames_ctx).hwctx as *mut AVD3D11VAFramesContext;
+        if !hwctx.is_null() {
+            // D3D11_RESOURCE_MISC_SHARED (0x2) | D3D11_RESOURCE_MISC_SHARED_NTHANDLE (0x800)
+            (*hwctx).misc_flags |= 0x802;
+            // D3D11_BIND_DECODER (0x200) | D3D11_BIND_SHADER_RESOURCE (0x8)
+            (*hwctx).bind_flags |= 0x208;
+        }
+
+        let init_ret = ffmpeg::ffi::av_hwframe_ctx_init(frames_ref);
+        if init_ret >= 0 {
+            (*ctx).hw_frames_ctx = frames_ref;
+            log::info!(
+                "[VideoDecoder] D3D11VA hw_frames_ctx configured with SHARED_NTHANDLE (0x802)"
+            );
+        } else {
+            log::warn!(
+                "[VideoDecoder] av_hwframe_ctx_init failed ({init_ret}); falling back to default FFmpeg frames"
+            );
+            ffmpeg::ffi::av_buffer_unref(&mut frames_ref);
+        }
+    }
+
     unsafe extern "C" fn get_hw_format(
-        _ctx: *mut ffmpeg::ffi::AVCodecContext,
+        #[allow(unused_variables)] ctx: *mut ffmpeg::ffi::AVCodecContext,
         pix_fmts: *const ffmpeg::ffi::AVPixelFormat,
     ) -> ffmpeg::ffi::AVPixelFormat {
         if pix_fmts.is_null() {
@@ -722,7 +827,12 @@ impl VideoDecoder {
             offered.push(*current);
             current = current.add(1);
         }
-        Self::select_decoder_pixel_format(&offered, Self::platform_hw_pixel_format())
+        let chosen = Self::select_decoder_pixel_format(&offered, Self::platform_hw_pixel_format());
+        #[cfg(target_os = "windows")]
+        if chosen == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 {
+            Self::configure_d3d11va_shared_frames(ctx, chosen);
+        }
+        chosen
     }
 
     /// A hardware device is attached only when the selected codec explicitly
@@ -767,7 +877,7 @@ impl VideoDecoder {
 
     fn open_with_hw(
         mut ctx: ffmpeg::codec::context::Context,
-    ) -> Result<(ffmpeg::codec::decoder::Video, u32, u32), String> {
+    ) -> Result<(ffmpeg::codec::decoder::Video, u32, u32, bool), String> {
         #[cfg(target_os = "macos")]
         let hw_types: &[ffmpeg::ffi::AVHWDeviceType] =
             &[ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX];
@@ -788,14 +898,45 @@ impl VideoDecoder {
                 continue;
             }
             unsafe {
+                #[cfg(target_os = "windows")]
+                let device_arg = if hw_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA
+                {
+                    crate::wgpu_compositor::adapter_selector::get_selected_dxgi_adapter_index()
+                        .and_then(|idx| std::ffi::CString::new(idx.to_string()).ok())
+                } else {
+                    None
+                };
+                #[cfg(not(target_os = "windows"))]
+                let device_arg: Option<std::ffi::CString> = None;
+
+                let device_ptr = device_arg
+                    .as_ref()
+                    .map(|s| s.as_ptr())
+                    .unwrap_or(std::ptr::null());
+
                 let mut hw_ctx = std::ptr::null_mut();
-                let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
+                let mut ret = ffmpeg::ffi::av_hwdevice_ctx_create(
                     &mut hw_ctx,
                     hw_type,
-                    std::ptr::null(),
+                    device_ptr,
                     std::ptr::null_mut(),
                     0,
                 );
+
+                if ret < 0 && !device_ptr.is_null() {
+                    log::warn!(
+                        "[VideoDecoder] av_hwdevice_ctx_create failed with DXGI adapter {:?}; retrying with default device",
+                        device_arg
+                    );
+                    ret = ffmpeg::ffi::av_hwdevice_ctx_create(
+                        &mut hw_ctx,
+                        hw_type,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        0,
+                    );
+                }
+
                 if ret >= 0 && !hw_ctx.is_null() {
                     (*ctx.as_mut_ptr()).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_ctx);
                     ffmpeg::ffi::av_buffer_unref(&mut hw_ctx);
@@ -803,7 +944,7 @@ impl VideoDecoder {
                     let decoder = ctx.decoder().video().map_err(|e| e.to_string())?;
                     let w = decoder.width();
                     let h = decoder.height();
-                    return Ok((decoder, w, h));
+                    return Ok((decoder, w, h, true));
                 }
             }
         }
@@ -811,7 +952,7 @@ impl VideoDecoder {
         // No compatible device is an expected capability outcome, not a
         // partially initialized decoder. Re-open using the normal software
         // format negotiation path.
-        Self::open_software_codec(ctx)
+        Self::open_software_codec(ctx).map(|(d, w, h)| (d, w, h, false))
     }
 
     /// Decode a single frame at full display resolution (no thumbnail scaling).
@@ -1619,11 +1760,10 @@ impl VideoDecoder {
             .max(1.0) as i64;
 
         // 1. Check LRU ring-buffer cache for recently decoded frames
-        if let Some(pos) = self
-            .raw_nv12_cache
-            .iter()
-            .position(|cached| (cached.pts - target_pts).abs() <= pts_tolerance)
-        {
+        if let Some(pos) = self.raw_nv12_cache.iter().position(|cached| {
+            (!cached.is_approximate || options.allow_keyframe_approx)
+                && (cached.pts - target_pts).abs() <= pts_tolerance
+        }) {
             let cached = self.raw_nv12_cache.remove(pos).unwrap();
             let y_clone = Arc::clone(&cached.y_plane);
             let uv_clone = Arc::clone(&cached.uv_plane);
@@ -1634,8 +1774,10 @@ impl VideoDecoder {
             return Ok((y_clone, uv_clone, width, height, color));
         }
 
-        if let Some((cached_pts, y, uv, width, height, color)) = &self.last_raw_nv12 {
-            if (*cached_pts - target_pts).abs() <= pts_tolerance {
+        if let Some((cached_pts, y, uv, width, height, color, is_approx)) = &self.last_raw_nv12 {
+            if (!*is_approx || options.allow_keyframe_approx)
+                && (*cached_pts - target_pts).abs() <= pts_tolerance
+            {
                 return Ok((
                     Arc::clone(y),
                     Arc::clone(uv),
@@ -1654,10 +1796,13 @@ impl VideoDecoder {
             || (is_backward && backward_distance > pts_tolerance)
             || (!is_backward && !self.state.can_decode_forward(target_pts, sequential_window));
 
+        let mut demux_time_us = 0u32;
+
         if needs_seek {
             if is_cancelled() {
                 return Err("Native preview request cancelled".to_string());
             }
+            let seek_t0 = Instant::now();
             unsafe {
                 let ret = ffmpeg::ffi::av_seek_frame(
                     self.input_ctx.as_mut_ptr(),
@@ -1669,6 +1814,8 @@ impl VideoDecoder {
                     return Err(format!("Seek failed at {}s", ts));
                 }
             }
+            demux_time_us = demux_time_us
+                .saturating_add(seek_t0.elapsed().as_micros().min(u32::MAX as u128) as u32);
             self.decoder.flush();
             self.state.current_pts = -1;
             self.state.gop_start_pts = target_pts;
@@ -1706,21 +1853,23 @@ impl VideoDecoder {
         }
 
         // Drain any frame already buffered in the codec DPB before reading new packets from container
-        let mut buffered = ffmpeg::frame::Video::empty();
-        while self.decoder.receive_frame(&mut buffered).is_ok() {
-            if is_cancelled() {
-                return Err("Native preview request cancelled".to_string());
-            }
-            let pts = buffered.pts().unwrap_or(0);
-            self.state.current_pts = pts;
-            let frame_ts = pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
-            if frame_ts >= ts - (1.0 / 60.0) {
+        if !found {
+            let mut buffered = ffmpeg::frame::Video::empty();
+            while self.decoder.receive_frame(&mut buffered).is_ok() {
+                if is_cancelled() {
+                    return Err("Native preview request cancelled".to_string());
+                }
+                let pts = buffered.pts().unwrap_or(0);
+                self.state.current_pts = pts;
+                let frame_ts = pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
+                if frame_ts >= ts - (1.0 / 60.0) {
+                    best_frame = buffered;
+                    found = true;
+                    break;
+                }
                 best_frame = buffered;
-                found = true;
-                break;
+                buffered = ffmpeg::frame::Video::empty();
             }
-            best_frame = buffered;
-            buffered = ffmpeg::frame::Video::empty();
         }
 
         if !found {
@@ -1864,6 +2013,8 @@ impl VideoDecoder {
         }?;
         let y_arc: Arc<[u8]> = Arc::from(result.0);
         let uv_arc: Arc<[u8]> = Arc::from(result.1);
+        let is_approx = options.allow_keyframe_approx
+            && (self.state.current_pts - target_pts).abs() > pts_tolerance;
         self.last_raw_nv12 = Some((
             target_pts,
             Arc::clone(&y_arc),
@@ -1871,6 +2022,7 @@ impl VideoDecoder {
             result.2,
             result.3,
             result.4.clone(),
+            is_approx,
         ));
         if self.raw_nv12_cache.len() >= MAX_RAW_NV12_CACHE_ENTRIES {
             self.raw_nv12_cache.pop_front();
@@ -1882,7 +2034,9 @@ impl VideoDecoder {
             width: result.2,
             height: result.3,
             color: result.4.clone(),
+            is_approximate: is_approx,
         });
+        self.last_demux_us = demux_time_us;
         Ok((y_arc, uv_arc, result.2, result.3, result.4))
     }
 
@@ -1938,10 +2092,13 @@ impl VideoDecoder {
             || (is_backward && backward_distance > pts_tolerance)
             || (!is_backward && !self.state.can_decode_forward(target_pts, sequential_window));
 
+        let mut demux_time_us = 0u32;
+
         if needs_seek {
             if is_cancelled() {
                 return Err("Native preview request cancelled".to_string());
             }
+            let seek_t0 = Instant::now();
             unsafe {
                 let ret = ffmpeg::ffi::av_seek_frame(
                     self.input_ctx.as_mut_ptr(),
@@ -1953,6 +2110,8 @@ impl VideoDecoder {
                     return Err(format!("Seek failed at {}s", ts));
                 }
             }
+            demux_time_us = demux_time_us
+                .saturating_add(seek_t0.elapsed().as_micros().min(u32::MAX as u128) as u32);
             self.decoder.flush();
             self.state.current_pts = -1;
             self.state.gop_start_pts = target_pts;
@@ -1988,21 +2147,23 @@ impl VideoDecoder {
         }
 
         // Drain DPB
-        let mut buffered = ffmpeg::frame::Video::empty();
-        while self.decoder.receive_frame(&mut buffered).is_ok() {
-            if is_cancelled() {
-                return Err("Native preview request cancelled".to_string());
-            }
-            let pts = buffered.pts().unwrap_or(0);
-            self.state.current_pts = pts;
-            let frame_ts = pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
-            if frame_ts >= ts - (1.0 / 60.0) {
+        if !found {
+            let mut buffered = ffmpeg::frame::Video::empty();
+            while self.decoder.receive_frame(&mut buffered).is_ok() {
+                if is_cancelled() {
+                    return Err("Native preview request cancelled".to_string());
+                }
+                let pts = buffered.pts().unwrap_or(0);
+                self.state.current_pts = pts;
+                let frame_ts = pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
+                if frame_ts >= ts - (1.0 / 60.0) {
+                    best_frame = buffered;
+                    found = true;
+                    break;
+                }
                 best_frame = buffered;
-                found = true;
-                break;
+                buffered = ffmpeg::frame::Video::empty();
             }
-            best_frame = buffered;
-            buffered = ffmpeg::frame::Video::empty();
         }
 
         if !found {
@@ -2053,6 +2214,7 @@ impl VideoDecoder {
                     *out_width,
                     *out_height
                 );
+                self.last_demux_us = demux_time_us;
                 return Ok(Some(shared));
             }
             log::warn!(
@@ -2065,6 +2227,7 @@ impl VideoDecoder {
         // CPU fallback: same as decode_frame_raw_nv12_with_options terminal section.
         // (We do NOT populate the LRU cache here because this method's caller
         //  is expected to call the CPU path directly on None, which will cache.)
+        self.last_demux_us = demux_time_us;
         Ok(None)
     }
 
@@ -2841,10 +3004,72 @@ mod still_image_tests {
                 width: 1920,
                 height: 1080,
                 color: VideoColorMetadata::default(),
+                is_approximate: false,
             });
         }
         assert_eq!(cache.len(), MAX_RAW_NV12_CACHE_ENTRIES);
         assert_eq!(cache.front().unwrap().pts, 9); // 0..9 evicted, 9 is now front
         assert_eq!(cache.back().unwrap().pts, 24);
+    }
+
+    #[test]
+    fn raw_nv12_cache_ignores_approximate_frame_for_exact_request() {
+        use super::{CachedNv12Frame, VideoColorMetadata};
+        use std::collections::VecDeque;
+        use std::sync::Arc;
+
+        let mut cache: VecDeque<CachedNv12Frame> = VecDeque::new();
+        cache.push_back(CachedNv12Frame {
+            pts: 1000,
+            y_plane: Arc::from(vec![1u8]),
+            uv_plane: Arc::from(vec![2u8]),
+            width: 1920,
+            height: 1080,
+            color: VideoColorMetadata::default(),
+            is_approximate: true,
+        });
+
+        let target_pts = 1000;
+        let pts_tolerance = 5;
+
+        // Exact request (allow_keyframe_approx == false): must NOT match
+        let exact_match = cache.iter().position(|cached| {
+            (!cached.is_approximate || false) && (cached.pts - target_pts).abs() <= pts_tolerance
+        });
+        assert_eq!(exact_match, None);
+
+        // Approximate request (allow_keyframe_approx == true): matches
+        let approx_match = cache.iter().position(|cached| {
+            (!cached.is_approximate || true) && (cached.pts - target_pts).abs() <= pts_tolerance
+        });
+        assert_eq!(approx_match, Some(0));
+    }
+
+    #[test]
+    fn test_mkv_video_decoder_integration() {
+        let path = std::path::Path::new("/tmp/test_mkv.mkv");
+        if !path.exists() {
+            return;
+        }
+
+        let mut decoder = super::VideoDecoder::open(path.to_str().unwrap())
+            .expect("failed to open mkv with VideoDecoder");
+        assert!(
+            decoder.container_format().contains("matroska"),
+            "Container format should contain matroska, got: {}",
+            decoder.container_format()
+        );
+
+        let res = decoder.decode_frame_raw_nv12(0.0);
+        assert!(
+            res.is_ok(),
+            "Should successfully decode first frame: {:?}",
+            res.err()
+        );
+        let (y, uv, w, h, _color) = res.unwrap();
+        assert_eq!(w, 320);
+        assert_eq!(h, 240);
+        assert_eq!(y.len(), (w * h) as usize);
+        assert_eq!(uv.len(), (w * h / 2) as usize);
     }
 }

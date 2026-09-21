@@ -63,6 +63,7 @@ export interface TelemetryStageTimings {
   decodeUs?: number;
   decoderMutexWaitUs?: number;
   actorWaitUs?: number;
+  demuxWaitUs?: number;
   conversionUploadUs?: number;
   composeUs?: number;
   surfaceAcquireUs?: number;
@@ -117,7 +118,36 @@ export type TelemetryOperationMode =
   | "ai-inference"
   | "filmstrip-extraction";
 
-export type TelemetrySubsystem = "preview" | "audio" | "text" | "sticker";
+export type TelemetrySubsystem = "preview" | "audio" | "text" | "sticker" | "composition";
+
+/** Content-free composition pressure sampled from the evaluated editor scene. */
+export interface TelemetryCompositionSample {
+  sessionId?: string;
+  previewContext?: TelemetryPreviewContext;
+  visualLayerCount: number;
+  mediaLayerCount: number;
+  videoLayerCount: number;
+  imageLayerCount: number;
+  textLayerCount: number;
+  stickerLayerCount: number;
+  activeAudioClipCount: number;
+}
+
+export interface TelemetryCompositionMetrics {
+  windowDurationMs: number;
+  observedFrames: number;
+  multiStackedFrames: number;
+  maxVisualLayers: number;
+  maxMediaLayers: number;
+  maxAudioClips: number;
+  visualLayerPercentiles: TelemetryMetricPercentiles;
+  mediaLayerPercentiles: TelemetryMetricPercentiles;
+  videoLayerPercentiles: TelemetryMetricPercentiles;
+  imageLayerPercentiles: TelemetryMetricPercentiles;
+  textLayerPercentiles: TelemetryMetricPercentiles;
+  stickerLayerPercentiles: TelemetryMetricPercentiles;
+  audioClipPercentiles: TelemetryMetricPercentiles;
+}
 
 export type TelemetryStickerFormat = "lottie" | "gif" | "static";
 export type TelemetryStickerRendererPath =
@@ -302,7 +332,21 @@ export interface TelemetryAudioMetrics {
   seekP95Ms?: number;
   clockDriftP95Ms?: number;
   lastError?: string;
+  /** Present only for the first program-preview play after graph installation. */
+  startup?: TelemetryAudioStartupMetrics;
   stageTimings: TelemetryAudioStageTimings;
+}
+
+export interface TelemetryAudioStartupMetrics {
+  outcome: "audible" | "silent-timeout" | "failed" | "superseded";
+  initializationUs: number;
+  playCommandUs?: number;
+  firstAudibleUs?: number;
+  installedClipCount: number;
+  activeClipCount: number;
+  callbackCountDelta: number;
+  nonSilentFramesDelta: number;
+  failureReason?: string;
 }
 
 export interface TelemetryExportMetrics {
@@ -391,6 +435,7 @@ export interface TelemetryEvent {
   audioMetrics?: TelemetryAudioMetrics;
   textMetrics?: TelemetryTextMetrics;
   stickerMetrics?: TelemetryStickerMetrics;
+  compositionMetrics?: TelemetryCompositionMetrics;
   fallbackEvent?: {
     triggered: boolean;
     fromBackend: string;
@@ -416,7 +461,14 @@ export type TelemetrySampleKind =
   | "qualification-summary"
   | "interaction";
 
-export type TelemetryInteractionName = "play" | "pause" | "seek";
+export type TelemetryInteractionName =
+  | "play"
+  | "pause"
+  | "seek"
+  | "scrub"
+  | "timeline-click-seek"
+  | "keyboard-seek"
+  | "timeline-edit";
 export type TelemetryInteractionOutcome = "completed" | "superseded" | "failed";
 
 /** Bounded, content-free timing for one editor transport action. */
@@ -427,6 +479,15 @@ export interface TelemetryInteraction {
   queueWaitUs?: number;
   audioSeekUs?: number;
   audioTransportUs?: number;
+  inputToAudioUs?: number;
+  inputToDemandUs?: number;
+  decodeQueueWaitUs?: number;
+  firstProxyFrameUs?: number;
+  settledFrameUs?: number;
+  coalescedUpdates?: number;
+  supersededCount?: number;
+  avErrorUs?: number;
+  correct?: boolean;
 }
 
 export interface TelemetryPreviewContext {
@@ -544,6 +605,7 @@ function resolvePerfLogKind(event: TelemetryEvent): PerfLogKind {
   if (event.audioMetrics) return "audio-snapshot";
   if (event.textMetrics) return "text-rollup";
   if (event.stickerMetrics) return "sticker-rollup";
+  if (event.compositionMetrics) return "composition-rollup";
   if (
     event.workload.mode === "seek-cold" ||
     event.workload.mode === "seek-warm"
@@ -692,7 +754,8 @@ class SessionRollupAccumulator {
       };
     }
     if (capabilityPolicy) this.capabilityPolicy = capabilityPolicy;
-    if (capabilityProbeUs !== undefined) this.capabilityProbeUs = capabilityProbeUs;
+    if (capabilityProbeUs !== undefined)
+      this.capabilityProbeUs = capabilityProbeUs;
   }
 
   public recordSeek(seekLatencyMs: number): void {
@@ -1095,6 +1158,52 @@ class StickerWindowAccumulator {
   }
 }
 
+class CompositionWindowAccumulator {
+  private windowStartMs = Date.now();
+  private samples: TelemetryCompositionSample[] = [];
+
+  record(sample: TelemetryCompositionSample): void {
+    if (this.samples.length < 1000) this.samples.push(sample);
+  }
+
+  shouldEmit(): boolean {
+    return this.samples.length > 0 && Date.now() - this.windowStartMs >= ROLLUP_WINDOW_MS;
+  }
+
+  extract(): (TelemetryCompositionMetrics & { windowStartMs: number }) | null {
+    if (this.samples.length === 0) return null;
+    const percentile = (values: number[]): TelemetryMetricPercentiles => {
+      const sorted = [...values].sort((a, b) => a - b);
+      const at = (pct: number) => sorted[Math.min(sorted.length - 1, Math.round((sorted.length - 1) * pct))] ?? 0;
+      return { p50: at(0.5), p95: at(0.95), p99: at(0.99) };
+    };
+    const values = (key: keyof TelemetryCompositionSample) =>
+      this.samples.map((sample) => Math.max(0, Number(sample[key]) || 0));
+    const media = values("mediaLayerCount");
+    const visual = values("visualLayerCount");
+    const audio = values("activeAudioClipCount");
+    const result = {
+      windowStartMs: this.windowStartMs,
+      windowDurationMs: Math.max(1, Date.now() - this.windowStartMs),
+      observedFrames: this.samples.length,
+      multiStackedFrames: this.samples.filter((sample) => sample.mediaLayerCount > 1).length,
+      maxVisualLayers: Math.max(...visual),
+      maxMediaLayers: Math.max(...media),
+      maxAudioClips: Math.max(...audio),
+      visualLayerPercentiles: percentile(visual),
+      mediaLayerPercentiles: percentile(media),
+      videoLayerPercentiles: percentile(values("videoLayerCount")),
+      imageLayerPercentiles: percentile(values("imageLayerCount")),
+      textLayerPercentiles: percentile(values("textLayerCount")),
+      stickerLayerPercentiles: percentile(values("stickerLayerCount")),
+      audioClipPercentiles: percentile(audio),
+    };
+    this.windowStartMs = Date.now();
+    this.samples = [];
+    return result;
+  }
+}
+
 class TelemetryCollector {
   private queue: TelemetryEvent[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
@@ -1113,6 +1222,7 @@ class TelemetryCollector {
   private reportedStickerMeasurementIds = new Set<string>();
   private textAccumulators = new Map<string, TextWindowAccumulator>();
   private stickerAccumulators = new Map<string, StickerWindowAccumulator>();
+  private compositionAccumulators = new Map<string, CompositionWindowAccumulator>();
   private transportStatus: TelemetryTransportStatus = {
     // Batch endpoint is gone — all data flows through perfLogService session file.
     endpoint: "session-file",
@@ -1134,6 +1244,7 @@ class TelemetryCollector {
           this.flushRollupIfPending();
           this.flushTextWindowsIfPending();
           this.flushStickerWindowsIfPending();
+          this.flushCompositionWindowsIfPending(true);
           this.flush();
         }
       });
@@ -1439,7 +1550,7 @@ class TelemetryCollector {
         staleFrames,
         cancelledFrames,
         avDriftMs,
-        peakRamMb: 512,
+        peakRamMb: perfLogService.getPeakMemoryMb() || 512,
         cacheHitRatio: 0.9,
         stageTimings: timings,
         capabilityPolicy: options.capabilityPolicy,
@@ -1451,6 +1562,127 @@ class TelemetryCollector {
     this.enqueueEvent(event);
   }
 
+  private activeScrubSpan: {
+    id: string;
+    startedAtMs: number;
+    initialTime: number;
+    source: string;
+    coalescedUpdates: number;
+    supersededCount: number;
+    firstAudioSeekUs?: number;
+    firstDemandUs?: number;
+    firstProxyFrameUs?: number;
+    decodeQueueWaitUs?: number;
+    latestAudioSeekUs?: number;
+    previewContext?: TelemetryPreviewContext;
+  } | null = null;
+
+  public beginScrubSpan(
+    initialTime: number,
+    source: string = "playhead",
+    previewContext?: TelemetryPreviewContext,
+  ): string {
+    const id = `scrub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.activeScrubSpan = {
+      id,
+      startedAtMs: performance.now(),
+      initialTime,
+      source,
+      coalescedUpdates: 0,
+      supersededCount: 0,
+      previewContext,
+    };
+    return id;
+  }
+
+  public recordScrubAudioSeek(scrubId: string, durationUs: number): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    if (this.activeScrubSpan.firstAudioSeekUs === undefined) {
+      this.activeScrubSpan.firstAudioSeekUs = durationUs;
+    }
+    this.activeScrubSpan.latestAudioSeekUs = durationUs;
+  }
+
+  public recordScrubDemandDispatched(
+    scrubId: string,
+    durationUs: number,
+  ): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    if (this.activeScrubSpan.firstDemandUs === undefined) {
+      this.activeScrubSpan.firstDemandUs = durationUs;
+    }
+  }
+
+  public recordScrubProxyFramePresented(
+    scrubId: string,
+    durationUs: number,
+  ): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    if (this.activeScrubSpan.firstProxyFrameUs === undefined) {
+      this.activeScrubSpan.firstProxyFrameUs = durationUs;
+    }
+  }
+
+  public recordScrubActorWait(scrubId: string, waitUs: number): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    this.activeScrubSpan.decodeQueueWaitUs = Math.max(
+      this.activeScrubSpan.decodeQueueWaitUs ?? 0,
+      waitUs,
+    );
+  }
+
+  public recordScrubUpdate(scrubId: string): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    this.activeScrubSpan.coalescedUpdates += 1;
+  }
+
+  public recordScrubSuperseded(scrubId: string): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    this.activeScrubSpan.supersededCount += 1;
+  }
+
+  public getActiveScrubSpanId(): string | null {
+    return this.activeScrubSpan?.id ?? null;
+  }
+
+  public finishScrubSpan(
+    scrubId: string,
+    details: {
+      settledFrameUs?: number;
+      correct?: boolean;
+      avErrorUs?: number;
+      outcome?: TelemetryInteractionOutcome;
+    } = {},
+  ): void {
+    if (!this.activeScrubSpan || this.activeScrubSpan.id !== scrubId) return;
+    const span = this.activeScrubSpan;
+    this.activeScrubSpan = null;
+    const totalTimeUs = Math.max(
+      0,
+      Math.round((performance.now() - span.startedAtMs) * 1_000),
+    );
+    const interaction: TelemetryInteraction = {
+      id: span.id,
+      name: "scrub",
+      outcome: details.outcome ?? "completed",
+      audioSeekUs: span.latestAudioSeekUs ?? span.firstAudioSeekUs,
+      inputToAudioUs: span.firstAudioSeekUs,
+      inputToDemandUs: span.firstDemandUs,
+      decodeQueueWaitUs: span.decodeQueueWaitUs,
+      firstProxyFrameUs: span.firstProxyFrameUs,
+      settledFrameUs: details.settledFrameUs,
+      coalescedUpdates: span.coalescedUpdates,
+      supersededCount: span.supersededCount,
+      avErrorUs: details.avErrorUs,
+      correct: details.correct,
+    };
+    this.recordPreviewInteraction({
+      interaction,
+      totalTimeUs,
+      previewContext: span.previewContext,
+    });
+  }
+
   /** Records a play, pause, or seek interaction at 100% sampling. */
   public recordPreviewInteraction(input: {
     interaction: TelemetryInteraction;
@@ -1458,13 +1690,20 @@ class TelemetryCollector {
     previewContext?: TelemetryPreviewContext;
   }): void {
     const mode: TelemetryOperationMode =
-      input.interaction.name === "seek" ? "seek-warm" : "playback";
+      input.interaction.name === "scrub"
+        ? "scrub"
+        : input.interaction.name === "seek" ||
+            input.interaction.name === "timeline-click-seek" ||
+            input.interaction.name === "keyboard-seek"
+          ? "seek-warm"
+          : "playback";
     this.recordRenderSpan(
       {
         schedulerWaitUs: input.interaction.queueWaitUs,
         ipcWaitUs:
           (input.interaction.audioSeekUs ?? 0) +
             (input.interaction.audioTransportUs ?? 0) || undefined,
+        actorWaitUs: input.interaction.decodeQueueWaitUs,
         totalTimeUs: Math.max(0, Math.round(input.totalTimeUs)),
       },
       input.interaction.outcome === "failed" ? 1 : 0,
@@ -1548,6 +1787,60 @@ class TelemetryCollector {
       timestampMs: Date.now(),
     };
     this.enqueueEvent(event);
+  }
+
+  /** Records the bounded first-play transaction at 100% sampling. */
+  public recordAudioStartup(input: {
+    sessionId: string;
+    previewContext?: TelemetryPreviewContext;
+    metrics: TelemetryAudioStartupMetrics;
+  }): void {
+    if (!this.isEnabled) return;
+    const totalTimeUs = Math.max(
+      input.metrics.initializationUs,
+      input.metrics.firstAudibleUs ?? input.metrics.playCommandUs ?? 0,
+    );
+    this.enqueueEvent({
+      eventId: `evt_audio_startup_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      measurementId: `audio-startup:${input.sessionId}:${Date.now()}`,
+      measurementSource: "frontend-span",
+      sampleKind: "interaction",
+      subsystem: "audio",
+      sessionId: input.sessionId,
+      appVersion: this.appVersion,
+      appBuildNumber: import.meta.env.MODE || "prod",
+      appEnvironment: import.meta.env.DEV ? "beta" : "production",
+      previewContext: input.previewContext,
+      device: this.initHardwareContext(),
+      video: this.sanitizeVideoProfile({ nominalFps: 60 }),
+      workload: {
+        mode: "playback",
+        durationMs: Math.max(1, Math.round(totalTimeUs / 1000)),
+        targetFps: 60,
+        renderedFps: 0,
+        totalFrames: 1,
+        droppedFrames: input.metrics.outcome === "audible" ? 0 : 1,
+        droppedFramesRatio: input.metrics.outcome === "audible" ? 0 : 1,
+        staleFrames: 0,
+        cancelledFrames: input.metrics.outcome === "superseded" ? 1 : 0,
+        peakRamMb: 0,
+        cacheHitRatio: 1,
+        stageTimings: { totalTimeUs },
+      },
+      audioMetrics: {
+        backend: "native-cpal",
+        runtimeEnvironment: import.meta.env.DEV ? "development" : "production",
+        windowDurationMs: Math.max(1, Math.round(totalTimeUs / 1000)),
+        installedClipCount: input.metrics.installedClipCount,
+        activeClipCount: input.metrics.activeClipCount,
+        callbackCount: input.metrics.callbackCountDelta,
+        nonSilentFrames: input.metrics.nonSilentFramesDelta,
+        lastError: input.metrics.failureReason,
+        startup: input.metrics,
+        stageTimings: { totalTimeUs },
+      },
+      timestampMs: Date.now(),
+    });
   }
 
   /**
@@ -1737,6 +2030,73 @@ class TelemetryCollector {
       this.stickerAccumulators.set(key, accumulator);
     }
     accumulator.recordCacheHit();
+  }
+
+  /**
+   * Aggregates evaluated-scene complexity so media and multi-stack latency can
+   * be queried alongside the existing text, sticker, and audio rollups.
+   * Individual frames never leave the process; one cohort row is emitted per
+   * preview context and rollup window.
+   */
+  public recordCompositionSample(sample: TelemetryCompositionSample): void {
+    if (!this.isEnabled) return;
+    const context = sample.previewContext;
+    const key = JSON.stringify([
+      sample.sessionId ?? context?.sessionId ?? "composition-runtime",
+      context?.view ?? "webview",
+      context?.surface ?? "dom-canvas",
+      context?.scenario ?? "playback",
+      context?.runtimeEnvironment ?? (import.meta.env.DEV ? "development" : "production"),
+    ]);
+    let accumulator = this.compositionAccumulators.get(key);
+    if (!accumulator) {
+      accumulator = new CompositionWindowAccumulator();
+      this.compositionAccumulators.set(key, accumulator);
+    }
+    accumulator.record(sample);
+    if (accumulator.shouldEmit()) this.flushCompositionWindowsIfPending();
+  }
+
+  public flushCompositionWindowsIfPending(force = false): void {
+    for (const [key, accumulator] of this.compositionAccumulators) {
+      if (!force && !accumulator.shouldEmit()) continue;
+      const values = JSON.parse(key) as [string, TelemetryPreviewView, TelemetryPreviewSurface, TelemetryPreviewScenario, TelemetryRuntimeEnvironment];
+      const summary = accumulator.extract();
+      if (!summary) continue;
+      const [sessionId, view, surface, scenario, runtimeEnvironment] = values;
+      const measurementId = `composition:${sessionId}:${view}:${surface}:${scenario}:${summary.windowStartMs}`;
+      this.enqueueEvent({
+        eventId: `evt_composition_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        measurementId,
+        measurementSource: "session-rollup",
+        sampleKind: "window-rollup",
+        subsystem: "composition",
+        sessionId,
+        appVersion: this.appVersion,
+        appBuildNumber: import.meta.env.MODE || "prod",
+        appEnvironment: import.meta.env.DEV ? "beta" : "production",
+        previewContext: { sessionId, view, surface, scenario, runtimeEnvironment },
+        device: this.initHardwareContext(),
+        video: this.sanitizeVideoProfile({ nominalFps: 60 }),
+        workload: {
+          mode: "shader-composition",
+          durationMs: summary.windowDurationMs,
+          targetFps: 60,
+          renderedFps: summary.observedFrames / (summary.windowDurationMs / 1000),
+          totalFrames: summary.observedFrames,
+          droppedFrames: 0,
+          droppedFramesRatio: 0,
+          staleFrames: 0,
+          cancelledFrames: 0,
+          peakRamMb: 0,
+          cacheHitRatio: 1,
+          stageTimings: { totalTimeUs: 0 },
+          isSessionRollup: true,
+        },
+        compositionMetrics: summary,
+        timestampMs: Date.now(),
+      });
+    }
   }
 
   public flushStickerWindowsIfPending(): void {
@@ -1972,7 +2332,7 @@ class TelemetryCollector {
         droppedFramesRatio: 0,
         staleFrames: 0,
         cancelledFrames: 0,
-        peakRamMb: 512,
+        peakRamMb: perfLogService.getPeakMemoryMb() || 512,
         cacheHitRatio: isColdSeek ? 0.0 : 1.0,
         stageTimings: {
           decodeUs: Math.round(seekLatencyMs * 600),
@@ -2078,7 +2438,7 @@ class TelemetryCollector {
         droppedFramesRatio: success ? 0 : 1.0,
         staleFrames: 0,
         cancelledFrames: 0,
-        peakRamMb: 512,
+        peakRamMb: perfLogService.getPeakMemoryMb() || 512,
         cacheHitRatio: 1.0,
         stageTimings: {
           totalTimeUs: Math.round(inferenceDurationMs * 1000),
@@ -2128,7 +2488,7 @@ class TelemetryCollector {
         droppedFramesRatio: 1.0,
         staleFrames: 0,
         cancelledFrames: 0,
-        peakRamMb: 512,
+        peakRamMb: perfLogService.getPeakMemoryMb() || 512,
         cacheHitRatio: 0,
         stageTimings: {
           totalTimeUs: 33000,
@@ -2186,6 +2546,9 @@ class TelemetryCollector {
         dropReason?: string;
         capabilityPolicy?: "full" | "reduced" | "proxy" | string;
         capabilityProbeUs?: number;
+        demuxWaitUs?: number;
+        containerFormat?: string;
+        isHardwareAccelerated?: boolean;
       } | null;
       windowDroppedFrames?: number;
       windowStaleFrames?: number;
@@ -2215,6 +2578,7 @@ class TelemetryCollector {
       decodeUs: last.decodeTimeUs,
       decoderMutexWaitUs: last.decoderMutexWaitUs,
       actorWaitUs: last.actorWaitUs,
+      demuxWaitUs: last.demuxWaitUs,
       conversionUploadUs:
         last.conversionUploadUs ?? last.conversionTimeUs ?? last.uploadTimeUs,
       composeUs: last.composeTimeUs,
@@ -2320,7 +2684,7 @@ class TelemetryCollector {
           staleFrames: rollup.staleFrames,
           cancelledFrames: rollup.cancelledFrames,
           avDriftMs: rollup.avDriftP95Ms,
-          peakRamMb: 512,
+          peakRamMb: perfLogService.getPeakMemoryMb() || 512,
           cacheHitRatio: rollup.cacheHitRatio,
           stageTimings: rollup.stageTimings,
           capabilityPolicy: rollup.capabilityPolicy,
@@ -2336,6 +2700,7 @@ class TelemetryCollector {
     }
     this.flushTextWindowsIfPending();
     this.flushStickerWindowsIfPending();
+    this.flushCompositionWindowsIfPending();
   }
 
   private getRollupAccumulator(
@@ -2378,6 +2743,7 @@ class TelemetryCollector {
       this.flushRollupIfPending();
       this.flushTextWindowsIfPending();
       this.flushStickerWindowsIfPending();
+      this.flushCompositionWindowsIfPending();
       this.flush();
     }, FLUSH_INTERVAL_MS);
   }

@@ -48,6 +48,20 @@ export interface NativeAudioStatus {
   callbackTimeUs: number;
   callbackMaxTimeUs: number;
   callbackOverBudgetCount: number;
+  /** Total seek() calls since the stream was last started. */
+  seekCount: number;
+  /** Cumulative seek latency in microseconds since the stream was last started. */
+  seekLatencyTotalUs: number;
+  /**
+   * Microseconds since the last CPAL callback advanced the audio clock.
+   * Undefined if the stream has never fired a callback.
+   */
+  clockFreshnessUs?: number;
+  /**
+   * Median inter-callback spacing in microseconds.
+   * Undefined when fewer than 2 callbacks have fired.
+   */
+  medianCallbackIntervalUs?: number;
 }
 
 export interface NativeAudioClipStatus {
@@ -135,6 +149,12 @@ export interface NativePerformanceSample {
   capabilityPolicy?: "full" | "reduced" | "proxy" | string;
   /** Duration of the startup capability probe, in microseconds. */
   capabilityProbeUs?: number;
+  /** Time spent demuxing packets from container and file I/O (Option 3). */
+  demuxWaitUs?: number;
+  /** Container format name (e.g. "mp4", "matroska,webm", "mov"). */
+  containerFormat?: string;
+  /** Whether hardware decoding acceleration is active for the frame stream. */
+  isHardwareAccelerated?: boolean;
   dropReason?:
     | "stale"
     | "cancelled"
@@ -264,6 +284,7 @@ export interface NativeSurfacePresentation {
     decodeUs: number;
     decoderMutexWaitUs: number;
     actorWaitUs?: number;
+    demuxWaitUs?: number;
     conversionUploadUs: number;
     composeUs: number;
     surfaceAcquireUs: number;
@@ -340,7 +361,6 @@ export interface NativeSessionSnapshot {
   policyBackgroundPauses: number;
   policyInteractiveThrottles: number;
 }
-
 
 export interface NativeFrameTime {
   frameIndex: number;

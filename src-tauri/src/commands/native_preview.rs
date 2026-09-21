@@ -35,7 +35,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::{Emitter, Manager};
 
-type DecodedNativeVideoFrame = (Arc<[u8]>, Arc<[u8]>, u32, u32, VideoColorMetadata);
+use crate::thumbnail_engine::stream_actor::DecodedVideoPlanes;
+
+type DecodedNativeVideoFrame = (DecodedVideoPlanes, u32, u32, VideoColorMetadata);
 static NATIVE_SURFACE_PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Register an editor font before a frame request references it. The native
@@ -107,11 +109,14 @@ pub fn clear_native_font_warnings() -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct NativeDecodeTimings {
     decode_time_us: u32,
     decoder_mutex_wait_us: u64,
     actor_wait_us: Option<u64>,
+    demux_wait_us: Option<u64>,
+    container_format: Option<String>,
+    is_hardware_accelerated: Option<bool>,
 }
 
 struct QueuedNativeFrame {
@@ -136,6 +141,7 @@ fn native_presentation_timing(
     app: &tauri::AppHandle,
     frame_ticks: i64,
     frame_timescale: u32,
+    record_drift: bool,
 ) -> (u64, i64, bool) {
     let Some(clock_state) = app.try_state::<Arc<std::sync::Mutex<NativeAudioClock>>>() else {
         return (0, 0, false);
@@ -156,14 +162,20 @@ fn native_presentation_timing(
         .unwrap_or(0);
     let frame_position_ticks = frame_position_ticks.min(i64::MAX as u128) as i64;
 
-    // Pass the median inter-callback spacing from the lock-free ring buffer.
-    // This is the correct interval measure for the freshness threshold — the
-    // actual hardware cadence, not a processing-duration proxy.
-    SYNC_METRICS.av_drift.record_with_freshness(
-        frame_position_ticks.saturating_sub(status.audio_position_ticks as i64),
-        status.clock_freshness_us,
-        status.median_callback_interval_us,
-    );
+    // Only record drift during active steady-state playback.
+    // Manual scrub/seek requests and seek jumps across the timeline (> 1.5s gap)
+    // reflect deliberate user playhead navigation where audio is re-anchoring,
+    // not actual playback drift.
+    if record_drift {
+        let drift = frame_position_ticks.saturating_sub(status.audio_position_ticks as i64);
+        if drift.abs() <= 1_500_000 {
+            SYNC_METRICS.av_drift.record_with_freshness(
+                drift,
+                status.clock_freshness_us,
+                status.median_callback_interval_us,
+            );
+        }
+    }
     let age = status.audio_position_ticks as i128 - frame_position_ticks as i128;
     let frame_age_ticks = age.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     let decision = decide_native_presentation_timing(
@@ -188,7 +200,13 @@ fn record_successful_readback_metrics(app: &tauri::AppHandle, request: &FrameReq
     if request.mode.as_deref() == Some("prefetch") {
         return;
     }
-    let _ = native_presentation_timing(app, request.frame_time.ticks, request.frame_time.timescale);
+    let is_playback = request.mode.as_deref() == Some("playback");
+    let _ = native_presentation_timing(
+        app,
+        request.frame_time.ticks,
+        request.frame_time.timescale,
+        is_playback,
+    );
     let presented_ticks = (request.frame_time.ticks.max(0) as i128 * 1_000_000i128
         / request.frame_time.timescale.max(1) as i128)
         .min(i64::MAX as i128) as i64;
@@ -207,7 +225,7 @@ fn record_native_surface_sample(
     app: &tauri::AppHandle,
     request: &FrameRequest,
     started_at: Instant,
-    decode_timings: NativeDecodeTimings,
+    decode_timings: &NativeDecodeTimings,
     queue_hit: bool,
     scheduler_wait_us: u64,
     lookahead_wait_us: Option<u64>,
@@ -278,6 +296,9 @@ fn record_native_surface_sample(
         submit_present_us,
         capability_policy,
         capability_probe_us,
+        demux_wait_us: decode_timings.demux_wait_us,
+        container_format: decode_timings.container_format.clone(),
+        is_hardware_accelerated: decode_timings.is_hardware_accelerated,
     });
 }
 
@@ -695,6 +716,8 @@ pub struct NativeVideoProjectFrameRequest {
     pub is_scrubbing: Option<bool>,
     #[serde(default)]
     pub allow_keyframe_approx: Option<bool>,
+    #[serde(default)]
+    pub generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1041,6 +1064,7 @@ fn to_video_project_request(
         mode: request.mode.clone(),
         is_scrubbing: request.is_scrubbing,
         allow_keyframe_approx: request.allow_keyframe_approx,
+        generation: request.generation,
     })
 }
 
@@ -1799,6 +1823,22 @@ async fn render_native_video_project_frame_bytes(
         .0)
 }
 
+pub(crate) async fn render_frame_request_rgba(
+    app: &tauri::AppHandle,
+    request: &FrameRequest,
+) -> Result<Vec<u8>, String> {
+    if request.contract_version != NATIVE_CORE_CONTRACT_VERSION {
+        return Err(format!(
+            "Unsupported native core contract version: {}",
+            request.contract_version
+        ));
+    }
+    let legacy_request = to_video_project_request(request)?;
+    let (rgba, _timings) =
+        render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await?;
+    Ok(rgba)
+}
+
 async fn render_native_video_project_frame_bytes_timed(
     app: tauri::AppHandle,
     request: NativeVideoProjectFrameRequest,
@@ -2008,7 +2048,7 @@ async fn render_native_video_project_frame_bytes_timed(
         decoder_mutex_wait_us = decode_timings.decoder_mutex_wait_us;
 
         session = state.lock().await;
-        for (layer, (y_plane, uv_plane, width, height, color)) in
+        for (layer, (planes, width, height, color)) in
             request.layers.iter().zip(decoded_frames.iter())
         {
             let params = color_params(color)?;
@@ -2017,9 +2057,43 @@ async fn render_native_video_project_frame_bytes_timed(
             } else {
                 &layer.video_path
             };
-            let texture = session.render_nv12_frame_to_texture(
-                layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
-            )?;
+
+            #[allow(unused_mut)]
+            let mut layer_texture: Option<Arc<wgpu::Texture>> = None;
+            #[cfg(target_os = "windows")]
+            if let DecodedVideoPlanes::D3d11(ref shared_arc) = planes {
+                if session.gpu.capabilities.zero_copy_available()
+                    && session.dxgi_state.is_usable()
+                    && crate::wgpu_compositor::adapter_selector::is_dxgi_runtime_enabled()
+                {
+                    if let Some(duped_shared) = shared_arc.duplicate() {
+                        if let Ok(imported) = crate::wgpu_compositor::dxgi_import::import_into_wgpu(
+                            &session.gpu.device,
+                            duped_shared,
+                        ) {
+                            if let Ok(texture) = session.render_nv12_from_imported_texture(
+                                layer_key, *width, *height, &imported, &params,
+                            ) {
+                                session.mark_dxgi_supported();
+                                render_path = FrameRenderPath::ZeroCopyDxgi;
+                                layer_texture = Some(texture);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let texture = match layer_texture {
+                Some(t) => t,
+                None => {
+                    let (y_plane, uv_plane) = planes.cpu_planes().ok_or_else(|| {
+                        "CPU fallback planes unavailable for preview rendering".to_string()
+                    })?;
+                    session.render_nv12_frame_to_texture(
+                        layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
+                    )?
+                }
+            };
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             textures.push(texture);
         }
@@ -2260,7 +2334,11 @@ async fn decode_native_video_layers(
     };
 
     let is_prefetch = request.mode.as_deref() == Some("prefetch");
-    let generation = cancellation.as_ref().map(|(_, g)| *g).unwrap_or(0);
+    let generation = cancellation
+        .as_ref()
+        .map(|(_, g)| *g)
+        .or(request.generation)
+        .unwrap_or(0);
 
     if request.layers.len() == 1 {
         let layer = &request.layers[0];
@@ -2280,6 +2358,9 @@ async fn decode_native_video_layers(
         let decode_us = actor_frame.decode_us;
         let mutex_wait_us = actor_frame.decoder_mutex_wait_us;
         let actor_wait_us = actor_frame.actor_wait_us;
+        let demux_us = actor_frame.demux_us;
+        let container_format = actor_frame.container_format.clone();
+        let is_hw = actor_frame.is_hardware_accelerated;
         let decoded = actor_frame.into_native_video_frame();
         return Ok((
             vec![decoded],
@@ -2287,6 +2368,9 @@ async fn decode_native_video_layers(
                 decode_time_us: decode_us,
                 decoder_mutex_wait_us: mutex_wait_us,
                 actor_wait_us: Some(actor_wait_us),
+                demux_wait_us: Some(u64::from(demux_us)),
+                container_format: Some(container_format),
+                is_hardware_accelerated: Some(is_hw),
             },
         ));
     }
@@ -2334,8 +2418,20 @@ async fn decode_native_video_layers(
                 let decode_us = actor_frame.decode_us;
                 let mutex_wait_us = actor_frame.decoder_mutex_wait_us;
                 let actor_wait_us = actor_frame.actor_wait_us;
+                let demux_us = actor_frame.demux_us;
+                let container_format = actor_frame.container_format.clone();
+                let is_hw = actor_frame.is_hardware_accelerated;
                 let decoded = actor_frame.into_native_video_frame();
-                Ok::<_, String>((decoded, decode_us, mutex_wait_us, actor_wait_us, layer_id))
+                Ok::<_, String>((
+                    decoded,
+                    decode_us,
+                    mutex_wait_us,
+                    actor_wait_us,
+                    demux_us,
+                    container_format,
+                    is_hw,
+                    layer_id,
+                ))
             }));
         }
     }
@@ -2344,6 +2440,9 @@ async fn decode_native_video_layers(
     let mut max_decode_us = 0u32;
     let mut total_mutex_wait_us = 0u64;
     let mut max_actor_wait_us = 0u64;
+    let mut max_demux_us = 0u64;
+    let mut primary_container = None;
+    let mut all_hw = true;
 
     for task in unique_tasks {
         let res = task
@@ -2352,6 +2451,13 @@ async fn decode_native_video_layers(
         max_decode_us = max_decode_us.max(res.1);
         total_mutex_wait_us = total_mutex_wait_us.saturating_add(res.2);
         max_actor_wait_us = max_actor_wait_us.max(res.3);
+        max_demux_us = max_demux_us.max(u64::from(res.4));
+        if primary_container.is_none() && !res.5.is_empty() {
+            primary_container = Some(res.5.clone());
+        }
+        if !res.6 {
+            all_hw = false;
+        }
         unique_results.push(res);
     }
 
@@ -2367,6 +2473,9 @@ async fn decode_native_video_layers(
             decode_time_us: max_decode_us,
             decoder_mutex_wait_us: total_mutex_wait_us,
             actor_wait_us: Some(max_actor_wait_us),
+            demux_wait_us: Some(max_demux_us),
+            container_format: primary_container,
+            is_hardware_accelerated: Some(all_hw),
         },
     ))
 }
@@ -2974,17 +3083,19 @@ pub(crate) async fn present_native_frame_internal(
             })
             .probe()
             .ok_or_else(|| "Native surface lost its readiness probe".to_string())?;
+        let is_playback = request.mode.as_deref() == Some("playback");
         let (audio_position_ticks, frame_age_ticks, _) = native_presentation_timing(
             &app,
             request.frame_time.ticks,
             request.frame_time.timescale,
+            is_playback,
         );
         SYNC_METRICS.record_dropped_frame();
         record_native_surface_sample(
             &app,
             &request,
             presentation_started,
-            NativeDecodeTimings::default(),
+            &NativeDecodeTimings::default(),
             false,
             0,
             Some(0),
@@ -3069,7 +3180,7 @@ pub(crate) async fn present_native_frame_internal(
                     &app,
                     &request,
                     request_started_at,
-                    decode_timings,
+                    &decode_timings,
                     queue_hit,
                     scheduler_wait_us,
                     Some(lookahead_wait_us),
@@ -3122,15 +3233,19 @@ pub(crate) async fn present_native_frame_internal(
     let probe = surface
         .probe()
         .ok_or_else(|| "Native surface lost its readiness probe".to_string())?;
-    let (audio_position_ticks, frame_age_ticks, late_for_audio) =
-        native_presentation_timing(&app, request.frame_time.ticks, request.frame_time.timescale);
+    let is_playback = request.mode.as_deref() == Some("playback");
+    let (audio_position_ticks, frame_age_ticks, late_for_audio) = native_presentation_timing(
+        &app,
+        request.frame_time.ticks,
+        request.frame_time.timescale,
+        is_playback,
+    );
     // Non-video frames (still images, text, stickers, canvas backgrounds) have 0
     // video decoder streams and compose on the GPU in ~0.05ms. Dropping them
     // for being "late for audio" causes multi-second freezes of the previous frame.
     // In continuous playback, already-decoded frames must never be thrown away:
     // the heavy CPU decode cost has already been paid and GPU presentation takes <0.5ms.
     // Frame skipping occurs naturally at the scheduler boundary on the next tick.
-    let is_playback = request.mode.as_deref() == Some("playback");
     let late_for_audio = late_for_audio && !legacy_request.layers.is_empty() && !is_playback;
     if !surface.accept_presentation(presentation_sequence) {
         SYNC_METRICS.record_dropped_frame();
@@ -3140,7 +3255,7 @@ pub(crate) async fn present_native_frame_internal(
             &app,
             &request,
             request_started_at,
-            decode_timings,
+            &decode_timings,
             queue_hit,
             scheduler_wait_us,
             Some(lookahead_wait_us),
@@ -3181,7 +3296,7 @@ pub(crate) async fn present_native_frame_internal(
             &app,
             &request,
             request_started_at,
-            decode_timings,
+            &decode_timings,
             queue_hit,
             scheduler_wait_us,
             Some(lookahead_wait_us),
@@ -3248,7 +3363,7 @@ pub(crate) async fn present_native_frame_internal(
         Vec::with_capacity(legacy_request.layers.len() + legacy_request.raster_layers.len());
     let mut views: Vec<wgpu::TextureView> =
         Vec::with_capacity(legacy_request.layers.len() + legacy_request.raster_layers.len());
-    for (layer_idx, (layer, (y_plane, uv_plane, width, height, color))) in legacy_request
+    for (layer_idx, (layer, (planes, width, height, color))) in legacy_request
         .layers
         .iter()
         .zip(decoded_frames.iter())
@@ -3260,7 +3375,7 @@ pub(crate) async fn present_native_frame_internal(
             .position(|(prev_idx, prev)| {
                 prev.video_path == layer.video_path
                     && (prev.time_secs - layer.time_secs).abs() < 0.0001
-                    && Arc::ptr_eq(&decoded_frames[prev_idx].0, y_plane)
+                    && decoded_frames[prev_idx].0.is_same_source(planes)
             });
 
         if let Some(prev_idx) = duplicate_of {
@@ -3273,9 +3388,75 @@ pub(crate) async fn present_native_frame_internal(
             } else {
                 &layer.video_path
             };
-            let texture = session.render_nv12_frame_to_texture(
-                layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
-            )?;
+
+            #[allow(unused_mut)]
+            let mut layer_texture: Option<Arc<wgpu::Texture>> = None;
+
+            #[cfg(target_os = "windows")]
+            if let DecodedVideoPlanes::D3d11(ref shared_arc) = planes {
+                if session.gpu.capabilities.zero_copy_available()
+                    && session.dxgi_state.is_usable()
+                    && crate::wgpu_compositor::adapter_selector::is_dxgi_runtime_enabled()
+                {
+                    if let Some(duped_shared) = shared_arc.duplicate() {
+                        match crate::wgpu_compositor::dxgi_import::import_into_wgpu(
+                            &session.gpu.device,
+                            duped_shared,
+                        ) {
+                            Ok(imported) => {
+                                match session.render_nv12_from_imported_texture(
+                                    layer_key, *width, *height, &imported, &params,
+                                ) {
+                                    Ok(texture) => {
+                                        session.mark_dxgi_supported();
+                                        layer_texture = Some(texture);
+                                    }
+                                    Err(render_error) => {
+                                        log::warn!(
+                                            "[NativePreviewSession] render_nv12_from_imported_texture failed: {render_error:?}"
+                                        );
+                                        match render_error {
+                                            crate::wgpu_compositor::PreviewRenderError::UnsupportedFeature(_) => {
+                                                session.mark_dxgi_disabled(crate::wgpu_compositor::DisableReason::UnsupportedFeature);
+                                            }
+                                            crate::wgpu_compositor::PreviewRenderError::DimensionMismatch { .. } => {
+                                                session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::DimensionMismatch);
+                                            }
+                                            _ => {
+                                                session.mark_dxgi_failed(crate::wgpu_compositor::DxgiFailureReason::ImportFailed);
+                                            }
+                                        }
+                                        crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
+                                    }
+                                }
+                            }
+                            Err(reason) => {
+                                log::warn!(
+                                    "[NativePreviewSession] import_into_wgpu failed: {reason:?}"
+                                );
+                                session.mark_dxgi_failed(reason);
+                                crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
+                            }
+                        }
+                    }
+                }
+            }
+
+            let texture = match layer_texture {
+                Some(t) => t,
+                None => match planes.cpu_planes() {
+                    Some((y_plane, uv_plane)) => session.render_nv12_frame_to_texture(
+                        layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
+                    )?,
+                    None => {
+                        crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
+                        return Err(
+                            "DXGI zero-copy texture import failed and no CPU planes cached"
+                                .to_string(),
+                        );
+                    }
+                },
+            };
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             textures.push(texture);
         }
@@ -3515,7 +3696,7 @@ pub(crate) async fn present_native_frame_internal(
         &app,
         &request,
         request_started_at,
-        decode_timings,
+        &decode_timings,
         queue_hit,
         scheduler_wait_us,
         Some(lookahead_wait_us),
@@ -3555,6 +3736,7 @@ pub(crate) async fn present_native_frame_internal(
             decode_us: decode_timings.decode_time_us,
             decoder_mutex_wait_us: decode_timings.decoder_mutex_wait_us,
             actor_wait_us: decode_timings.actor_wait_us.unwrap_or(0),
+            demux_wait_us: decode_timings.demux_wait_us.unwrap_or(0),
             conversion_upload_us,
             compose_us,
             surface_acquire_us,
@@ -3667,6 +3849,9 @@ pub async fn render_native_frame(
                 submit_present_us: None,
                 capability_policy: None,
                 capability_probe_us: None,
+                demux_wait_us: None,
+                container_format: None,
+                is_hardware_accelerated: None,
             });
             record_successful_readback_metrics(&app, &request);
             return Ok(tauri::ipc::Response::new(packet.data));
@@ -3745,6 +3930,9 @@ pub async fn render_native_frame(
             submit_present_us: None,
             capability_policy: None,
             capability_probe_us: None,
+            demux_wait_us: None,
+            container_format: None,
+            is_hardware_accelerated: None,
         });
     }
 

@@ -198,6 +198,28 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     expect(telemetryCollector.getQueueLength()).toBe(1);
   });
 
+  it("records first-play audibility as a durable audio event", () => {
+    telemetryCollector.recordAudioStartup({
+      sessionId: "audio-startup-session",
+      metrics: {
+        outcome: "silent-timeout",
+        initializationUs: 120_000,
+        playCommandUs: 8_000,
+        installedClipCount: 2,
+        activeClipCount: 1,
+        callbackCountDelta: 80,
+        nonSilentFramesDelta: 0,
+        failureReason: "no-non-silent-native-callback-within-1500ms",
+      },
+    });
+
+    expect(telemetryCollector.getQueueLength()).toBe(1);
+    const event = (telemetryCollector as any).queue[0];
+    expect(event.subsystem).toBe("audio");
+    expect(event.audioMetrics.startup.outcome).toBe("silent-timeout");
+    expect(event.workload.droppedFrames).toBe(1);
+  });
+
   it("records AI inference tasks like whisper and auto-reframe", () => {
     telemetryCollector.recordAIInferenceSpan(
       "whisper-captions",
@@ -307,5 +329,35 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     expect(event.textMetrics.unattributedTimeUs).toBe(150000);
     expect(event.textMetrics.stagePercentiles).toEqual({});
     expect(event.textMetrics.interactionStagePercentiles).toEqual({});
+  });
+
+  it("aggregates evaluated media stacks into one session-rollup event", () => {
+    telemetryCollector.recordCompositionSample({
+      sessionId: "composition-session",
+      previewContext: {
+        sessionId: "composition-session",
+        view: "native",
+        surface: "native-surface",
+        runtimeEnvironment: "development",
+        scenario: "playback",
+      },
+      visualLayerCount: 5,
+      mediaLayerCount: 3,
+      videoLayerCount: 2,
+      imageLayerCount: 1,
+      textLayerCount: 1,
+      stickerLayerCount: 1,
+      activeAudioClipCount: 2,
+    });
+    telemetryCollector.flushCompositionWindowsIfPending(true);
+
+    const event = (telemetryCollector as any).queue[0];
+    expect(event.subsystem).toBe("composition");
+    expect(event.compositionMetrics).toMatchObject({
+      observedFrames: 1,
+      multiStackedFrames: 1,
+      maxMediaLayers: 3,
+      maxAudioClips: 2,
+    });
   });
 });
