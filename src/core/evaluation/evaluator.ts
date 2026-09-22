@@ -56,7 +56,9 @@ import {
   computeCanvasBackgroundVersion,
   computeEffectsStoreVersion,
 } from "./cache";
-import { evaluateProperty } from "./animation";
+import { evaluateProperty, evaluateVisualPropertyKeyframes } from "./animation";
+import { applyLoopMotion, evaluateSpatialPosition } from "@/core/animation";
+import { workerPerfCollector } from "@/core/monitoring/WorkerPerfCollector";
 import { resolveClipSourceTime } from "../timeline/sourceTime";
 import { calculateTextAnimationState } from "@/lib/text/textAnimation";
 import { normalizeFilterIntensity } from "../render/filterIR";
@@ -87,6 +89,12 @@ export function evaluateTimelineScene(
   project: Project | null,
   transitions: TransitionTimelineItem[] = [],
 ): EvaluatedScene {
+  const evalStartMs = performance.now();
+  let keyframeEvaluationsCount = 0;
+  let spatialEvaluationsCount = 0;
+  let springEvaluationsCount = 0;
+  let responsiveRetimesCount = 0;
+
   clips = expandCompoundClips(clips);
   // Convert to compositor clips (adds roles, priorities)
   const compositorClips = toCompositorClips(clips, tracks);
@@ -175,24 +183,67 @@ export function evaluateTimelineScene(
   for (let i = 0; i < sortedClips.length; i++) {
     const clip = sortedClips[i];
     const offset = Math.max(0, evalTime - clip.startTime);
+    const vkf = clip.visualKeyframes;
     const kf = (clip as any).keyframes || {};
+    const hasSpatialCurvature = Boolean(
+      (vkf?.x?.length || 0) > 1 &&
+      (vkf?.x?.some((k) => k.spatialIn || k.spatialOut) ||
+       vkf?.y?.some((k) => (k as any).spatialIn || (k as any).spatialOut))
+    );
 
-    let evalX =
-      kf.x !== undefined
-        ? evaluateProperty(kf.x, offset, clip.duration)
-        : clip.x;
-    let evalY =
-      kf.y !== undefined
-        ? evaluateProperty(kf.y, offset, clip.duration)
-        : clip.y;
+    if (vkf) {
+      if (vkf.x?.length) {
+        keyframeEvaluationsCount++;
+        if (vkf.x.some((k) => k.spring)) springEvaluationsCount++;
+        if (vkf.x.some((k) => k.anchor)) responsiveRetimesCount++;
+      }
+      if (vkf.y?.length) {
+        keyframeEvaluationsCount++;
+        if (vkf.y.some((k) => k.spring)) springEvaluationsCount++;
+        if (vkf.y.some((k) => k.anchor)) responsiveRetimesCount++;
+      }
+      if (vkf.width?.length) keyframeEvaluationsCount++;
+      if (vkf.height?.length) keyframeEvaluationsCount++;
+      if (vkf.rotation?.length) keyframeEvaluationsCount++;
+      if (vkf.opacity?.length) keyframeEvaluationsCount++;
+    }
+    if (hasSpatialCurvature) {
+      spatialEvaluationsCount++;
+    }
+
+    let evalX: number;
+    let evalY: number;
+
+    if (hasSpatialCurvature) {
+      const spatialPos = evaluateSpatialPosition(clip as any, offset);
+      evalX = spatialPos.x;
+      evalY = spatialPos.y;
+    } else {
+      evalX =
+        vkf?.x?.length
+          ? evaluateVisualPropertyKeyframes(vkf.x, offset, clip.x, clip.duration)
+          : kf.x !== undefined
+            ? evaluateProperty(kf.x, offset, clip.duration)
+            : clip.x;
+      evalY =
+        vkf?.y?.length
+          ? evaluateVisualPropertyKeyframes(vkf.y, offset, clip.y, clip.duration)
+          : kf.y !== undefined
+            ? evaluateProperty(kf.y, offset, clip.duration)
+            : clip.y;
+    }
     let evalW =
-      kf.width !== undefined
-        ? evaluateProperty(kf.width, offset, clip.duration)
-        : clip.width;
+      vkf?.width?.length
+        ? evaluateVisualPropertyKeyframes(vkf.width, offset, clip.width, clip.duration)
+        : kf.width !== undefined
+          ? evaluateProperty(kf.width, offset, clip.duration)
+          : clip.width;
     let evalH =
-      kf.height !== undefined
-        ? evaluateProperty(kf.height, offset, clip.duration)
-        : clip.height;
+      vkf?.height?.length
+        ? evaluateVisualPropertyKeyframes(vkf.height, offset, clip.height, clip.duration)
+        : kf.height !== undefined
+          ? evaluateProperty(kf.height, offset, clip.duration)
+          : clip.height;
 
     if (clip.conform && clip.conform.sourceWidth && clip.conform.sourceHeight) {
       const conformed = resolveConform(
@@ -200,20 +251,48 @@ export function evaluateTimelineScene(
         project?.canvasWidth ?? 1920,
         project?.canvasHeight ?? 1080,
       );
-      evalX = kf.x !== undefined ? evalX : conformed.x;
-      evalY = kf.y !== undefined ? evalY : conformed.y;
-      evalW = kf.width !== undefined ? evalW : conformed.width;
-      evalH = kf.height !== undefined ? evalH : conformed.height;
+      evalX = (vkf?.x?.length || kf.x !== undefined) ? evalX : conformed.x;
+      evalY = (vkf?.y?.length || kf.y !== undefined) ? evalY : conformed.y;
+      evalW = (vkf?.width?.length || kf.width !== undefined) ? evalW : conformed.width;
+      evalH = (vkf?.height?.length || kf.height !== undefined) ? evalH : conformed.height;
     }
 
-    const evalRot =
-      kf.rotation !== undefined
-        ? evaluateProperty(kf.rotation, offset, clip.duration)
-        : clip.rotation;
-    const evalOpacity =
-      kf.opacity !== undefined
-        ? evaluateProperty(kf.opacity, offset, clip.duration)
-        : clip.opacity;
+    let evalRot =
+      vkf?.rotation?.length
+        ? evaluateVisualPropertyKeyframes(vkf.rotation, offset, clip.rotation, clip.duration)
+        : kf.rotation !== undefined
+          ? evaluateProperty(kf.rotation, offset, clip.duration)
+          : clip.rotation;
+    let evalOpacity =
+      vkf?.opacity?.length
+        ? evaluateVisualPropertyKeyframes(vkf.opacity, offset, clip.opacity, clip.duration)
+        : kf.opacity !== undefined
+          ? evaluateProperty(kf.opacity, offset, clip.duration)
+          : clip.opacity;
+
+    // Apply continuous loop emphasis motion (Float, Pulse, Wiggle, etc.)
+    if (clip.motion?.loopPreset && clip.motion.loopPreset !== "none") {
+      const modulated = applyLoopMotion(
+        clip.motion.loopPreset,
+        offset,
+        {
+          x: evalX,
+          y: evalY,
+          width: evalW,
+          height: evalH,
+          rotation: evalRot,
+          opacity: evalOpacity,
+        },
+        clip.motion.loopSpeed,
+        clip.motion.loopIntensity,
+      );
+      evalX = modulated.x;
+      evalY = modulated.y;
+      evalW = modulated.width;
+      evalH = modulated.height;
+      evalRot = modulated.rotation;
+      evalOpacity = modulated.opacity;
+    }
 
     const isTextClip = clip.kind === "text" || clip.kind === "text-template";
 
@@ -744,6 +823,18 @@ export function evaluateTimelineScene(
       }
     : undefined;
 
+  const evalDurationMs = performance.now() - evalStartMs;
+  workerPerfCollector.recordAnimationEval({
+    durationMs: evalDurationMs,
+    activeClips: activeClips.length,
+    visualLayers: visualLayers.length,
+    keyframeEvaluations: keyframeEvaluationsCount,
+    spatialEvaluations: spatialEvaluationsCount,
+    springEvaluations: springEvaluationsCount,
+    responsiveRetimes: responsiveRetimesCount,
+    culledLayers: 0,
+  });
+
   return {
     visualLayers,
     audioLayers,
@@ -911,6 +1002,7 @@ export function cullOccludedVisualLayers(
   transitionWindows: ActiveTransitionWindow[] = [],
 ): EvaluatedVisualLayer[] {
   if (visualLayers.length <= 1) return [...visualLayers];
+  const startMs = performance.now();
 
   // 1. Top-down full-frame occlusion check:
   // If an opaque layer covers the full canvas, all layers beneath it are discarded.
@@ -930,18 +1022,33 @@ export function cullOccludedVisualLayers(
     }
   }
 
-  if (remaining.length <= 1) return remaining;
-
-  // 2. Relative layer-over-layer occlusion check:
-  // Discard any bottom layer that is completely covered by an opaque foreground layer.
-  return remaining.filter((layer, index) => {
-    for (let j = index + 1; j < remaining.length; j++) {
-      if (doesLayerOccludeLayer(remaining[j], layer, transitionWindows)) {
-        return false;
+  let finalLayers = remaining;
+  if (remaining.length > 1) {
+    // 2. Relative layer-over-layer occlusion check:
+    // Discard any bottom layer that is completely covered by an opaque foreground layer.
+    finalLayers = remaining.filter((layer, index) => {
+      for (let j = index + 1; j < remaining.length; j++) {
+        if (doesLayerOccludeLayer(remaining[j], layer, transitionWindows)) {
+          return false;
+        }
       }
-    }
-    return true;
-  });
+      return true;
+    });
+  }
+
+  const culledCount = visualLayers.length - finalLayers.length;
+  if (culledCount > 0) {
+    const durationMs = performance.now() - startMs;
+    workerPerfCollector.record({
+      domain: "compositor:occlusion",
+      operation: "cullOccludedVisualLayers",
+      durationMs,
+      itemsCount: culledCount,
+      overBudget: durationMs > 5,
+    });
+  }
+
+  return finalLayers;
 }
 
 function normalizeEffectIntensity(value: unknown): number {

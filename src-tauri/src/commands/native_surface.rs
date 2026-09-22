@@ -3,6 +3,7 @@ use crate::native_core::{
     NATIVE_CORE_CONTRACT_VERSION,
 };
 use crate::wgpu_compositor::GpuContext;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::window::WindowBuilder;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Size, Window};
@@ -20,6 +21,7 @@ pub struct NativeSurfaceRuntime {
     configured_format: Option<wgpu::TextureFormat>,
     last_presentation_sequence: u64,
     runtime_epoch: u64,
+    is_shown: AtomicBool,
 }
 
 impl NativeSurfaceRuntime {
@@ -32,6 +34,7 @@ impl NativeSurfaceRuntime {
             configured_format: None,
             last_presentation_sequence: 0,
             runtime_epoch: 0,
+            is_shown: AtomicBool::new(false),
         }
     }
 
@@ -87,15 +90,26 @@ impl NativeSurfaceRuntime {
         self.runtime_epoch
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_shown(&self) -> bool {
+        self.is_shown.load(Ordering::Acquire)
+    }
+
     pub(crate) fn show_surface(&self) -> Result<(), String> {
+        if self.is_shown.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.surface_window
             .as_ref()
             .ok_or_else(|| "Native preview surface window is not initialized".to_string())?
             .show()
-            .map_err(|error| format!("Unable to show native preview surface: {error}"))
+            .map_err(|error| format!("Unable to show native preview surface: {error}"))?;
+        self.is_shown.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub(crate) fn hide_surface(&self) -> Result<(), String> {
+        self.is_shown.store(false, Ordering::Release);
         if let Some(window) = &self.surface_window {
             window
                 .hide()
@@ -336,6 +350,7 @@ fn configure_surface(
         }
 
         runtime_state.surface_window = Some(surface_window.clone());
+        runtime_state.is_shown.store(false, Ordering::Release);
         surface_window
     };
 
@@ -396,6 +411,38 @@ fn configure_surface(
         view_formats: vec![],
     };
     surface.configure(&gpu.device, &configuration);
+
+    // Prewarm CAMetalLayer / DXGI swapchain allocation during configuration so the
+    // initial backbuffer lock latency (~200-300ms on first mount) is absorbed
+    // during setup rather than blocking the first frame tick.
+    if let Ok(surface_texture) = surface.get_current_texture() {
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("surface_prewarm_encoder"),
+            });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("surface_prewarm_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        surface_texture.present();
+    }
 
     let probe = NativeSurfaceProbe {
         contract_version: NATIVE_CORE_CONTRACT_VERSION,
@@ -623,5 +670,17 @@ mod tests {
         runtime.handle_poison_recovery("test_context");
 
         assert_eq!(runtime.runtime_epoch(), initial_epoch.wrapping_add(1));
+    }
+
+    #[test]
+    fn surface_visibility_starts_hidden_and_resets() {
+        let mut runtime = NativeSurfaceRuntime::new();
+        assert!(!runtime.is_shown());
+
+        let _ = runtime.hide_surface();
+        assert!(!runtime.is_shown());
+
+        runtime.reset();
+        assert!(!runtime.is_shown());
     }
 }

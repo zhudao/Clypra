@@ -28,6 +28,7 @@ import {
 import { useViewportState } from "@/hooks/useViewportController";
 import { PreviewTransport } from "./PreviewTransport";
 import { TransformOverlayMemoized as TransformOverlay } from "../transform/TransformOverlay";
+import { ConnectedSpatialMotionPath } from "./SpatialMotionPath";
 import { SafeOverlay } from "../viewport/SafeOverlay";
 import {
   useViewportKeyboardShortcuts,
@@ -219,6 +220,27 @@ function capWebViewRenderTarget(target: {
     ...target,
     width: Math.max(1, Math.floor(target.width * scale)),
     height: Math.max(1, Math.floor(target.height * scale)),
+  };
+}
+
+const MAX_READBACK_WIDTH = 1920;
+const MAX_READBACK_HEIGHT = 1080;
+
+function clampReadbackRequest(request: NativeFrameRequest): NativeFrameRequest {
+  if (
+    request.outputWidth <= MAX_READBACK_WIDTH &&
+    request.outputHeight <= MAX_READBACK_HEIGHT
+  ) {
+    return request;
+  }
+  const scale = Math.min(
+    MAX_READBACK_WIDTH / request.outputWidth,
+    MAX_READBACK_HEIGHT / request.outputHeight,
+  );
+  return {
+    ...request,
+    outputWidth: Math.max(1, Math.round(request.outputWidth * scale)),
+    outputHeight: Math.max(1, Math.round(request.outputHeight * scale)),
   };
 }
 
@@ -512,7 +534,7 @@ export const NativeProgramPreview: React.FC = () => {
     canvasHeight: project?.canvasHeight ?? 1080,
     displayWidth: 0,
     displayHeight: 0,
-    // Bug 3 fix: viewport transform values live in the ref so the render loop
+    // viewport transform values live in the ref so the render loop
     // can read fresh values without these triggering an effect restart on pan/zoom.
     scale: 1,
     offsetX: 0,
@@ -534,7 +556,8 @@ export const NativeProgramPreview: React.FC = () => {
   // use this wake-up hook to request exactly one new frame instead of keeping
   // an idle RAF loop alive.
   const wakeNativeRenderLoopRef = useRef<(() => void) | null>(null);
-  const [playbackStats, setPlaybackStats] = useState<NativePlaybackStatsPayload | null>(null);
+  const [playbackStats, setPlaybackStats] =
+    useState<NativePlaybackStatsPayload | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -544,9 +567,11 @@ export const NativeProgramPreview: React.FC = () => {
         `%c[av-sync][perf] 📊 ${stats.framesRendered} frames (${stats.fps}fps) | Lookahead: ${stats.hitRatePercent.toFixed(1)}% cache hit | Avg Latency: ${stats.avgTotalMs.toFixed(2)}ms (decode: ${stats.avgDecodeMs.toFixed(2)}ms) | Peak: ${stats.maxFrameMs.toFixed(2)}ms | Streams: ${stats.stackedStreams}`,
         "color: #06b6d4; font-weight: bold;",
       );
-    }).then((fn) => {
-      unlisten = fn;
-    }).catch(() => undefined);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => undefined);
 
     return () => {
       if (unlisten) unlisten();
@@ -875,7 +900,7 @@ export const NativeProgramPreview: React.FC = () => {
       unlistenReady?.();
       unlistenFailed?.();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // mount-only — GPU init is a one-time process per app lifetime
 
   // The native presenter is hosted in a transparent child surface positioned
@@ -1039,7 +1064,7 @@ export const NativeProgramPreview: React.FC = () => {
   renderStateRef.current.displayHeight = displayHeight;
   renderStateRef.current.canvasWidth = canvasWidth;
   renderStateRef.current.canvasHeight = canvasHeight;
-  // Bug 3 fix: keep viewport transform values in sync so the render loop reads
+  // keep viewport transform values in sync so the render loop reads
   // them from the ref instead of from its closure (avoids stale values and loop restarts).
   renderStateRef.current.scale = scale;
   renderStateRef.current.offsetX = offsetX;
@@ -1112,7 +1137,7 @@ export const NativeProgramPreview: React.FC = () => {
     [project, updateProject],
   );
 
-  // Bug 1 fix: guard on projectId instead of truthiness so the ref is always
+  // guard on projectId instead of truthiness so the ref is always
   // refreshed when the user switches to a different project without unmounting.
   useEffect(() => {
     if (!project) return;
@@ -1128,7 +1153,7 @@ export const NativeProgramPreview: React.FC = () => {
   useEffect(() => {
     if (!project || !originalCanvasDimsRef.current) return;
     if (project.aspectRatio === "original") {
-      // Bug 1 fix: include projectId so the stored value is always project-scoped.
+      // include projectId so the stored value is always project-scoped.
       originalCanvasDimsRef.current = {
         projectId: project.id,
         width: project.canvasWidth,
@@ -1168,7 +1193,7 @@ export const NativeProgramPreview: React.FC = () => {
       setFrameRate(newFrameRate);
       prevFrameRateRef.current = newFrameRate;
     }
-    // Bug 6 fix: narrow from the full `project` object (unstable reference) to only the
+    // narrow from the full `project` object (unstable reference) to only the
     // specific fields this effect actually reads, preventing spurious re-runs every render.
   }, [project?.id, project?.frameRate, clips, setDuration, setFrameRate]);
 
@@ -1595,7 +1620,8 @@ export const NativeProgramPreview: React.FC = () => {
             matchType = "image";
           }
         } else {
-          source = videoElements.get(`${layer.clipId}-${layer.mediaId}`) ?? null;
+          source =
+            videoElements.get(`${layer.clipId}-${layer.mediaId}`) ?? null;
           if (source) {
             matchType = "exact";
           } else {
@@ -1701,10 +1727,7 @@ export const NativeProgramPreview: React.FC = () => {
         );
 
         const width = Math.max(1, Math.floor(videoWidth || layer.width));
-        const height = Math.max(
-          1,
-          Math.floor(videoHeight || layer.height),
-        );
+        const height = Math.max(1, Math.floor(videoHeight || layer.height));
 
         for (const effect of bodyEffects) {
           const renderer = (effect.renderer || effect.effectId)
@@ -1728,11 +1751,7 @@ export const NativeProgramPreview: React.FC = () => {
               width: cachedAsset.width,
               height: cachedAsset.height,
             });
-            touchGlobalMask(
-              assetId,
-              baseAssetId,
-              extractMaskTime(assetId),
-            );
+            touchGlobalMask(assetId, baseAssetId, extractMaskTime(assetId));
             assets.push({ ...cachedAsset, rgba: undefined });
             continue;
           }
@@ -1905,13 +1924,14 @@ export const NativeProgramPreview: React.FC = () => {
     const nativePreviewScheduler = new NativePreviewFrameScheduler({
       maxCacheEntries: 12,
       maxInFlight: 1,
-      load: async (request, signal) => {
+      load: async (rawRequest, signal) => {
         if (signal?.aborted) {
           throw new DOMException(
             "Native preview request cancelled",
             "AbortError",
           );
         }
+        const request = clampReadbackRequest(rawRequest);
         const requestKey = getNativeFrameRequestKey(request);
         const frontendSpan = nativePerfCollector.isEnabled()
           ? nativePerfCollector.begin(request, {
@@ -1981,6 +2001,7 @@ export const NativeProgramPreview: React.FC = () => {
         () => undefined,
       );
       forceRenderNeeded = true;
+      wakeNativeRenderLoopRef.current?.();
     });
 
     const presentNativePlaybackFrame = async (request: NativeFrameRequest) => {
@@ -2045,11 +2066,10 @@ export const NativeProgramPreview: React.FC = () => {
         .catch((error) => {
           if (isLiveUpdate) {
             // If dynamic update encountered an unrecoverable mismatch, gracefully fall back to configure
-            return configureNativePlaybackRender(request)
-              .then(() => {
-                nativePlaybackRenderSnapshotKey = key;
-                nativePlaybackRenderFailed = false;
-              });
+            return configureNativePlaybackRender(request).then(() => {
+              nativePlaybackRenderSnapshotKey = key;
+              nativePlaybackRenderFailed = false;
+            });
           }
           nativePlaybackRenderFailed = true;
           console.warn("[native-preview] persistent-render-session-failed", {
@@ -2376,7 +2396,8 @@ export const NativeProgramPreview: React.FC = () => {
         // Lane 1: Low-resolution proxy scrub lane (capped <= 480px, proxy/quarter quality)
         // Lane 2: Full-resolution settled lane (full quality, full dimensions)
         let effectiveRenderTarget = renderTarget;
-        if (isScrubbing) {
+        const isCoarseSeek = Boolean(latestSeekIntent?.allowKeyframeApprox && !isSettling);
+        if (isScrubbing || isCoarseSeek) {
           const maxScrubDim = 480;
           const scrubScale = Math.min(
             1,
@@ -2403,7 +2424,7 @@ export const NativeProgramPreview: React.FC = () => {
                 isPlaying && latestSeekIntent.mode !== "scrub"
                   ? ("playback" as const)
                   : latestSeekIntent.mode,
-              quality: isScrubbing
+              quality: isScrubbing || isCoarseSeek
                 ? effectiveRenderTarget.quality
                 : isSettling
                   ? ("full" as const)
@@ -2438,7 +2459,10 @@ export const NativeProgramPreview: React.FC = () => {
         const projectChanged = state.project !== lastRenderedProject;
         if (
           !isFirstFrame &&
-          (clipsChanged || tracksChanged || transitionsChanged || projectChanged)
+          (clipsChanged ||
+            tracksChanged ||
+            transitionsChanged ||
+            projectChanged)
         ) {
           activeTimelineEditStartedAt = performance.now();
         }
@@ -2525,8 +2549,14 @@ export const NativeProgramPreview: React.FC = () => {
           // Cold text or sticker assets must not block the native playback clock.
           // The bridge returns the previous bitmap/native fallback and
           // publishes the prepared asset for a later frame.
-          nonBlockingText: isPlaying || Boolean(requestIntent?.isScrubbing) || requestIntent?.mode === "scrub",
-          nonBlockingStickers: isPlaying || Boolean(requestIntent?.isScrubbing) || requestIntent?.mode === "scrub",
+          nonBlockingText:
+            isPlaying ||
+            Boolean(requestIntent?.isScrubbing) ||
+            requestIntent?.mode === "scrub",
+          nonBlockingStickers:
+            isPlaying ||
+            Boolean(requestIntent?.isScrubbing) ||
+            requestIntent?.mode === "scrub",
         });
         traceSlowPlaybackStage("visible-raster-bridge", bridgeStartedAt, {
           frameIndex,
@@ -2542,16 +2572,24 @@ export const NativeProgramPreview: React.FC = () => {
         const playbackTargetStillCurrent = () => {
           const current = renderStateRef.current;
           const isDragging = Boolean(dragPreviewClipId);
-          return (
-            (isDragging ||
-              dragPreviewRevision === dragPreviewRevisionAtStart) &&
-            (!isPlaying ||
-              (current.project?.id === state.project?.id &&
-                current.epoch === state.epoch &&
-                current.clock.state === "playing" &&
-                getFrameIndexAtTime(current.clock.time, frameRate) ===
-                  frameIndex))
-          );
+          if (
+            !isDragging &&
+            dragPreviewRevision !== dragPreviewRevisionAtStart
+          ) {
+            return false;
+          }
+          if (!isPlaying) {
+            return true;
+          }
+          if (
+            current.project?.id !== state.project?.id ||
+            current.epoch !== state.epoch ||
+            current.clock.state !== "playing"
+          ) {
+            return false;
+          }
+          const currentFrame = getFrameIndexAtTime(current.clock.time, frameRate);
+          return Math.abs(currentFrame - frameIndex) <= 1;
         };
         if (!playbackTargetStillCurrent()) {
           forceRenderNeeded = true;
@@ -2569,7 +2607,7 @@ export const NativeProgramPreview: React.FC = () => {
         const nativeActiveSmartClips = renderClips.filter(
           (clip): clip is SmartOverlayClip =>
             clip.kind === "smart-overlay" &&
-            clip.startTime < frameStartTime + (1 / frameRate) - 1e-4 &&
+            clip.startTime < frameStartTime + 1 / frameRate - 1e-4 &&
             frameStartTime < clip.startTime + clip.duration,
         );
         const smartOverlayStartedAt = performance.now();
@@ -2818,10 +2856,18 @@ export const NativeProgramPreview: React.FC = () => {
           previewContext: previewTelemetryContextRef.current,
           visualLayerCount: visualLayers.length,
           mediaLayerCount: mediaLayers.length,
-          videoLayerCount: mediaLayers.filter((layer) => layer.mediaType === "video").length,
-          imageLayerCount: mediaLayers.filter((layer) => layer.mediaType === "image").length,
-          textLayerCount: visualLayers.filter((layer) => layer.layerType === "text").length,
-          stickerLayerCount: mediaLayers.filter((layer) => layer.clipKind === "sticker").length,
+          videoLayerCount: mediaLayers.filter(
+            (layer) => layer.mediaType === "video",
+          ).length,
+          imageLayerCount: mediaLayers.filter(
+            (layer) => layer.mediaType === "image",
+          ).length,
+          textLayerCount: visualLayers.filter(
+            (layer) => layer.layerType === "text",
+          ).length,
+          stickerLayerCount: mediaLayers.filter(
+            (layer) => layer.clipKind === "sticker",
+          ).length,
           activeAudioClipCount,
         });
         // The child surface is playback-only on desktop. Paused and seeking
@@ -2851,9 +2897,16 @@ export const NativeProgramPreview: React.FC = () => {
           lastNativePlaybackRequestKey = "";
           void hideNativeSurfaceWhenIdle().catch(() => undefined);
         }
+        const clampedNativeRequestKey = nativeRequest
+          ? getNativeFrameRequestKey(clampReadbackRequest(nativeRequest))
+          : "";
         const cachedNativeFrame =
           nativeRequestKey !== ""
-            ? nativePreviewScheduler.getCached(nativeRequestKey)
+            ? (nativePreviewScheduler.getCached(nativeRequestKey) ??
+               (clampedNativeRequestKey !== "" &&
+               clampedNativeRequestKey !== nativeRequestKey
+                 ? nativePreviewScheduler.getCached(clampedNativeRequestKey)
+                 : null))
             : null;
         const nativePausedReadbackPath = nativePausedPath;
         const nativeFrameNeedsRetry =
@@ -2873,7 +2926,8 @@ export const NativeProgramPreview: React.FC = () => {
             current.project?.id === state.project?.id &&
             current.epoch === state.epoch &&
             current.clock.state === playbackState &&
-            (isDragging || dragPreviewRevision === dragPreviewRevisionAtStart) &&
+            (isDragging ||
+              dragPreviewRevision === dragPreviewRevisionAtStart) &&
             (!requireExactFrame ||
               getFrameIndexAtTime(current.clock.time, frameRate) === frameIndex)
           );
@@ -2904,7 +2958,11 @@ export const NativeProgramPreview: React.FC = () => {
                 generation: targetGeneration,
               };
 
-              if (!isPlaying && nativeSurfaceUsable && !qualificationForcesWebView) {
+              if (
+                !isPlaying &&
+                nativeSurfaceUsable &&
+                !qualificationForcesWebView
+              ) {
                 ensureNativePlaybackRenderSnapshot(requestToPresent);
               }
 
@@ -2948,7 +3006,8 @@ export const NativeProgramPreview: React.FC = () => {
                     const demandDelayUs = Math.max(
                       0,
                       Math.round(
-                        (performance.now() - latestSeekIntent.issuedAtMs) * 1000,
+                        (performance.now() - latestSeekIntent.issuedAtMs) *
+                          1000,
                       ),
                     );
                     telemetryCollector.recordScrubDemandDispatched(
@@ -3317,13 +3376,23 @@ export const NativeProgramPreview: React.FC = () => {
                     demandDelayUs,
                   );
                 }
+                const readbackRequest = clampReadbackRequest(requestSource.request);
+                const readbackRequestKey =
+                  readbackRequest === requestSource.request
+                    ? requestKey
+                    : getNativeFrameRequestKey(readbackRequest);
+                const readbackSource: NativePreviewRequestSource = {
+                  ...requestSource,
+                  requestKey: readbackRequestKey,
+                  request: readbackRequest,
+                };
                 nativePlaybackInFlight = nativePreviewScheduler
-                  .requestVisible(requestSource)
+                  .requestVisible(readbackSource)
                   .then((frame) => {
                     const frontendSpan =
-                      nativeFrontendPerfSpans.get(requestKey);
+                      nativeFrontendPerfSpans.get(readbackRequestKey);
                     frontendSpan?.finish();
-                    nativeFrontendPerfSpans.delete(requestKey);
+                    nativeFrontendPerfSpans.delete(readbackRequestKey);
                     const current = renderStateRef.current;
                     if (
                       isActive &&
@@ -3340,14 +3409,14 @@ export const NativeProgramPreview: React.FC = () => {
                   })
                   .catch((error) => {
                     const frontendSpan =
-                      nativeFrontendPerfSpans.get(requestKey);
+                      nativeFrontendPerfSpans.get(readbackRequestKey);
                     frontendSpan?.finish({
                       stale: true,
                       cancelled:
                         error instanceof DOMException &&
                         error.name === "AbortError",
                     });
-                    nativeFrontendPerfSpans.delete(requestKey);
+                    nativeFrontendPerfSpans.delete(readbackRequestKey);
                     nativeContinuousFailureStreak += 1;
                     lastNativePlaybackRequestKey = "";
                     if (nativeContinuousFailureStreak >= 3) {
@@ -3440,11 +3509,16 @@ export const NativeProgramPreview: React.FC = () => {
               requestForRender &&
               !nativeDirectSurfacePath
             ) {
+              const readbackRequest = clampReadbackRequest(requestForRender);
+              const readbackRequestKey =
+                readbackRequest === requestForRender
+                  ? nativeRequestKey
+                  : getNativeFrameRequestKey(readbackRequest);
               try {
                 const visibleSource: NativePreviewRequestSource = {
-                  requestKey: nativeRequestKey,
+                  requestKey: readbackRequestKey,
                   frameIndex,
-                  request: requestForRender,
+                  request: readbackRequest,
                   generation: targetGeneration,
                 };
                 if (latestSeekIntent?.scrubSpanId) {
@@ -3466,9 +3540,9 @@ export const NativeProgramPreview: React.FC = () => {
                 // response to the current program canvas.
                 if (!targetStillCurrent()) {
                   const frontendSpan =
-                    nativeFrontendPerfSpans.get(nativeRequestKey);
+                    nativeFrontendPerfSpans.get(readbackRequestKey);
                   frontendSpan?.finish({ stale: true });
-                  nativeFrontendPerfSpans.delete(nativeRequestKey);
+                  nativeFrontendPerfSpans.delete(readbackRequestKey);
                   forceRenderNeeded = true;
                   return;
                 }
@@ -3487,9 +3561,9 @@ export const NativeProgramPreview: React.FC = () => {
                   // must not trip the renderer circuit breaker or show a
                   // native-only failure toast for an obsolete frame.
                   const frontendSpan =
-                    nativeFrontendPerfSpans.get(nativeRequestKey);
+                    nativeFrontendPerfSpans.get(readbackRequestKey);
                   frontendSpan?.finish({ stale: true });
-                  nativeFrontendPerfSpans.delete(nativeRequestKey);
+                  nativeFrontendPerfSpans.delete(readbackRequestKey);
                   nativeRetryAt = 0;
                   forceRenderNeeded = true;
                   return;
@@ -3506,14 +3580,14 @@ export const NativeProgramPreview: React.FC = () => {
                   nativeBlockedKey = nativeRequestKey;
                 }
                 const frontendSpan =
-                  nativeFrontendPerfSpans.get(nativeRequestKey);
+                  nativeFrontendPerfSpans.get(readbackRequestKey);
                 frontendSpan?.finish({
                   stale,
                   cancelled:
                     error instanceof DOMException &&
                     error.name === "AbortError",
                 });
-                nativeFrontendPerfSpans.delete(nativeRequestKey);
+                nativeFrontendPerfSpans.delete(readbackRequestKey);
                 nativeRetryAt = performance.now() + 250;
                 if (nativeOnlyMode) {
                   toast.error(
@@ -3548,7 +3622,10 @@ export const NativeProgramPreview: React.FC = () => {
                 );
               }
               canvasPaintMs = performance.now() - canvasPaintStarted;
-              if (latestSeekIntent?.scrubSpanId && latestSeekIntent.isScrubbing) {
+              if (
+                latestSeekIntent?.scrubSpanId &&
+                latestSeekIntent.isScrubbing
+              ) {
                 const elapsedSinceInputUs = Math.max(
                   0,
                   Math.round(
@@ -3771,10 +3848,7 @@ export const NativeProgramPreview: React.FC = () => {
             `Purged evicted mask asset '${assetId}' from JS cache`,
           );
         }
-        if (
-          isActive &&
-          renderStateRef.current.clock.state !== "playing"
-        ) {
+        if (isActive && renderStateRef.current.clock.state !== "playing") {
           scheduleNextFrame();
         }
       })
@@ -3785,10 +3859,7 @@ export const NativeProgramPreview: React.FC = () => {
 
       listenForNativeRasterEviction((assetIds) => {
         nativeRasterBridge.evict(assetIds);
-        if (
-          isActive &&
-          renderStateRef.current.clock.state !== "playing"
-        ) {
+        if (isActive && renderStateRef.current.clock.state !== "playing") {
           scheduleNextFrame();
         }
       })
@@ -3982,6 +4053,15 @@ export const NativeProgramPreview: React.FC = () => {
                   displayWidth={displayWidth}
                   displayHeight={displayHeight}
                 />
+                <ConnectedSpatialMotionPath
+                  canvasWidth={canvasWidth}
+                  canvasHeight={canvasHeight}
+                  scale={scale}
+                  viewport={viewport}
+                  displayOffset={{ x: offsetX, y: offsetY }}
+                  displayWidth={displayWidth}
+                  displayHeight={displayHeight}
+                />
                 <SafeOverlay
                   visible={showSafeOverlay}
                   displayWidth={displayWidth}
@@ -3996,11 +4076,15 @@ export const NativeProgramPreview: React.FC = () => {
                     <span className="text-white/30">•</span>
                     <span>{playbackStats.avgTotalMs.toFixed(1)}ms</span>
                     <span className="text-white/30">•</span>
-                    <span className="text-emerald-300">{playbackStats.hitRatePercent.toFixed(0)}% cached</span>
+                    <span className="text-emerald-300">
+                      {playbackStats.hitRatePercent.toFixed(0)}% cached
+                    </span>
                     {playbackStats.stackedStreams > 1 && (
                       <>
                         <span className="text-white/30">•</span>
-                        <span className="text-amber-300">{playbackStats.stackedStreams} streams</span>
+                        <span className="text-amber-300">
+                          {playbackStats.stackedStreams} streams
+                        </span>
                       </>
                     )}
                   </div>
@@ -4060,9 +4144,7 @@ export const NativeProgramPreview: React.FC = () => {
         }}
         onScrubEnd={(time) => {
           if (clips.length === 0) return;
-          transportEndScrub(
-            clampAndSnapProgramTime(time, duration, frameRate),
-          );
+          transportEndScrub(clampAndSnapProgramTime(time, duration, frameRate));
         }}
         formatTime={formatTime}
         onStepBack={(currentTime) => {

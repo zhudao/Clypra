@@ -11,6 +11,7 @@ import type { TrackVisualRole } from "@/lib/timeline/trackTypeConfig";
 import { ClipFilmstrip } from "./ClipFilmstrip";
 import { VolumeWaveform } from "./VolumeWaveform";
 import { AudioEnvelopeEditor } from "./AudioEnvelopeEditor";
+import { InlineKeyframeLane } from "./InlineKeyframeLane";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useHistoryStore } from "@/store/historyStore";
 import { TimelineTrimCommand } from "@/core/history/commands/TimelineTrimCommand";
@@ -131,6 +132,10 @@ const ClipInner: React.FC<ClipProps> = ({
 }) => {
   const selectClip = useUIStore((s) => s.selectClip);
   const toggleClipSelection = useUIStore((s) => s.toggleClipSelection);
+  const isKeyframeExpanded = useUIStore((s) =>
+    s.expandedKeyframeClipIds?.includes(clip.id) ?? false,
+  );
+  const toggleKeyframeLane = useUIStore((s) => s.toggleKeyframeLane);
   // PERF-4 fix: granular selectors prevent all clips re-rendering on every scroll/clip change
   const updateClip = useTimelineStore((s) => s.updateClip);
   const rippleEditEnabled = useTimelineStore((s) => s.rippleEditEnabled);
@@ -441,7 +446,7 @@ const ClipInner: React.FC<ClipProps> = ({
       return;
     }
 
-    // FIX: Capture clipId and trackId once at effect start to avoid stale closure bug.
+    // Capture clipId and trackId once at effect start to avoid stale closure bug.
     // Previously, `clip` was in the dependency array, causing the effect to rebuild
     // on every state update during resize. This reset resizeStartRef mid-drag, breaking
     // cumulative delta calculations. Now we capture stable IDs and never re-run the effect
@@ -809,7 +814,7 @@ const ClipInner: React.FC<ClipProps> = ({
     setSnapGuides,
     clearSnapGuides,
     previewInteractionCoordinator,
-    // NOTE: useHistoryStore is intentionally omitted — it is the stable Zustand
+    // useHistoryStore is intentionally omitted — it is the stable Zustand
     // hook reference itself (never changes), so including it was misleading (BUG 8-D).
     // useHistoryStore.getState() is called imperatively inside finishResize.
   ]);
@@ -847,6 +852,14 @@ const ClipInner: React.FC<ClipProps> = ({
   const isClipBodyEffect = inferredKind === "body-effect";
   const isClipAnimatedOverlay = inferredKind === "animated-overlay";
   const isCompound = inferredKind === "compound";
+
+  const hasKeyframes = Boolean(
+    (clip.visualKeyframes &&
+      Object.values(clip.visualKeyframes).some(
+        (kfs) => Array.isArray(kfs) && kfs.length > 0,
+      )) ||
+      (clip.volumeKeyframes && clip.volumeKeyframes.length > 0),
+  );
 
   // Check if text clip is a caption or title
   const textClip = isClipText ? (clip as any) : null;
@@ -989,6 +1002,17 @@ const ClipInner: React.FC<ClipProps> = ({
               </span>
             )}
           </div>
+          {hasKeyframes && (
+            <div className="absolute inset-x-0 bottom-0 z-20 pointer-events-auto">
+              <InlineKeyframeLane
+                clip={clip}
+                clipWidthPx={width}
+                pixelsPerSecond={pixelsPerSecond}
+                isExpanded={isKeyframeExpanded}
+                onToggleExpand={() => toggleKeyframeLane(clip.id)}
+              />
+            </div>
+          )}
         </div>
       ) : isClipFilter ? (
         <div className="relative flex h-full w-full items-center px-2 select-none pointer-events-none gap-2">
@@ -1043,6 +1067,17 @@ const ClipInner: React.FC<ClipProps> = ({
           <span className="text-[10px] font-bold text-clypra-clip-fg/90 truncate">
             {mediaAsset?.name || "Sticker"}
           </span>
+          {hasKeyframes && (
+            <div className="absolute inset-x-0 bottom-0 z-20 pointer-events-auto">
+              <InlineKeyframeLane
+                clip={clip}
+                clipWidthPx={width}
+                pixelsPerSecond={pixelsPerSecond}
+                isExpanded={isKeyframeExpanded}
+                onToggleExpand={() => toggleKeyframeLane(clip.id)}
+              />
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
@@ -1063,6 +1098,25 @@ const ClipInner: React.FC<ClipProps> = ({
             <div className="shrink-0 text-[9px] font-medium text-timeline-clip-duration">
               {formatDuration(clip.duration)}
             </div>
+            {hasKeyframes && (
+              <button
+                type="button"
+                data-testid={`clip-${clip.id}-keyframe-toggle`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleKeyframeLane(clip.id);
+                }}
+                className={`ml-auto flex items-center gap-0.5 px-1 py-px rounded text-[8px] font-semibold transition-colors cursor-pointer ${
+                  isKeyframeExpanded
+                    ? "bg-accent text-white shadow-xs"
+                    : "bg-amber-500/20 text-amber-300 hover:bg-amber-500/30"
+                }`}
+                title={isKeyframeExpanded ? "Collapse Keyframe Lanes" : "Expand Keyframe Lanes"}
+              >
+                <span>◆</span>
+                <span>Anim</span>
+              </button>
+            )}
           </div>
           {clip.kind !== "audio" &&
           mediaAsset &&
@@ -1078,6 +1132,13 @@ const ClipInner: React.FC<ClipProps> = ({
                   stripHeightPx={clipFilmstripHeightPx}
                 />
               </div>
+              <InlineKeyframeLane
+                clip={clip}
+                clipWidthPx={width}
+                pixelsPerSecond={pixelsPerSecond}
+                isExpanded={isKeyframeExpanded}
+                onToggleExpand={() => toggleKeyframeLane(clip.id)}
+              />
               {mediaAsset.type === "video" && mediaAsset.path && (
                 <div
                   data-testid="clip-audio-waveform"
@@ -1130,6 +1191,15 @@ const ClipInner: React.FC<ClipProps> = ({
                 clipWidthPx={width}
                 pixelsPerSecond={pixelsPerSecond}
               />
+              <div className="absolute inset-x-0 bottom-0 z-20 pointer-events-auto">
+                <InlineKeyframeLane
+                  clip={clip}
+                  clipWidthPx={width}
+                  pixelsPerSecond={pixelsPerSecond}
+                  isExpanded={isKeyframeExpanded}
+                  onToggleExpand={() => toggleKeyframeLane(clip.id)}
+                />
+              </div>
             </div>
           ) : mediaAsset?.posterFrame ? (
             <img
@@ -1202,6 +1272,14 @@ const arePropsEqual = (prevProps: ClipProps, nextProps: ClipProps) => {
     prevProps.clip.fadeIn !== nextProps.clip.fadeIn ||
     prevProps.clip.fadeOut !== nextProps.clip.fadeOut ||
     prevProps.clip.volumeKeyframes !== nextProps.clip.volumeKeyframes
+  ) {
+    return false;
+  }
+
+  // Check visual keyframes and motion presets
+  if (
+    prevProps.clip.visualKeyframes !== nextProps.clip.visualKeyframes ||
+    prevProps.clip.motion !== nextProps.clip.motion
   ) {
     return false;
   }

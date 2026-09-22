@@ -14,6 +14,7 @@ pub mod commands;
 pub mod diagnostics;
 pub mod golden_harness;
 pub mod models;
+pub mod media_runtime;
 pub mod native_audio;
 pub mod native_core;
 pub mod preview_golden;
@@ -43,7 +44,7 @@ use thumbnail_engine::init_thumbnail_engine;
 fn get_process_memory_mb() -> u64 {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        // SAFETY: rusage is a plain C struct; zero-initialising it is correct
+        // rusage is a plain C struct; zero-initialising it is correct
         // before passing to getrusage. The kernel fills it in atomically.
         let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
         let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
@@ -472,6 +473,7 @@ pub fn run() {
             cancel_native_timeline_export,
             check_ffmpeg_available,
             get_ffmpeg_version,
+            get_media_runtime_status,
             export_creator_thumbnail,
             // Whisper model management & local AI caption commands
             download_whisper_model,

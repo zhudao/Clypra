@@ -12,6 +12,7 @@
 import { getApiBaseUrl, getApiHeaders } from "@/lib/api/apiUtils";
 import { perfLogService, type PerfLogKind } from "@/services/perfLogService";
 import { getAppVersionSync } from "@/lib/app/appVersion";
+import type { WorkerPerfRollup } from "@/core/monitoring/WorkerPerfCollector";
 
 export interface TelemetryHardwareContext {
   osFamily: "macos" | "windows" | "linux" | "ios" | "android" | "web";
@@ -118,7 +119,12 @@ export type TelemetryOperationMode =
   | "ai-inference"
   | "filmstrip-extraction";
 
-export type TelemetrySubsystem = "preview" | "audio" | "text" | "sticker" | "composition";
+export type TelemetrySubsystem =
+  | "preview"
+  | "audio"
+  | "text"
+  | "sticker"
+  | "composition";
 
 /** Content-free composition pressure sampled from the evaluated editor scene. */
 export interface TelemetryCompositionSample {
@@ -407,6 +413,7 @@ export interface TelemetryEvent {
     firstFrameVisibleMs?: number;
     isSessionRollup?: boolean;
     jankEventsCount?: number;
+    throttledAnomaliesCount?: number;
   };
   exportMetrics?: {
     exportDurationMs: number;
@@ -436,6 +443,7 @@ export interface TelemetryEvent {
   textMetrics?: TelemetryTextMetrics;
   stickerMetrics?: TelemetryStickerMetrics;
   compositionMetrics?: TelemetryCompositionMetrics;
+  workerMetrics?: WorkerPerfRollup;
   fallbackEvent?: {
     triggered: boolean;
     fromBackend: string;
@@ -582,17 +590,28 @@ export interface TelemetryTextInteractionInput {
 // @deprecated DEFAULT_API_INGEST_URL — the batch ingest endpoint has been
 // replaced by the single-file session upload (POST /telemetry/ingest/session).
 // This constant is retained only as a tombstone comment; it is no longer used.
-// TODO: delete this constant when /telemetry/ingest/batch is removed from the API.
+// delete this constant when /telemetry/ingest/batch is removed from the API.
 // const DEFAULT_API_INGEST_URL = `${getApiBaseUrl()}/performance/telemetry/ingest/batch`;
 const MAX_QUEUE_SIZE = 100;
 // @deprecated MAX_OFFLINE_BATCHES — offline localStorage queue is no longer
 // used. Batches are accumulated locally in the NDJSON session file instead.
-// TODO: delete when saveToOfflineStorage / drainOfflineQueue are removed.
+// delete when saveToOfflineStorage / drainOfflineQueue are removed.
 // const MAX_OFFLINE_BATCHES = 50;
 const FLUSH_INTERVAL_MS = 15000;
 const NOMINAL_SAMPLE_RATE = 0.01; // 1% sample rate for smooth 60fps frames
 const ROLLUP_WINDOW_MS = import.meta.env.DEV ? 5000 : 30000;
 const SLEEP_DISCONTINUITY_THRESHOLD_MS = 1500; // Discard time gaps > 1.5s as sleep/backgrounding
+
+/** Maximum individual over-budget latency frame samples emitted per minute. */
+const MAX_LATENCY_ANOMALIES_PER_MINUTE = 10;
+/** Maximum individual dropped/stale/cancelled frame samples emitted per minute. */
+const MAX_DROP_ANOMALIES_PER_MINUTE = 10;
+/** Maximum individual seek latency anomalies emitted per minute. */
+const MAX_SEEK_ANOMALIES_PER_MINUTE = 10;
+/** Window duration for anomaly quota replenishment (1 minute). */
+const ANOMALY_QUOTA_WINDOW_MS = 60000;
+/** Minimum interval between intermediate superseded scrub drag events (max 2/sec). */
+const SCRUB_INTERACTION_MIN_INTERVAL_MS = 500;
 
 /**
  * Maps a TelemetryEvent to the PerfLogKind used by perfLogService.
@@ -606,6 +625,7 @@ function resolvePerfLogKind(event: TelemetryEvent): PerfLogKind {
   if (event.textMetrics) return "text-rollup";
   if (event.stickerMetrics) return "sticker-rollup";
   if (event.compositionMetrics) return "composition-rollup";
+  if (event.workerMetrics) return "worker-rollup";
   if (
     event.workload.mode === "seek-cold" ||
     event.workload.mode === "seek-warm"
@@ -665,10 +685,19 @@ class SessionRollupAccumulator {
   private jankEvents: number = 0;
   private cacheHits: number = 0;
   private cacheMisses: number = 0;
+  private throttledAnomaliesCount: number = 0;
   private firstFrameVisibleMs: number | undefined;
   private lastKnownVideoProfile: Partial<TelemetryVideoProfile> = {};
   private capabilityPolicy?: "full" | "reduced" | "proxy" | string;
   private capabilityProbeUs?: number;
+
+  public recordThrottledAnomaly(): void {
+    this.throttledAnomaliesCount++;
+  }
+
+  public getThrottledAnomaliesCount(): number {
+    return this.throttledAnomaliesCount;
+  }
 
   public recordFrame(
     timings: TelemetryStageTimings,
@@ -778,6 +807,7 @@ class SessionRollupAccumulator {
     staleFrames: number;
     cancelledFrames: number;
     jankEventsCount: number;
+    throttledAnomaliesCount: number;
     avDriftP95Ms: number;
     cacheHitRatio: number;
     stageTimings: TelemetryStageTimings;
@@ -859,6 +889,7 @@ class SessionRollupAccumulator {
       staleFrames: this.staleFrames,
       cancelledFrames: this.cancelledFrames,
       jankEventsCount: this.jankEvents,
+      throttledAnomaliesCount: this.throttledAnomaliesCount,
       avDriftP95Ms,
       cacheHitRatio,
       stageTimings,
@@ -894,6 +925,7 @@ class SessionRollupAccumulator {
     this.staleFrames = 0;
     this.cancelledFrames = 0;
     this.jankEvents = 0;
+    this.throttledAnomaliesCount = 0;
     this.cacheHits = 0;
     this.cacheMisses = 0;
     this.renderTimesUs = [];
@@ -930,6 +962,7 @@ class SessionRollupAccumulator {
     this.staleFrames = 0;
     this.cancelledFrames = 0;
     this.jankEvents = 0;
+    this.throttledAnomaliesCount = 0;
     this.cacheHits = 0;
     this.cacheMisses = 0;
     this.renderTimesUs = [];
@@ -1167,14 +1200,20 @@ class CompositionWindowAccumulator {
   }
 
   shouldEmit(): boolean {
-    return this.samples.length > 0 && Date.now() - this.windowStartMs >= ROLLUP_WINDOW_MS;
+    return (
+      this.samples.length > 0 &&
+      Date.now() - this.windowStartMs >= ROLLUP_WINDOW_MS
+    );
   }
 
   extract(): (TelemetryCompositionMetrics & { windowStartMs: number }) | null {
     if (this.samples.length === 0) return null;
     const percentile = (values: number[]): TelemetryMetricPercentiles => {
       const sorted = [...values].sort((a, b) => a - b);
-      const at = (pct: number) => sorted[Math.min(sorted.length - 1, Math.round((sorted.length - 1) * pct))] ?? 0;
+      const at = (pct: number) =>
+        sorted[
+          Math.min(sorted.length - 1, Math.round((sorted.length - 1) * pct))
+        ] ?? 0;
       return { p50: at(0.5), p95: at(0.95), p99: at(0.99) };
     };
     const values = (key: keyof TelemetryCompositionSample) =>
@@ -1186,7 +1225,9 @@ class CompositionWindowAccumulator {
       windowStartMs: this.windowStartMs,
       windowDurationMs: Math.max(1, Date.now() - this.windowStartMs),
       observedFrames: this.samples.length,
-      multiStackedFrames: this.samples.filter((sample) => sample.mediaLayerCount > 1).length,
+      multiStackedFrames: this.samples.filter(
+        (sample) => sample.mediaLayerCount > 1,
+      ).length,
       maxVisualLayers: Math.max(...visual),
       maxMediaLayers: Math.max(...media),
       maxAudioClips: Math.max(...audio),
@@ -1222,7 +1263,19 @@ class TelemetryCollector {
   private reportedStickerMeasurementIds = new Set<string>();
   private textAccumulators = new Map<string, TextWindowAccumulator>();
   private stickerAccumulators = new Map<string, StickerWindowAccumulator>();
-  private compositionAccumulators = new Map<string, CompositionWindowAccumulator>();
+  private compositionAccumulators = new Map<
+    string,
+    CompositionWindowAccumulator
+  >();
+  private anomalyRateLimiter = {
+    windowStartMs: Date.now(),
+    latencyAnomaliesEmitted: 0,
+    dropAnomaliesEmitted: 0,
+    seekAnomaliesEmitted: 0,
+    peakLatencyUs: 0,
+    peakSeekLatencyMs: 0,
+  };
+  private lastScrubInteractionMs: number = 0;
   private transportStatus: TelemetryTransportStatus = {
     // Batch endpoint is gone — all data flows through perfLogService session file.
     endpoint: "session-file",
@@ -1248,7 +1301,7 @@ class TelemetryCollector {
           this.flush();
         }
       });
-      // NOTE: "online" listener removed — offline localStorage queue is no longer
+      // "online" listener removed — offline localStorage queue is no longer
       // used. Session data is accumulated in the NDJSON file by perfLogService.
 
       // Pull-based inspection is available in every environment for the
@@ -1299,6 +1352,26 @@ class TelemetryCollector {
     };
   }
 
+  public resetAnomalyRateLimiter(): void {
+    this.anomalyRateLimiter = {
+      windowStartMs: Date.now(),
+      latencyAnomaliesEmitted: 0,
+      dropAnomaliesEmitted: 0,
+      seekAnomaliesEmitted: 0,
+      peakLatencyUs: 0,
+      peakSeekLatencyMs: 0,
+    };
+    this.lastScrubInteractionMs = 0;
+  }
+
+  public getThrottledAnomaliesCount(
+    previewContext?: TelemetryPreviewContext,
+  ): number {
+    return this.getRollupAccumulator(
+      previewContext,
+    ).getThrottledAnomaliesCount();
+  }
+
   public clearQueue(): void {
     this.queue = [];
     // clearOfflineQueue() removed — localStorage batch queue is no longer used.
@@ -1306,6 +1379,7 @@ class TelemetryCollector {
     this.reportedAudioMeasurementIds.clear();
     this.reportedTextMeasurementIds.clear();
     this.textAccumulators.clear();
+    this.resetAnomalyRateLimiter();
   }
 
   /**
@@ -1503,13 +1577,78 @@ class TelemetryCollector {
     const droppedRatio = totalFrames > 0 ? droppedFrames / totalFrames : 0;
     const isAnomaly = droppedRatio > 0.05 || timings.totalTimeUs > 16667;
 
-    // Adaptive sampling: 100% on dropped frames / latency SLA overruns, 1% on nominal smooth frames
-    if (
-      !options.forceSample &&
-      !isAnomaly &&
-      Math.random() > NOMINAL_SAMPLE_RATE
-    ) {
-      return;
+    const hasDroppedFrame =
+      droppedFrames > 0 ||
+      staleFrames > 0 ||
+      cancelledFrames > 0 ||
+      Boolean(options.dropReason);
+
+    // Adaptive sampling:
+    // When forceSample is true (e.g. qualification runs or explicit overrides), bypass throttling.
+    // For nominal smooth frames (not an anomaly), sample at 1% NOMINAL_SAMPLE_RATE.
+    // For anomalies, apply local windowed rate limiting to prevent thousands of redundant frames
+    // from ballooning the session file while preserving percentiles in the rollup.
+    if (!options.forceSample) {
+      if (!isAnomaly) {
+        if (Math.random() > NOMINAL_SAMPLE_RATE) {
+          return;
+        }
+      } else {
+        const now = Date.now();
+        if (
+          now - this.anomalyRateLimiter.windowStartMs >=
+          ANOMALY_QUOTA_WINDOW_MS
+        ) {
+          this.anomalyRateLimiter.windowStartMs = now;
+          this.anomalyRateLimiter.latencyAnomaliesEmitted = 0;
+          this.anomalyRateLimiter.dropAnomaliesEmitted = 0;
+          this.anomalyRateLimiter.seekAnomaliesEmitted = 0;
+          this.anomalyRateLimiter.peakLatencyUs = 0;
+          this.anomalyRateLimiter.peakSeekLatencyMs = 0;
+        }
+
+        let shouldSampleAnomaly = false;
+
+        if (hasDroppedFrame) {
+          if (
+            this.anomalyRateLimiter.dropAnomaliesEmitted <
+            MAX_DROP_ANOMALIES_PER_MINUTE
+          ) {
+            this.anomalyRateLimiter.dropAnomaliesEmitted++;
+            shouldSampleAnomaly = true;
+          }
+        } else {
+          // Latency-only overrun (e.g. 66ms preview frame render time)
+          if (
+            this.anomalyRateLimiter.latencyAnomaliesEmitted <
+            MAX_LATENCY_ANOMALIES_PER_MINUTE
+          ) {
+            this.anomalyRateLimiter.latencyAnomaliesEmitted++;
+            this.anomalyRateLimiter.peakLatencyUs = Math.max(
+              this.anomalyRateLimiter.peakLatencyUs,
+              timings.totalTimeUs,
+            );
+            shouldSampleAnomaly = true;
+          } else if (
+            this.anomalyRateLimiter.peakLatencyUs > 0 &&
+            timings.totalTimeUs > this.anomalyRateLimiter.peakLatencyUs * 1.25
+          ) {
+            // Peak outlier: significantly worse than previous peak in this window
+            this.anomalyRateLimiter.peakLatencyUs = timings.totalTimeUs;
+            shouldSampleAnomaly = true;
+          }
+        }
+
+        if (!shouldSampleAnomaly) {
+          if (options.includeInRollup !== false) {
+            const accumulator = this.getRollupAccumulator(
+              options.previewContext,
+            );
+            accumulator.recordThrottledAnomaly();
+          }
+          return;
+        }
+      }
     }
 
     const hardware = this.initHardwareContext();
@@ -1689,6 +1828,27 @@ class TelemetryCollector {
     totalTimeUs: number;
     previewContext?: TelemetryPreviewContext;
   }): void {
+    const isScrub = input.interaction.name === "scrub";
+    const isSettledOrFinal =
+      input.interaction.outcome === "completed" ||
+      input.interaction.outcome === "failed";
+    const now = performance.now();
+
+    // Throttle high-frequency continuous intermediate scrub drag updates (max 2/sec)
+    if (
+      isScrub &&
+      !isSettledOrFinal &&
+      input.previewContext?.scenario !== "qualification"
+    ) {
+      if (
+        now - this.lastScrubInteractionMs <
+        SCRUB_INTERACTION_MIN_INTERVAL_MS
+      ) {
+        return;
+      }
+      this.lastScrubInteractionMs = now;
+    }
+
     const mode: TelemetryOperationMode =
       input.interaction.name === "scrub"
         ? "scrub"
@@ -2046,7 +2206,8 @@ class TelemetryCollector {
       context?.view ?? "webview",
       context?.surface ?? "dom-canvas",
       context?.scenario ?? "playback",
-      context?.runtimeEnvironment ?? (import.meta.env.DEV ? "development" : "production"),
+      context?.runtimeEnvironment ??
+        (import.meta.env.DEV ? "development" : "production"),
     ]);
     let accumulator = this.compositionAccumulators.get(key);
     if (!accumulator) {
@@ -2060,7 +2221,13 @@ class TelemetryCollector {
   public flushCompositionWindowsIfPending(force = false): void {
     for (const [key, accumulator] of this.compositionAccumulators) {
       if (!force && !accumulator.shouldEmit()) continue;
-      const values = JSON.parse(key) as [string, TelemetryPreviewView, TelemetryPreviewSurface, TelemetryPreviewScenario, TelemetryRuntimeEnvironment];
+      const values = JSON.parse(key) as [
+        string,
+        TelemetryPreviewView,
+        TelemetryPreviewSurface,
+        TelemetryPreviewScenario,
+        TelemetryRuntimeEnvironment,
+      ];
       const summary = accumulator.extract();
       if (!summary) continue;
       const [sessionId, view, surface, scenario, runtimeEnvironment] = values;
@@ -2075,14 +2242,21 @@ class TelemetryCollector {
         appVersion: this.appVersion,
         appBuildNumber: import.meta.env.MODE || "prod",
         appEnvironment: import.meta.env.DEV ? "beta" : "production",
-        previewContext: { sessionId, view, surface, scenario, runtimeEnvironment },
+        previewContext: {
+          sessionId,
+          view,
+          surface,
+          scenario,
+          runtimeEnvironment,
+        },
         device: this.initHardwareContext(),
         video: this.sanitizeVideoProfile({ nominalFps: 60 }),
         workload: {
           mode: "shader-composition",
           durationMs: summary.windowDurationMs,
           targetFps: 60,
-          renderedFps: summary.observedFrames / (summary.windowDurationMs / 1000),
+          renderedFps:
+            summary.observedFrames / (summary.windowDurationMs / 1000),
           totalFrames: summary.observedFrames,
           droppedFrames: 0,
           droppedFramesRatio: 0,
@@ -2308,8 +2482,46 @@ class TelemetryCollector {
     this.getRollupAccumulator().recordSeek(seekLatencyMs);
 
     const isAnomaly = seekLatencyMs > 100.0;
-    if (!isAnomaly && Math.random() > NOMINAL_SAMPLE_RATE) {
-      return;
+    if (!isAnomaly) {
+      if (Math.random() > NOMINAL_SAMPLE_RATE) {
+        return;
+      }
+    } else {
+      const now = Date.now();
+      if (
+        now - this.anomalyRateLimiter.windowStartMs >=
+        ANOMALY_QUOTA_WINDOW_MS
+      ) {
+        this.anomalyRateLimiter.windowStartMs = now;
+        this.anomalyRateLimiter.latencyAnomaliesEmitted = 0;
+        this.anomalyRateLimiter.dropAnomaliesEmitted = 0;
+        this.anomalyRateLimiter.seekAnomaliesEmitted = 0;
+        this.anomalyRateLimiter.peakLatencyUs = 0;
+        this.anomalyRateLimiter.peakSeekLatencyMs = 0;
+      }
+
+      let shouldSampleSeek = false;
+      if (
+        this.anomalyRateLimiter.seekAnomaliesEmitted <
+        MAX_SEEK_ANOMALIES_PER_MINUTE
+      ) {
+        this.anomalyRateLimiter.seekAnomaliesEmitted++;
+        this.anomalyRateLimiter.peakSeekLatencyMs = Math.max(
+          this.anomalyRateLimiter.peakSeekLatencyMs,
+          seekLatencyMs,
+        );
+        shouldSampleSeek = true;
+      } else if (
+        this.anomalyRateLimiter.peakSeekLatencyMs > 0 &&
+        seekLatencyMs > this.anomalyRateLimiter.peakSeekLatencyMs * 1.25
+      ) {
+        this.anomalyRateLimiter.peakSeekLatencyMs = seekLatencyMs;
+        shouldSampleSeek = true;
+      }
+
+      if (!shouldSampleSeek) {
+        return;
+      }
     }
 
     const hardware = this.initHardwareContext();
@@ -2694,6 +2906,7 @@ class TelemetryCollector {
           firstFrameVisibleMs: rollup.firstFrameVisibleMs,
           isSessionRollup: true,
           jankEventsCount: rollup.jankEventsCount,
+          throttledAnomaliesCount: rollup.throttledAnomaliesCount,
         },
         timestampMs: Date.now(),
       });
