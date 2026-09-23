@@ -25,6 +25,7 @@ use flate2::Compression;
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -223,10 +224,44 @@ pub async fn close_perf_log_session(session_id: String) -> Result<String, String
     Ok(path)
 }
 
+fn format_reqwest_error(e: &reqwest::Error) -> String {
+    let mut msg = format!("{e}");
+    let mut source = e.source();
+    while let Some(s) = source {
+        msg.push_str(&format!(" -> {s}"));
+        source = s.source();
+    }
+    msg
+}
+
+/// Reads the raw text of a perf log file.
+/// Used by the frontend as a fallback transport when native upload encounters an error.
+#[tauri::command]
+pub fn read_perf_log_file(file_path: String) -> Result<String, String> {
+    fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read perf log file '{file_path}': {e}"))
+}
+
+/// Marks a perf log file as uploaded by renaming it with the `.uploaded` extension.
+/// Used by the frontend after a successful browser-side fallback upload.
+#[tauri::command]
+pub fn mark_perf_log_uploaded(file_path: String) -> Result<(), String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        let uploaded_path = format!("{file_path}.uploaded");
+        if Path::new(&uploaded_path).exists() {
+            return Ok(());
+        }
+    }
+    let uploaded_path = format!("{file_path}.uploaded");
+    fs::rename(&file_path, &uploaded_path)
+        .map_err(|e| format!("Failed to rename perf log to .uploaded: {e}"))
+}
+
 /// Uploads a completed NDJSON session log file as a single POST request.
 ///
 /// The file is read entirely into memory, parsed into a JSON array (one
-/// element per NDJSON line), and sent as `application/json`.  This replaces
+/// element per NDJSON line), and sent as `application/json`. This replaces
 /// the previous pattern of hundreds of individual telemetry batches, keeping
 /// the remote DB at one row per session.
 #[tauri::command]
@@ -235,6 +270,20 @@ pub async fn upload_perf_log_session(
     api_base_url: String,
     api_key: String,
 ) -> Result<(), String> {
+    // Guard against the race where the file was deleted or renamed to .uploaded
+    // between the directory scan in upload_pending_perf_logs and this read.
+    // This is especially common on Windows where antivirus or OS file indexing
+    // can transiently lock/delete files. Treat a missing file as already handled.
+    let path = std::path::Path::new(&file_path);
+    if !path.exists() {
+        let uploaded = format!("{file_path}.uploaded");
+        if std::path::Path::new(&uploaded).exists() {
+            return Ok(()); // already uploaded and renamed
+        }
+        // File is simply gone — nothing to upload, not an error.
+        return Ok(());
+    }
+
     // Read and parse the NDJSON file.
     let raw = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read perf log '{file_path}': {e}"))?;
@@ -249,7 +298,9 @@ pub async fn upload_perf_log_session(
         .collect();
 
     if entries.is_empty() {
-        // Nothing to upload — not an error.
+        // Nothing to upload — mark as uploaded to avoid reprocessing.
+        let uploaded_path = format!("{file_path}.uploaded");
+        let _ = fs::rename(&file_path, &uploaded_path);
         return Ok(());
     }
 
@@ -259,7 +310,10 @@ pub async fn upload_perf_log_session(
     );
 
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .user_agent(format!("Clypra-Desktop/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(45))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
@@ -279,41 +333,69 @@ pub async fn upload_perf_log_session(
         .map_err(|e| format!("Failed to finish perf-log gzip stream: {e}"))?;
     let compressed_bytes = compressed.len();
 
-    let mut request = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Content-Encoding", "gzip")
-        .header("X-Clypra-Perf-Uncompressed-Bytes", uncompressed_bytes.to_string())
-        .body(compressed);
+    let max_attempts = 3;
+    let mut last_err = String::new();
 
-    if !api_key.is_empty() {
-        request = request
-            .header("X-API-Key", &api_key)
-            .header("X-Clypra-Client", "clypra-desktop-v1");
+    for attempt in 1..=max_attempts {
+        let is_last_attempt = attempt == max_attempts;
+        // Try gzip on attempts 1 and 2; attempt 3 falls back to uncompressed JSON
+        let use_gzip = attempt < max_attempts;
+
+        let mut request = client
+            .post(&url)
+            .header("Content-Type", "application/json");
+
+        if !api_key.is_empty() {
+            request = request
+                .header("X-API-Key", &api_key)
+                .header("X-Clypra-Client", "clypra-desktop-v1");
+        }
+
+        let request = if use_gzip {
+            request
+                .header("Content-Encoding", "gzip")
+                .header("X-Clypra-Perf-Uncompressed-Bytes", uncompressed_bytes.to_string())
+                .body(compressed.clone())
+        } else {
+            request.body(json.clone())
+        };
+
+        eprintln!("[perf_log] Attempt {}/{} mode={} sending to {}", attempt, max_attempts, if use_gzip { "gzip" } else { "raw" }, url);
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status();
+                eprintln!("[perf_log] Attempt {} received status: {}", attempt, status);
+                if status.is_success() {
+                    let uploaded_path = format!("{file_path}.uploaded");
+                    let _ = fs::rename(&file_path, &uploaded_path);
+                    return Ok(());
+                } else {
+                    let body_text = response.text().await.unwrap_or_default();
+                    eprintln!("[perf_log] Attempt {} rejected: {} - {}", attempt, status, body_text);
+                    last_err = format!(
+                        "Upload rejected — HTTP {status} (attempt {attempt}/{max_attempts}, mode={}, entries={}, raw_bytes={}): {body_text}",
+                        if use_gzip { "gzip" } else { "raw_json" },
+                        entries.len(), uncompressed_bytes
+                    );
+                }
+            }
+            Err(e) => {
+                let formatted = format_reqwest_error(&e);
+                eprintln!("[perf_log] Attempt {} failed: {}", attempt, formatted);
+                last_err = format!(
+                    "Upload request failed (attempt {attempt}/{max_attempts}, mode={}, entries={}, raw_bytes={}, gzip_bytes={}): {formatted}",
+                    if use_gzip { "gzip" } else { "raw_json" },
+                    entries.len(), uncompressed_bytes, compressed_bytes
+                );
+            }
+        }
+
+        if !is_last_attempt {
+            tokio::time::sleep(std::time::Duration::from_millis(1000 * attempt as u64)).await;
+        }
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!(
-            "Upload request failed after gzip compression (entries={}, raw_bytes={}, gzip_bytes={}): {e}",
-            entries.len(), uncompressed_bytes, compressed_bytes
-        ))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Upload rejected — HTTP {status} (entries={}, raw_bytes={}, gzip_bytes={}): {body}",
-            entries.len(), uncompressed_bytes, compressed_bytes
-        ));
-    }
-
-    // Mark as uploaded by renaming extension so next launch doesn't re-upload it.
-    let uploaded_path = format!("{file_path}.uploaded");
-    let _ = fs::rename(&file_path, &uploaded_path);
-
-    Ok(())
+    Err(last_err)
 }
 
 /// Uploads any pending (un-uploaded) session files from previous runs.
@@ -359,7 +441,16 @@ pub async fn upload_pending_perf_logs(
                 uploaded_count += 1;
             }
             Err(e) => {
-                eprintln!("[perf_log] Pending session upload failed for '{file_path}': {e}");
+                // Only log genuinely unexpected errors. Missing-file errors are
+                // normal on Windows — the file may have been deleted or renamed
+                // by the OS, antivirus, or a concurrent purge between the
+                // directory scan and the upload attempt.
+                let is_not_found = e.contains("cannot find the file")
+                    || e.contains("No such file")
+                    || e.contains("os error 2");
+                if !is_not_found {
+                    eprintln!("[perf_log] Pending session upload failed for '{file_path}': {e}");
+                }
             }
         }
     }

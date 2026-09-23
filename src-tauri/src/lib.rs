@@ -28,8 +28,9 @@ use diagnostics::crash_handler::{
     get_unreported_crashes, mark_crash_reported, purge_crash_reports,
 };
 use diagnostics::{
-    append_perf_log_entries, close_perf_log_session, list_perf_log_files, open_perf_log_session,
-    purge_perf_logs, upload_pending_perf_logs, upload_perf_log_session,
+    append_perf_log_entries, close_perf_log_session, list_perf_log_files, mark_perf_log_uploaded,
+    open_perf_log_session, purge_perf_logs, read_perf_log_file, upload_pending_perf_logs,
+    upload_perf_log_session,
 };
 use thumbnail_engine::init_thumbnail_engine;
 
@@ -116,10 +117,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             diagnostics::initialize(app.handle());
-            // macOS uses the real traffic lights and native window corner
-            // treatment with an overlay title bar. Windows/Linux switch to
-            // borderless mode so the shared custom controls stay integrated
-            // with the app bar.
+            // Use the operating system's window chrome everywhere. Besides
+            // restoring native close/minimize/maximize behavior, this keeps
+            // title-bar controls outside the editor layout so they cannot
+            // displace toolbar actions when a window changes state.
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 window
@@ -127,13 +128,6 @@ pub fn run() {
                     .map_err(|error| {
                         format!("failed to enable macOS title bar overlay: {error}")
                     })?;
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            if let Some(window) = app.get_webview_window("main") {
-                window
-                    .set_decorations(false)
-                    .map_err(|error| format!("failed to enable custom title bar: {error}"))?;
             }
 
             // Build desktop application menu with event-driven Undo/Redo.
@@ -517,6 +511,8 @@ pub fn run() {
             upload_pending_perf_logs,
             list_perf_log_files,
             purge_perf_logs,
+            read_perf_log_file,
+            mark_perf_log_uploaded,
             // Phone ↔ laptop file transfer (LocalSend protocol)
             get_transfer_service_status,
             get_discovered_devices,
