@@ -46,6 +46,26 @@ export interface TelemetryHardwareContext {
   isHybridGpu?: boolean;
 }
 
+/**
+ * Software adapters must never be counted as Intel/AMD/NVIDIA hardware.
+ * Windows reports the Microsoft Basic Render Driver through D3D12, which used
+ * to match the generic Intel fallback in some fleet reports.
+ */
+function classifyGpuVendor(
+  adapterName: string,
+): TelemetryHardwareContext["gpuVendor"] {
+  if (/microsoft basic render driver|swiftshader|llvmpipe|software renderer|warp/i.test(adapterName)) {
+    return "software";
+  }
+  if (/Apple/i.test(adapterName)) return "apple";
+  if (/NVIDIA/i.test(adapterName)) return "nvidia";
+  if (/AMD|Radeon/i.test(adapterName)) return "amd";
+  if (/Intel/i.test(adapterName)) return "intel";
+  if (/Mali/i.test(adapterName)) return "arm";
+  if (/Adreno|Qualcomm/i.test(adapterName)) return "qualcomm";
+  return "unknown";
+}
+
 export interface TelemetryVideoProfile {
   container: "mp4" | "mov" | "webm" | "mkv";
   codec: "h264" | "hevc" | "av1" | "vp9" | "prores422" | "prores4444";
@@ -614,8 +634,11 @@ const SLEEP_DISCONTINUITY_THRESHOLD_MS = 1500; // Discard time gaps > 1.5s as sl
 const MAX_LATENCY_ANOMALIES_PER_MINUTE = 10;
 /** Maximum individual dropped/stale/cancelled frame samples emitted per minute. */
 const MAX_DROP_ANOMALIES_PER_MINUTE = 10;
-/** Maximum individual seek latency anomalies emitted per minute. */
-const MAX_SEEK_ANOMALIES_PER_MINUTE = 10;
+/**
+ * Maximum individual seek anomalies emitted per minute. The rollup keeps the
+ * distribution; individual samples are only for representative outliers.
+ */
+const MAX_SEEK_ANOMALIES_PER_MINUTE = 3;
 /** Window duration for anomaly quota replenishment (1 minute). */
 const ANOMALY_QUOTA_WINDOW_MS = 60000;
 /** Minimum interval between intermediate superseded scrub drag events (max 2/sec). */
@@ -1449,16 +1472,11 @@ class TelemetryCollector {
     const hw = this.initHardwareContext();
     if (nativeGpu.adapterName) {
       hw.gpuModel = nativeGpu.adapterName;
-      if (/Apple/i.test(nativeGpu.adapterName)) hw.gpuVendor = "apple";
-      else if (/NVIDIA/i.test(nativeGpu.adapterName)) hw.gpuVendor = "nvidia";
-      else if (/AMD|Radeon/i.test(nativeGpu.adapterName)) hw.gpuVendor = "amd";
-      else if (/Intel/i.test(nativeGpu.adapterName)) hw.gpuVendor = "intel";
-      else if (/Mali/i.test(nativeGpu.adapterName)) hw.gpuVendor = "arm";
-      else if (/Adreno|Qualcomm/i.test(nativeGpu.adapterName))
-        hw.gpuVendor = "qualcomm";
+      hw.gpuVendor = classifyGpuVendor(nativeGpu.adapterName);
+      if (hw.gpuVendor === "software") hw.graphicsBackend = "software";
     }
 
-    if (nativeGpu.backend) {
+    if (nativeGpu.backend && hw.gpuVendor !== "software") {
       const b = nativeGpu.backend.toLowerCase();
       if (b.includes("metal")) hw.graphicsBackend = "metal";
       else if (b.includes("dx12") || b.includes("d3d12"))
@@ -1513,12 +1531,8 @@ class TelemetryCollector {
               (gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) as string) ||
               "";
             gpuModel = renderer;
-            if (/Apple/i.test(renderer)) gpuVendor = "apple";
-            else if (/NVIDIA/i.test(renderer)) gpuVendor = "nvidia";
-            else if (/AMD|Radeon/i.test(renderer)) gpuVendor = "amd";
-            else if (/Intel/i.test(renderer)) gpuVendor = "intel";
-            else if (/Mali/i.test(renderer)) gpuVendor = "arm";
-            else if (/Adreno|Qualcomm/i.test(renderer)) gpuVendor = "qualcomm";
+            gpuVendor = classifyGpuVendor(renderer);
+            if (gpuVendor === "software") graphicsBackend = "software";
           }
         }
       } catch {

@@ -77,7 +77,8 @@ export type PerfLogKind =
   | "worker-rollup"
   | "animation-eval"
   | "worker-error"
-  | "project-session-load";
+  | "project-session-load"
+  | "project-session-close";
 
 export interface PerfLogEntry {
   kind: PerfLogKind;
@@ -93,6 +94,25 @@ interface PerfLogSessionInfo {
   sessionId: string;
   filePath: string;
   openedAtEpochMs: number;
+}
+
+interface MediaRuntimeStatus {
+  available: boolean;
+  bundled: boolean;
+  ffmpegVersion: string | null;
+}
+
+/**
+ * Native sync snapshots contain an observation timestamp which changes even
+ * when the metrics do not. Exclude it so idle sessions do not archive the
+ * same counters every interval.
+ */
+function nativeSyncFingerprint(snapshot: unknown): string {
+  if (!snapshot || typeof snapshot !== "object") return JSON.stringify(snapshot);
+  const stable = { ...(snapshot as Record<string, unknown>) };
+  delete stable.timestamp_epoch_ms;
+  delete stable.timestampEpochMs;
+  return JSON.stringify(stable);
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -130,6 +150,8 @@ class PerfLogService {
   private closeInFlight: Promise<void> | null = null;
   /** Peak process RSS observed since the current session opened (MB). */
   private peakMemoryMb: number = 0;
+  /** Last native-sync content persisted in this session (timestamps excluded). */
+  private lastNativeSyncFingerprint: string | null = null;
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -163,6 +185,7 @@ class PerfLogService {
       this.sessionId = info.sessionId;
       this.filePath = info.filePath;
       this.peakMemoryMb = 0; // reset peak for the new session
+      this.lastNativeSyncFingerprint = null;
 
       this.startFlushTimer();
       this.startSyncPollTimer();
@@ -197,12 +220,11 @@ class PerfLogService {
         timestampEpochMs: Date.now(),
         payload: {
           marker: "session-open",
-          userAgent:
-            typeof navigator !== "undefined" ? navigator.userAgent : "unknown",
           appVersion: await getAppVersion(),
           appEnvironment: import.meta.env.DEV ? "beta" : "production",
         },
       });
+      void this.captureMediaRuntimeStatus(this.sessionId);
 
       // Asynchronously retry uploading any pending session logs from previous runs / offline sessions.
       void this.retryPendingUploads();
@@ -680,11 +702,43 @@ class PerfLogService {
     }
   }
 
+  /**
+   * Capture the selected media-runtime class once per session. Paths and
+   * diagnostics are intentionally excluded: fleet analysis only needs to
+   * distinguish Clypra's tested sidecar from a developer/system fallback.
+   */
+  private async captureMediaRuntimeStatus(sessionId: string): Promise<void> {
+    try {
+      const status = await tauriInvoke<MediaRuntimeStatus>(
+        "get_media_runtime_status",
+      );
+      this.enqueue({
+        kind: "native-diagnostic",
+        sessionId,
+        timestampEpochMs: Date.now(),
+        payload: {
+          marker: "media-runtime",
+          ffmpegRuntime: status.available
+            ? status.bundled
+              ? "bundled"
+              : "system"
+            : "unavailable",
+          ffmpegVersion: status.ffmpegVersion ?? undefined,
+        },
+      });
+    } catch {
+      // The telemetry contract remains optional in non-Tauri test/web builds.
+    }
+  }
+
   private async pollNativeSyncMetrics(): Promise<void> {
     if (!this.sessionId) return;
     try {
       const snapshot = await tauriInvoke<unknown>("get_sync_metrics_snapshot");
       if (!snapshot) return;
+      const fingerprint = nativeSyncFingerprint(snapshot);
+      if (fingerprint === this.lastNativeSyncFingerprint) return;
+      this.lastNativeSyncFingerprint = fingerprint;
       this.enqueue({
         kind: "native-sync",
         sessionId: this.sessionId,

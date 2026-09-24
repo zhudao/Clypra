@@ -86,7 +86,21 @@ type SessionLoadStage =
 
 type SessionLoadTimings = Partial<Record<SessionLoadStage, number>>;
 
-const CRITICAL_NATIVE_RASTER_BOUNDARIES = 3;
+type SessionCloseStage =
+  | "cancel-work"
+  | "stop-playback"
+  | "stop-audio"
+  | "release-media"
+  | "release-transport"
+  | "release-rendering"
+  | "reset-stores";
+
+type SessionCloseTimings = Partial<Record<SessionCloseStage, number>>;
+
+// The first boundary is the only one that can affect the initially visible
+// frame. Every additional boundary grows project-open time on older Intel
+// systems because it serializes canvas rasterization and native texture upload.
+const CRITICAL_NATIVE_RASTER_BOUNDARIES = 1;
 
 /**
  * Project Session State
@@ -145,8 +159,10 @@ export class ProjectSession {
   private _rafIds = new Set<number>();
   private _nativeRasterIdlePrewarmTimer: ReturnType<typeof setTimeout> | null =
     null;
+  private _fontIdlePrewarmTimer: ReturnType<typeof setTimeout> | null = null;
   private _nativeRasterPrewarmInFlight: Promise<boolean> | null = null;
   private _initializationTimingsMs: SessionLoadTimings = {};
+  private _disposalTimingsMs: SessionCloseTimings = {};
 
   constructor(
     projectId: string,
@@ -222,6 +238,11 @@ export class ProjectSession {
   /** Content-free timing evidence for the current project-open sequence. */
   get initializationTimingsMs(): Readonly<SessionLoadTimings> {
     return { ...this._initializationTimingsMs };
+  }
+
+  /** Content-free timing evidence for the current project-close sequence. */
+  get disposalTimingsMs(): Readonly<SessionCloseTimings> {
+    return { ...this._disposalTimingsMs };
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────
@@ -409,14 +430,10 @@ export class ProjectSession {
           await import("@/core/render/nativeRasterBridge");
         this._nativeRasterBridge = new NativeRasterBridge();
 
-        // ── Project-scoped font prewarm ──────────────────────────────────
-        // Extract every font family used by text clips in this project and
-        // warm both the browser (document.fonts) and the native Rust registry
-        // in parallel. This ensures the subsequent _prewarmNativeRasterAssets
-        // rasterization loop hits the fast-path cache and fontWaitMs = 0ms.
-        await this._measureInitializationStage("fonts", () =>
-          this._prewarmProjectFonts(),
-        );
+        // Warming every project's font up front can take seconds on older
+        // Windows hardware. The first raster boundary still registers the
+        // font it needs; all other fonts warm once the editor is usable.
+        this._scheduleDeferredProjectFontPrewarm();
 
         // Only the first visible boundaries are part of the open barrier.
         // Warming every future text/image boundary made project-open cost grow
@@ -490,55 +507,58 @@ export class ProjectSession {
     }
 
     this._state = "disposing";
+    const disposalStartedAt = performance.now();
+    lifecycleMonitor.record("PROJECT_CLOSE_START", {
+      projectId: this.projectId,
+      sessionId: this.sessionId,
+    });
 
     try {
-      // Deterministic teardown order (critical for avoiding race conditions)
-
-      // 1. Cancel all async tasks (prevent new work)
-      await this._cancelAsyncTasks();
-
-      // 2. Stop playback (prevent time updates)
-      if (this._playback) {
-        this._playback.stop();
-      }
-
-      // 3. Teardown audio engine
-      if (this._audioEngine) {
-        stopSharedAudioEngine();
-        this._audioEngine = null;
-      }
-
-      // 4. Release media resources (video elements, audio nodes)
-      await this._releaseMediaResources();
-
-      // 5. Teardown transport authority (disposes contexts)
-      if (this._transportAuthority) {
-        this._transportAuthority.dispose();
+      // Stop producers before tearing down the resources they can touch. The
+      // remaining release operations are measured individually so a slow close
+      // can be attributed to media, audio, rendering, or UI-store cleanup.
+      await this._measureDisposalStage("cancel-work", () =>
+        this._cancelAsyncTasks(),
+      );
+      await this._measureDisposalStage("stop-playback", async () => {
+        this._playback?.stop();
+      });
+      await this._measureDisposalStage("stop-audio", async () => {
+        if (this._audioEngine) {
+          stopSharedAudioEngine();
+          this._audioEngine = null;
+        }
+      });
+      await this._measureDisposalStage("release-media", () =>
+        this._releaseMediaResources(),
+      );
+      await this._measureDisposalStage("release-transport", async () => {
+        this._transportAuthority?.dispose();
         this._transportAuthority = null;
         this._programContext = null;
         this._sourceContext = null;
-      }
-
-      // 6. Teardown render runtime (GPU resources, WebGL contexts)
-      this._nativeRasterBridge?.dispose();
-      this._nativeRasterBridge = null;
+      });
+      await this._measureDisposalStage("release-rendering", async () => {
+        this._nativeRasterBridge?.dispose();
+        this._nativeRasterBridge = null;
+        if (this._renderRuntime) {
+          this._renderRuntime.teardown();
+          this._renderRuntime = null;
+        }
+      });
       if (this._nativeRasterIdlePrewarmTimer !== null) {
         clearTimeout(this._nativeRasterIdlePrewarmTimer);
         this._nativeRasterIdlePrewarmTimer = null;
       }
-      if (this._renderRuntime) {
-        this._renderRuntime.teardown();
-        this._renderRuntime = null;
+      if (this._fontIdlePrewarmTimer !== null) {
+        clearTimeout(this._fontIdlePrewarmTimer);
+        this._fontIdlePrewarmTimer = null;
       }
-
-      // 7. Cancel all RAF loops
       this._cancelRAFLoops();
-
-      // 8. Release references to global singletons (actual disposal handled by destroyRuntime)
       this._playback = null;
-
-      // 9. Reset stores
-      await this._resetStores();
+      await this._measureDisposalStage("reset-stores", () =>
+        this._resetStores(),
+      );
 
       this._state = "disposed";
 
@@ -547,12 +567,42 @@ export class ProjectSession {
         projectId: this.projectId,
         sessionId: this.sessionId,
       });
+      const detail = {
+        durationMs: Math.round(Math.max(0, performance.now() - disposalStartedAt)),
+        stagesMs: this.disposalTimingsMs,
+      };
+      lifecycleMonitor.record("PROJECT_CLOSE_COMPLETE", {
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+        detail,
+      });
+      perfLogService.enqueue({
+        kind: "project-session-close",
+        sessionId: this.sessionId,
+        timestampEpochMs: Date.now(),
+        payload: { stage: "complete", ...detail },
+      });
       resourceTracker.release(this.sessionId);
 
       this._notifyListeners({ type: "disposed", session: this });
     } catch (error) {
       console.error(`[ProjectSession] Disposal error:`, error);
       this._state = "disposed"; // Mark as disposed even on error
+      const detail = {
+        durationMs: Math.round(Math.max(0, performance.now() - disposalStartedAt)),
+        stagesMs: this.disposalTimingsMs,
+      };
+      lifecycleMonitor.record("PROJECT_CLOSE_FAILED", {
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+        detail,
+      });
+      perfLogService.enqueue({
+        kind: "project-session-close",
+        sessionId: this.sessionId,
+        timestampEpochMs: Date.now(),
+        payload: { stage: "failed", ...detail },
+      });
       // Still attempt telemetry on error path
       lifecycleMonitor.record("SESSION_DISPOSE", {
         projectId: this.projectId,
@@ -722,6 +772,35 @@ export class ProjectSession {
       // media paths, or text content.
       perfLogService.enqueue({
         kind: "project-session-load",
+        sessionId: this.sessionId,
+        timestampEpochMs: Date.now(),
+        payload: detail,
+      });
+    }
+  }
+
+  private async _measureDisposalStage<T>(
+    stage: SessionCloseStage,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = performance.now();
+    try {
+      return await operation();
+    } finally {
+      const durationMs = Math.max(0, performance.now() - startedAt);
+      this._disposalTimingsMs[stage] = durationMs;
+      const detail = {
+        stage,
+        durationMs: Math.round(durationMs),
+        projectSessionId: this.sessionId,
+      };
+      lifecycleMonitor.record("PROJECT_CLOSE_STAGE", {
+        projectId: this.projectId,
+        sessionId: this.sessionId,
+        detail,
+      });
+      perfLogService.enqueue({
+        kind: "project-session-close",
         sessionId: this.sessionId,
         timestampEpochMs: Date.now(),
         payload: detail,
@@ -918,6 +997,22 @@ export class ProjectSession {
 
   private _deferredNativeRasterStartIndex: number | null = null;
 
+  private _scheduleDeferredProjectFontPrewarm(): void {
+    if (this._fontIdlePrewarmTimer !== null) return;
+    this._fontIdlePrewarmTimer = setTimeout(() => {
+      this._fontIdlePrewarmTimer = null;
+      if (this._state !== "active") return;
+      void this._measureInitializationStage("fonts", () =>
+        this._prewarmProjectFonts(),
+      ).catch((error) => {
+        console.warn("[ProjectSession] Deferred font prewarm failed", {
+          projectId: this.projectId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, 250);
+  }
+
   private _scheduleDeferredNativeRasterPrewarm(startIndex: number): void {
     this._deferredNativeRasterStartIndex = startIndex;
   }
@@ -1048,6 +1143,7 @@ export class ProjectSession {
     videoElements: number;
     asyncTasks: number;
     rafLoops: number;
+    disposalTimingsMs: Readonly<SessionCloseTimings>;
   } {
     return {
       sessionId: this.sessionId,
@@ -1060,6 +1156,7 @@ export class ProjectSession {
         : 0,
       asyncTasks: this._asyncTasks.size,
       rafLoops: this._rafIds.size,
+      disposalTimingsMs: this.disposalTimingsMs,
     };
   }
 }

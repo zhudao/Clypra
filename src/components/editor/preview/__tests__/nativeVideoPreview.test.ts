@@ -4,6 +4,7 @@ import {
   buildNativeFrameRequest,
   buildNativeVideoProjectRequest,
   getNativePreviewBlockers,
+  getNativePreviewReadinessBlockers,
   getNativeFrameRequestKey,
   isRenderableNativePreviewFrame,
 } from "../nativeVideoPreview";
@@ -56,6 +57,22 @@ function makeScene(
 }
 
 describe("buildNativeVideoProjectRequest", () => {
+  it("applies the source orientation tag before the authored rotation", () => {
+    const request = buildNativeVideoProjectRequest(makeScene([
+      makeVideoLayer({ sourceRotation: 90, rotation: 15 }),
+    ]));
+
+    expect(request?.layers[0]?.rotation).toBe(105);
+  });
+
+  it("normalizes a composed source orientation and authored rotation", () => {
+    const request = buildNativeVideoProjectRequest(makeScene([
+      makeVideoLayer({ sourceRotation: 270, rotation: 180 }),
+    ]));
+
+    expect(request?.layers[0]?.rotation).toBe(90);
+  });
+
   it("maps a supported two-video transition into the native graph", () => {
     const outgoing = makeVideoLayer({ layerId: "outgoing", clipId: "outgoing" });
     const incoming = makeVideoLayer({ layerId: "incoming", clipId: "incoming", sourcePath: "/Users/test/next.mp4" });
@@ -956,6 +973,21 @@ describe("buildNativeVideoProjectRequest", () => {
       lutIntensity: 0.65,
       lutSize: 33,
     });
+  });
+});
+
+describe("native preview readiness", () => {
+  it("separates pending raster assets from unsupported native contracts", () => {
+    expect(
+      getNativePreviewReadinessBlockers([
+        "Still image image-1 is waiting for its alpha-preserving native raster frame.",
+        "Video effect blur on media layer clip-1 has no native compositor implementation.",
+        "The animated or gradient background has not produced its native raster asset yet.",
+      ]),
+    ).toEqual([
+      "Still image image-1 is waiting for its alpha-preserving native raster frame.",
+      "The animated or gradient background has not produced its native raster asset yet.",
+    ]);
   });
 });
 

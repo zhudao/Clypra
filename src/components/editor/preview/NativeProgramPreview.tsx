@@ -115,6 +115,7 @@ import { buildNativePlaybackSnapshotKey } from "@/core/playback/nativePlaybackSn
 import {
   buildNativeFrameRequest,
   getNativePreviewBlockers,
+  getNativePreviewReadinessBlockers,
   getNativeFrameRequestKey,
   isRenderableNativePreviewFrame,
   isExpectedStaleNativePreviewError,
@@ -211,6 +212,19 @@ function getReusableCanvasImageData(
  * DPR would otherwise make every RGBA frame expensive.
  */
 const WEBVIEW_MAX_OUTPUT_DIMENSION = 960;
+const LOW_POWER_WEBVIEW_MAX_OUTPUT_DIMENSION = 720;
+
+function getWebViewReadbackLimit(): number {
+  // A full RGBA frame crosses the Rust/WebView boundary on this path. Four or
+  // fewer logical cores is a reliable low-power signal on the affected Intel
+  // laptops; reducing the proxy from 960px to 720px cuts transfer bytes by
+  // 44% while retaining a useful interactive preview.
+  return typeof navigator !== "undefined" &&
+    typeof navigator.hardwareConcurrency === "number" &&
+    navigator.hardwareConcurrency <= 4
+    ? LOW_POWER_WEBVIEW_MAX_OUTPUT_DIMENSION
+    : WEBVIEW_MAX_OUTPUT_DIMENSION;
+}
 
 function capWebViewRenderTarget(target: {
   width: number;
@@ -218,8 +232,9 @@ function capWebViewRenderTarget(target: {
   quality: NativeFrameRequest["quality"];
 }): typeof target {
   const largest = Math.max(target.width, target.height);
-  if (largest <= WEBVIEW_MAX_OUTPUT_DIMENSION) return target;
-  const scale = WEBVIEW_MAX_OUTPUT_DIMENSION / largest;
+  const limit = getWebViewReadbackLimit();
+  if (largest <= limit) return target;
+  const scale = limit / largest;
   return {
     ...target,
     width: Math.max(1, Math.floor(target.width * scale)),
@@ -875,9 +890,9 @@ export const NativeProgramPreview: React.FC = () => {
               clearInterval(pollTimer);
               pollTimer = null;
             }
-            setNativeSurfaceError(
-              `GPU initialization failed: ${status.failureReason || "Unknown failure"}`,
-            );
+            const message = `GPU initialization failed: ${status.failureReason || "Unknown failure"}`;
+            nativeSurfaceErrorRef.current = message;
+            setNativeSurfaceError(message);
           }
         })
         .catch(() => {
@@ -907,7 +922,9 @@ export const NativeProgramPreview: React.FC = () => {
     void listenForGpuFailed((error) => {
       if (!disposed) {
         // Surface setup effect will gate and show a diagnostic.
-        setNativeSurfaceError(`GPU initialization failed: ${error}`);
+        const message = `GPU initialization failed: ${error}`;
+        nativeSurfaceErrorRef.current = message;
+        setNativeSurfaceError(message);
         if (pollTimer) {
           clearInterval(pollTimer);
           pollTimer = null;
@@ -1333,6 +1350,7 @@ export const NativeProgramPreview: React.FC = () => {
     let lastRenderLoopError = "";
     let lastLoggedMissingTextSignature = "";
     let lastLoggedTextDropSignature = "";
+    let nativeReadinessQueueKey = "";
     const nativeTextPrefetchInFlight =
       nativePrefetchStateRef.current.textInFlight;
     const nativeTextPrefetchCompleted =
@@ -2758,16 +2776,42 @@ export const NativeProgramPreview: React.FC = () => {
           ? getNativeFrameRequestKey(nativePlaybackRequest)
           : nativeRequestKey;
         const nativeOnlyMode = isTauriRuntime() && NATIVE_PREVIEW_ONLY;
-        const nativeOnlySceneBlocked = nativeOnlyMode && !nativeRequest;
+        const nativeBlockers = nativeRequest
+          ? []
+          : getNativePreviewBlockers(scene, nativeRasterLayers);
+        const nativeReadinessBlockers =
+          getNativePreviewReadinessBlockers(nativeBlockers);
+        const nativeUnsupportedBlockers = nativeBlockers.filter(
+          (blocker) => !nativeReadinessBlockers.includes(blocker),
+        );
+        // A raster is an asynchronous dependency, not an unsupported scene.
+        // Keep the canvas representation usable while the bridge publishes its
+        // asset, then request a retry instead of hard-blocking native preview.
+        const nativeOnlySceneBlocked =
+          nativeOnlyMode && !nativeRequest && nativeUnsupportedBlockers.length > 0;
+        if (nativeReadinessBlockers.length > 0) {
+          const readinessKey = nativeReadinessBlockers.join("\n");
+          if (nativeReadinessQueueKey !== readinessKey) {
+            nativeReadinessQueueKey = readinessKey;
+            telemetryCollector.recordFallbackEvent(
+              "native-wgpu-preview",
+              "webview-canvas-readiness-queue",
+              "native-raster-asset-pending",
+            );
+          }
+          window.setTimeout(() => {
+            if (isActive) scheduleNextFrame();
+          }, 50);
+        } else {
+          nativeReadinessQueueKey = "";
+        }
         // Audit 4.6 fix: read nativeSurfaceReadyRef.current (imperative ref) rather than
         // the React state `nativeSurfaceReady` to avoid having the state in the effect deps.
         const nativeSurfaceReadyNow = nativeSurfaceReadyRef.current;
         const nativeSurfaceErrorNow = nativeSurfaceErrorRef.current;
         if (nativeOnlyMode) {
           const blockers = [
-            ...(!nativeRequest
-              ? getNativePreviewBlockers(scene, nativeRasterLayers)
-              : []),
+            ...nativeUnsupportedBlockers,
             ...(nativeSurfaceErrorNow
               ? [
                   `The retained native wgpu surface failed to initialize: ${nativeSurfaceErrorNow}`,
@@ -2791,7 +2835,7 @@ export const NativeProgramPreview: React.FC = () => {
               telemetryCollector.recordFallbackEvent(
                 "native-wgpu-preview",
                 "native-preview-blocked",
-                `${blockedSubsystem}-unsupported-or-unready`,
+                `${blockedSubsystem}-unsupported`,
               );
               toast.error(["Native-only preview", ...blockers].join("\n"), {
                 id: "native-only-preview-blocked",
@@ -2819,6 +2863,21 @@ export const NativeProgramPreview: React.FC = () => {
         const qualificationForcesWebView =
           qualification.status === "running" &&
           qualification.path === "webview";
+        // Do not make the CPU readback path race native-surface startup. On
+        // affected macOS sessions the temporary fallback spent ~700ms moving a
+        // full RGBA frame through IPC, even though the retained surface became
+        // usable moments later. Keep the neutral/last canvas frame until that
+        // transition completes; explicit GPU errors and qualification runs
+        // remain eligible for the compatibility renderer.
+        const deferWebViewFallbackForNativeStartup =
+          isTauriRuntime() &&
+          isPlaying &&
+          Boolean(nativePlaybackRequest) &&
+          nativeAudioClockReady &&
+          !nativeSurfaceUsable &&
+          !nativeSurfaceErrorNow &&
+          !qualificationForcesWebView &&
+          nativeUnsupportedBlockers.length === 0;
         const nativeSurfaceOwnsCurrentFrame =
           nativeSurfaceShown &&
           isPlaying &&
@@ -2836,7 +2895,8 @@ export const NativeProgramPreview: React.FC = () => {
         const nativeReadbackFallbackPath =
           isPlaying &&
           nativePlaybackPath &&
-          (!nativeSurfaceUsable || qualificationForcesWebView);
+          (!nativeSurfaceUsable || qualificationForcesWebView) &&
+          !deferWebViewFallbackForNativeStartup;
         const telemetryScenario =
           qualification.status === "running"
             ? "qualification"
@@ -3510,7 +3570,8 @@ export const NativeProgramPreview: React.FC = () => {
           needsRender &&
           !nativeSurfaceShown &&
           !nativeOnlySceneBlocked &&
-          !nativeDirectSurfacePath
+          !nativeDirectSurfacePath &&
+          !deferWebViewFallbackForNativeStartup
         ) {
           try {
             // Hold the previous native image while a new seek is decoding. It

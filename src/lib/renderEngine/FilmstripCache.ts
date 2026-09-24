@@ -32,6 +32,7 @@ import { FilmstripTileCache } from "../filmstrip/FilmstripTileCache";
 import { generateViewportTileAddresses, FILMSTRIP_DENSITY_TIERS, type FilmstripTileAddress } from "../filmstrip/filmstripTiers";
 import { timeToPixel, pixelToTime } from "../timeline/timelineViewport";
 import { recordCacheApply } from "./filmstripMetrics";
+import { filmstripTelemetry, type FilmstripSourceType } from "../filmstrip/filmstripTelemetry";
 
 
 interface FilmstripCacheEntry {
@@ -47,7 +48,11 @@ interface FilmstripCacheEntry {
   tileAddresses: FilmstripTileAddress[];
   /** Current spatial tier */
   spatialTier: SpatialTier;
-  /** Derived composite key of all layout, viewport, and geometry inputs */
+  /**
+   * Derived key for media work. Presentation geometry deliberately does not
+   * participate: the canvas can resize for every zoom animation frame without
+   * requiring new thumbnails when the requested tile addresses are unchanged.
+   */
   layoutKey: string;
 }
 
@@ -55,9 +60,7 @@ function computeFilmstripLayoutKey(options: {
   clipId: string;
   spatialTier: SpatialTier;
   epochId: RenderEpochId;
-  pixelsPerSecond: number;
   clipStartTime: number;
-  clipWidthPx: number;
   trimIn: number;
   trimOut: number;
   tileAddresses: readonly FilmstripTileAddress[];
@@ -65,7 +68,7 @@ function computeFilmstripLayoutKey(options: {
   const addrSig = options.tileAddresses
     .map((a) => `${a.zoomTier}:${Math.round(a.timestamp * 1000)}`)
     .join(",");
-  return `${options.clipId}|${options.epochId}|${options.spatialTier}|${options.pixelsPerSecond}|${options.clipStartTime}|${Math.round(options.clipWidthPx)}|${options.trimIn}|${options.trimOut}|${addrSig}`;
+  return `${options.clipId}|${options.epochId}|${options.spatialTier}|${options.clipStartTime}|${options.trimIn}|${options.trimOut}|${addrSig}`;
 }
 
 interface PendingArtifact {
@@ -75,6 +78,13 @@ interface PendingArtifact {
 
 function isValidArtifact(artifact: TransportArtifact): boolean {
   return !!artifact.bitmap && artifact.bitmap.width > 0 && artifact.bitmap.height > 0;
+}
+
+function sourceToTelemetrySource(source?: string): FilmstripSourceType {
+  if (/disk|atlas/i.test(source ?? "")) return "disk_atlas";
+  if (/memory|cache/i.test(source ?? "")) return "memory_tier";
+  if (/fallback|pyramid/i.test(source ?? "")) return "pyramid_fallback";
+  return "fresh_decode";
 }
 
 interface ViewportFilmstripOptions {
@@ -159,6 +169,25 @@ function getTileWidthForTier(tier: SpatialTier): number {
   return widths[tier] ?? 72;
 }
 
+interface FilmstripRequestOptions {
+  clipId: string;
+  videoPath: string;
+  trimIn: number;
+  trimOut: number;
+  duration: number;
+  clipStartTime: number;
+  clipWidthPx: number;
+  spatialTier: SpatialTier;
+  epochId: RenderEpochId;
+  viewportScrollLeft: number;
+  viewportWidth: number;
+  pixelsPerSecond: number;
+  playheadTime?: number;
+  onUpdate: (artifacts: readonly TransportArtifact[]) => void;
+  /** Internal attribution retained when a wheel gesture is coalesced. */
+  requestCause?: "viewport" | "zoom";
+}
+
 export class FilmstripCache {
   private entries = new Map<string, FilmstripCacheEntry>();
   private memoryBudgetBytes: number;
@@ -176,6 +205,11 @@ export class FilmstripCache {
 
   /** Low-priority requests that populate only the shared tile cache. */
   private prefetchCancels = new Map<string, Set<() => void>>();
+  /** Latest visible request held while the zoom spring is still moving. */
+  private deferredZoomRequests = new Map<
+    string,
+    { options: FilmstripRequestOptions; timer: ReturnType<typeof setTimeout> }
+  >();
 
   constructor(memoryBudgetMB: number = 100) {
     this.memoryBudgetBytes = memoryBudgetMB * 1024 * 1024;
@@ -563,23 +597,9 @@ export class FilmstripCache {
     return artifacts;
   }
 
-  requestFilmstrip(options: {
-    clipId: string;
-    videoPath: string;
-    trimIn: number;
-    trimOut: number;
-    duration: number;
-    clipStartTime: number;
-    clipWidthPx: number;
-    spatialTier: SpatialTier;
-    epochId: RenderEpochId;
-    viewportScrollLeft: number;
-    viewportWidth: number;
-    pixelsPerSecond: number;
-    playheadTime?: number;
-    onUpdate: (artifacts: readonly TransportArtifact[]) => void;
-  }): void {
+  requestFilmstrip(options: FilmstripRequestOptions): void {
     const { clipId, epochId, onUpdate, videoPath, spatialTier, duration } = options;
+    const requestedAt = performance.now();
     this._cancelPrefetch(clipId);
 
     // Generate tile addresses using FIXED grid (not dynamic timestamps)
@@ -602,9 +622,7 @@ export class FilmstripCache {
       clipId,
       spatialTier,
       epochId,
-      pixelsPerSecond: options.pixelsPerSecond,
       clipStartTime: options.clipStartTime,
-      clipWidthPx: options.clipWidthPx,
       trimIn: options.trimIn,
       trimOut: options.trimOut,
       tileAddresses,
@@ -612,6 +630,21 @@ export class FilmstripCache {
 
     let keptArtifacts: TransportArtifact[] = [];
     const existing = this.entries.get(clipId);
+    // A wheel gesture can change tile coverage without crossing an SRP tier.
+    // Attribute it to zoom from the gesture source, not from tier changes alone.
+    const requestReason: "viewport" | "zoom" =
+      options.requestCause ??
+      (filmstripTelemetry.isZoomGestureActive() ||
+      (existing !== undefined && existing.spatialTier !== spatialTier)
+        ? "zoom"
+        : "viewport");
+    if (
+      requestReason === "zoom" &&
+      existing !== undefined &&
+      existing.spatialTier !== spatialTier
+    ) {
+      filmstripTelemetry.recordZoomTierTransition();
+    }
     if (existing) {
       if (existing.epochId !== epochId) {
         // Epoch changed: cancel the old request, clean up clip-level entry, but keep matching artifacts and do NOT invalidate global tile cache!
@@ -634,6 +667,16 @@ export class FilmstripCache {
         if (existing.layoutKey === layoutKey) {
           existing.lastViewportUpdate = Date.now();
           onUpdate([...existing.artifacts]);
+          return;
+        }
+
+        // Keep the last valid projection visible while wheel zoom is animating.
+        // Decoding every spring frame merely creates cancelled native requests;
+        // the final coalesced request below carries the latest tile coverage.
+        if (filmstripTelemetry.isZoomGestureActive()) {
+          existing.lastViewportUpdate = Date.now();
+          onUpdate([...existing.artifacts]);
+          this._deferZoomRequest(options);
           return;
         }
 
@@ -687,6 +730,7 @@ export class FilmstripCache {
         const cached = this.tileCache.getTile(addr);
         if (cached && isValidArtifact(cached.artifact)) {
           keptArtifacts.push(cached.artifact);
+          this._recordTileTelemetry(cached.artifact, "memory_tier", requestedAt, requestReason);
         } else {
           const fallback = this.tileCache.findBestFallback(
             clipId,
@@ -698,6 +742,7 @@ export class FilmstripCache {
           );
           if (fallback && isValidArtifact(fallback.artifact)) {
             keptArtifacts.push(fallback.artifact);
+            this._recordTileTelemetry(fallback.artifact, "pyramid_fallback", requestedAt, requestReason);
           }
         }
       }
@@ -815,6 +860,12 @@ export class FilmstripCache {
       }
 
       arrivedCount++;
+      this._recordTileTelemetry(
+        artifact,
+        sourceToTelemetrySource(artifact.source),
+        requestedAt,
+        requestReason,
+      );
 
       // Find the tile address this artifact belongs to
       const matchingAddr = currentEntry.tileAddresses.find(
@@ -897,6 +948,28 @@ export class FilmstripCache {
     };
   }
 
+  private _recordTileTelemetry(
+    artifact: TransportArtifact,
+    source: FilmstripSourceType,
+    requestedAt: number,
+    requestReason: "viewport" | "zoom",
+  ): void {
+    const nativeRequestMs = Math.max(0, artifact.nativeRequestMs ?? performance.now() - requestedAt);
+    const bitmapCreationMs = Math.max(0, artifact.bitmapCreationMs ?? 0);
+    filmstripTelemetry.record({
+      // No project ID or path: rendering coordinates only.
+      tileKey: `${artifact.spatialTier}:${Math.round(artifact.timestampMs)}`,
+      source,
+      cacheLookupMs: source === "memory_tier" ? Math.max(0, performance.now() - requestedAt) : 0,
+      ipcTransferMs: source === "fresh_decode" ? nativeRequestMs : 0,
+      decodeMs: 0,
+      bitmapCreationMs,
+      rasterPaintMs: 0,
+      totalTimeToVisibleMs: nativeRequestMs + bitmapCreationMs,
+      requestReason,
+    });
+  }
+
   /**
    * Get cached artifacts for a clip (immutable snapshot)
    */
@@ -909,6 +982,7 @@ export class FilmstripCache {
    */
   invalidateClip(clipId: string): void {
     this._cancelPrefetch(clipId);
+    this._cancelDeferredZoomRequest(clipId);
     const entry = this.entries.get(clipId);
     if (!entry) return;
 
@@ -933,6 +1007,9 @@ export class FilmstripCache {
    */
   dispose(): void {
     for (const clipId of this.prefetchCancels.keys()) this._cancelPrefetch(clipId);
+    for (const clipId of this.deferredZoomRequests.keys()) {
+      this._cancelDeferredZoomRequest(clipId);
+    }
 
     // Cancel pending RAF
     if (this.rafId !== null) {
@@ -974,6 +1051,33 @@ export class FilmstripCache {
         // Bitmap already closed or invalid
       }
     }
+  }
+
+  /**
+   * Coalesce visible media work until wheel input and its spring have settled.
+   * The timer retries while the gesture remains active, then dispatches exactly
+   * the last request with its zoom attribution intact.
+   */
+  private _deferZoomRequest(options: FilmstripRequestOptions): void {
+    this._cancelDeferredZoomRequest(options.clipId);
+    const timer = setTimeout(() => {
+      const pending = this.deferredZoomRequests.get(options.clipId);
+      if (!pending) return;
+      this.deferredZoomRequests.delete(options.clipId);
+      if (filmstripTelemetry.isZoomGestureActive()) {
+        this._deferZoomRequest(pending.options);
+        return;
+      }
+      this.requestFilmstrip({ ...pending.options, requestCause: "zoom" });
+    }, 80);
+    this.deferredZoomRequests.set(options.clipId, { options, timer });
+  }
+
+  private _cancelDeferredZoomRequest(clipId: string): void {
+    const pending = this.deferredZoomRequests.get(clipId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.deferredZoomRequests.delete(clipId);
   }
 
   private _evictLRU(excludeClipId?: string): void {

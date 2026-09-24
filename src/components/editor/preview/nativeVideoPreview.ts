@@ -1004,6 +1004,17 @@ function getNativeBodyEffect(
   };
 }
 
+/**
+ * Source orientation is metadata on the encoded frame, while `rotation` is an
+ * authoring transform.  The native compositor receives decoded pixels, so it
+ * must apply both transforms itself.  Keep the result in the compositor's
+ * canonical [0, 360) range so a user rotation cannot undo this distinction.
+ */
+function getNativeLayerRotation(layer: EvaluatedMediaLayer): number {
+  const rotation = (layer.rotation ?? 0) + (layer.sourceRotation ?? 0);
+  return ((rotation % 360) + 360) % 360;
+}
+
 function isSupportedNativeVideoLayer(
   layer: EvaluatedMediaLayer,
   mpgStack?: ReadonlyArray<{ type: string; params?: Record<string, unknown> }>,
@@ -1015,7 +1026,6 @@ function isSupportedNativeVideoLayer(
     (layer.clipKind !== "sticker" || isStaticSticker || isGifSticker) &&
     isNativeFileSource(layer.sourcePath) &&
     getNativeColorGrade(layer.adjustments, layer.colorGrade, layer.filter, layer.effects, mpgStack) !== null &&
-    (!layer.sourceRotation || layer.sourceRotation === 0) &&
     NATIVE_BLEND_MODES.has(layer.blendMode)
   );
 }
@@ -1126,7 +1136,7 @@ export function buildNativeVideoProjectRequest(
       y: layer.y,
       width: layer.width,
       height: layer.height,
-      rotation: layer.rotation,
+      rotation: getNativeLayerRotation(layer),
       opacity: isMaskReady ? layer.opacity : 0,
       zIndex: Math.round(layer.zIndex),
       blendMode: layer.blendMode,
@@ -1336,6 +1346,21 @@ export function getNativePreviewBlockers(
 }
 
 /**
+ * Temporary blockers are produced by asynchronous raster preparation, not by
+ * an unsupported scene. Callers can keep their compatible fallback visible
+ * and retry native presentation when these are the only blockers.
+ */
+export function getNativePreviewReadinessBlockers(
+  blockers: readonly string[],
+): string[] {
+  return blockers.filter((blocker) =>
+    /has not produced its native raster asset yet|is waiting for its (?:alpha-preserving )?native raster frame/i.test(
+      blocker,
+    ),
+  );
+}
+
+/**
  * Build the versioned native-core request used by all new frame callers.
  * The existing request builder remains available only as a compatibility
  * adapter while the rest of the graph migrates to ProjectSnapshot.
@@ -1398,7 +1423,7 @@ export function buildNativeFrameRequest(
         y: layer.y,
         width: layer.width,
         height: layer.height,
-        rotation: layer.rotation,
+        rotation: getNativeLayerRotation(layer),
         opacity: isMaskReady ? layer.opacity : 0,
         zIndex: Math.round(layer.zIndex),
         blendMode: layer.blendMode,
