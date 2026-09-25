@@ -37,7 +37,7 @@ use tauri::{Emitter, Manager};
 
 use crate::thumbnail_engine::stream_actor::DecodedVideoPlanes;
 
-type DecodedNativeVideoFrame = (DecodedVideoPlanes, u32, u32, VideoColorMetadata);
+type DecodedNativeVideoFrame = (DecodedVideoPlanes, u32, u32, VideoColorMetadata, u32);
 static NATIVE_SURFACE_PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Register an editor font before a frame request references it. The native
@@ -134,8 +134,12 @@ struct QueuedNativeFrame {
 /// visible latency buffer. This is intentionally a presentation-latency budget,
 /// not a cache-capacity limit: the cache can retain decoded frames, but the
 /// playback queue must stay close to the audio clock.
-const MAX_LOOKAHEAD_RESIDENCY_US: u64 = 100_000;
-const MAX_LOOKAHEAD_EXPIRATION_US: u64 = 250_000;
+///
+/// At 30fps (33ms budget) this allows up to ~9 frames of lookahead headroom,
+/// which absorbs decode jitter without causing lookahead-misses on the first
+/// decode-speed bump.
+const MAX_LOOKAHEAD_RESIDENCY_US: u64 = 300_000;
+const MAX_LOOKAHEAD_EXPIRATION_US: u64 = 600_000;
 const MIN_LOOKAHEAD_FRAMES: usize = 2;
 
 fn native_presentation_timing(
@@ -550,15 +554,22 @@ fn deadline_aware_lookahead_count(
     estimated_decode_us: Option<u64>,
 ) -> usize {
     let frame_budget_us = 1_000_000u64 / u64::from(frame_rate.max(1));
+    // Presentation-latency budget: don't queue frames so far ahead that they
+    // become stale before the audio clock reaches them.
     let latency_cap = (MAX_LOOKAHEAD_RESIDENCY_US / frame_budget_us).max(1) as usize;
-    let decode_coverage = estimated_decode_us
+    // Minimum frames needed to keep the sequential decode pipeline ahead of
+    // the audio clock at the measured decode speed. This is a FLOOR: if decode
+    // takes 80ms and the frame budget is 33ms, we need at least 3 frames ahead
+    // to absorb a single slow decode without a miss. Using it as a ceiling
+    // (the prior bug) guaranteed misses on any jitter.
+    let decode_floor = estimated_decode_us
         .map(|decode_us| decode_us.div_ceil(frame_budget_us) as usize)
         .unwrap_or(MIN_LOOKAHEAD_FRAMES)
         .max(MIN_LOOKAHEAD_FRAMES);
 
     configured_count
-        .min(latency_cap.max(MIN_LOOKAHEAD_FRAMES))
-        .min(decode_coverage)
+        .min(latency_cap)
+        .max(decode_floor)
         .max(1)
 }
 
@@ -2064,7 +2075,7 @@ async fn render_native_video_project_frame_bytes_timed(
         decoder_mutex_wait_us = decode_timings.decoder_mutex_wait_us;
 
         session = state.lock().await;
-        for (layer, (planes, width, height, color)) in
+        for (layer, (planes, width, height, color, source_rotation)) in
             request.layers.iter().zip(decoded_frames.iter())
         {
             let params = color_params(color)?;
@@ -2104,9 +2115,35 @@ async fn render_native_video_project_frame_bytes_timed(
                     let (y_plane, uv_plane) = planes.cpu_planes().ok_or_else(|| {
                         "CPU fallback planes unavailable for preview rendering".to_string()
                     })?;
-                    session.render_nv12_frame_to_texture(
-                        layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
-                    )?
+
+                    // Rotate NV12 pixels to upright orientation when the source has a
+                    // non-zero display rotation (e.g. portrait Pixel video stored landscape).
+                    // This matches the thumbnail path's rotate_rgba step so the GPU compositor
+                    // always receives an already-upright texture and applies only the
+                    // user/author rotation via the transform matrix.
+                    let (tex_w, tex_h);
+                    let texture = if *source_rotation != 0 {
+                        let (ry, ruv, rw, rh) =
+                            crate::thumbnail_engine::decoder::rotate_nv12(
+                                y_plane,
+                                uv_plane,
+                                *width,
+                                *height,
+                                *source_rotation,
+                            );
+                        tex_w = rw;
+                        tex_h = rh;
+                        session.render_nv12_frame_to_texture(
+                            layer_key, tex_w, tex_h, tex_w, tex_h, &ry, &ruv, &params,
+                        )?
+                    } else {
+                        tex_w = *width;
+                        tex_h = *height;
+                        session.render_nv12_frame_to_texture(
+                            layer_key, tex_w, tex_h, tex_w, tex_h, y_plane, uv_plane, &params,
+                        )?
+                    };
+                    texture
                 }
             };
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -3105,7 +3142,7 @@ pub(crate) async fn present_native_frame_internal(
             request.frame_time.timescale,
             is_playback,
         );
-        SYNC_METRICS.record_dropped_frame();
+        SYNC_METRICS.record_lookahead_miss();
         record_native_surface_sample(
             &app,
             &request,
@@ -3386,7 +3423,7 @@ pub(crate) async fn present_native_frame_internal(
         Vec::with_capacity(legacy_request.layers.len() + legacy_request.raster_layers.len());
     let mut used_dxgi_zero_copy = false;
     let mut used_cpu_nv12 = false;
-    for (layer_idx, (layer, (planes, width, height, color))) in legacy_request
+    for (layer_idx, (layer, (planes, width, height, color, source_rotation))) in legacy_request
         .layers
         .iter()
         .zip(decoded_frames.iter())
@@ -3473,9 +3510,29 @@ pub(crate) async fn present_native_frame_internal(
                 None => match planes.cpu_planes() {
                     Some((y_plane, uv_plane)) => {
                         used_cpu_nv12 = true;
-                        session.render_nv12_frame_to_texture(
-                            layer_key, *width, *height, *width, *height, y_plane, uv_plane, &params,
-                        )?
+                        let (tex_w, tex_h);
+                        let texture = if *source_rotation != 0 {
+                            let (ry, ruv, rw, rh) =
+                                crate::thumbnail_engine::decoder::rotate_nv12(
+                                    y_plane,
+                                    uv_plane,
+                                    *width,
+                                    *height,
+                                    *source_rotation,
+                                );
+                            tex_w = rw;
+                            tex_h = rh;
+                            session.render_nv12_frame_to_texture(
+                                layer_key, tex_w, tex_h, tex_w, tex_h, &ry, &ruv, &params,
+                            )?
+                        } else {
+                            tex_w = *width;
+                            tex_h = *height;
+                            session.render_nv12_frame_to_texture(
+                                layer_key, tex_w, tex_h, tex_w, tex_h, y_plane, uv_plane, &params,
+                            )?
+                        };
+                        texture
                     }
                     None => {
                         crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
