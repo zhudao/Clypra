@@ -3875,11 +3875,19 @@ pub async fn render_native_frame(
     request: FrameRequest,
 ) -> Result<tauri::ipc::Response, String> {
     let started = Instant::now();
+    eprintln!(
+        "[preview-diag][rust] render_native_frame called: frame={} mode={:?} quality={:?}",
+        request.frame_time.frame_index,
+        request.mode,
+        request.quality,
+    );
     if request.contract_version != NATIVE_CORE_CONTRACT_VERSION {
-        return Err(format!(
+        let err = format!(
             "Unsupported native core contract version: {}",
             request.contract_version
-        ));
+        );
+        eprintln!("[preview-diag][rust] render_native_frame contract version mismatch: {}", err);
+        return Err(err);
     }
     if request.mode.as_deref() != Some("frameStep") {
         if let Some(generation) = request.generation {
@@ -3951,9 +3959,36 @@ pub async fn render_native_frame(
         }
     }
 
-    let legacy_request = to_video_project_request(&request)?;
-    let (rgba, stage_timings) =
-        render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await?;
+    let legacy_request = match to_video_project_request(&request) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[preview-diag][rust] to_video_project_request FAILED: {}", e);
+            return Err(e);
+        }
+    };
+    eprintln!(
+        "[preview-diag][rust] rendering legacy video request: layers={}, rasters={}, texts={}, clear_color={:?}",
+        legacy_request.layers.len(),
+        legacy_request.raster_layers.len(),
+        legacy_request.text_layers.len(),
+        legacy_request.clear_color,
+    );
+    let (rgba, stage_timings) = match render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await {
+        Ok(res) => {
+            eprintln!(
+                "[preview-diag][rust] render_native_video_project_frame_bytes_timed OK: bytes={}",
+                res.0.len()
+            );
+            res
+        }
+        Err(e) => {
+            eprintln!(
+                "[preview-diag][rust] render_native_video_project_frame_bytes_timed FAILED: {}",
+                e
+            );
+            return Err(e);
+        }
+    };
     if request.mode.as_deref() != Some("frameStep") {
         if let Some(generation) = request.generation {
             if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
@@ -4162,11 +4197,18 @@ mod tests {
 
     #[test]
     fn lookahead_is_bounded_by_the_presentation_latency_budget() {
-        // A 16-frame queue at 30 fps creates more than half a second of
-        // avoidable ready-frame delay. Keep only enough work to cover the
-        // measured decoder lead while bounding the display latency to 100ms.
-        assert_eq!(deadline_aware_lookahead_count(30, 16, Some(40_000)), 2);
-        assert_eq!(deadline_aware_lookahead_count(30, 16, Some(500_000)), 3);
+        // decode_coverage is now a FLOOR (minimum frames to keep the pipeline
+        // ahead of the audio clock), not a ceiling. The actual count is capped
+        // by the presentation-latency budget (MAX_LOOKAHEAD_RESIDENCY_US).
+        //
+        // At 30 fps: frame_budget_us = 33_333, latency_cap = 300_000/33_333 = 9.
+        // decode_us=40_000 → decode_floor = ceil(40_000/33_333) = 2
+        //   configured(16).min(9).max(2) = 9
+        assert_eq!(deadline_aware_lookahead_count(30, 16, Some(40_000)), 9);
+        // decode_us=500_000 → decode_floor = ceil(500_000/33_333) = 16
+        //   configured(16).min(9)=9, 9.max(16)=16; decode_floor wins because
+        //   the decoder is so slow it needs 16 frames of headroom to keep up.
+        assert_eq!(deadline_aware_lookahead_count(30, 16, Some(500_000)), 16);
     }
 
     #[test]
