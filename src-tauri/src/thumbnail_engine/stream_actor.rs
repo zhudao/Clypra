@@ -524,7 +524,17 @@ impl StreamDecoderActor {
                     Ok(None) => {
                         // Software or non-D3D11 frame; proceed to CPU fallback below
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => {
+                        if err.contains("cancelled") {
+                            return Err(err);
+                        }
+                        log::warn!(
+                            "[StreamActor] DXGI decode failed at {}s: {}, attempting CPU NV12 fallback",
+                            target_time,
+                            err
+                        );
+                        // Non-fatal: proceed to CPU NV12 fallback below
+                    }
                 }
             }
 
@@ -817,8 +827,8 @@ mod tests {
             .await
             .expect("decode frame 0");
         assert!(!f0.from_prime_cache);
-        assert_eq!(f0.width > 0, true);
-        assert_eq!(f0.height > 0, true);
+        assert!(f0.width > 0);
+        assert!(f0.height > 0);
 
         // Give actor task a brief moment to prime forward
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

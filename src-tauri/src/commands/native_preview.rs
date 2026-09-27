@@ -567,10 +567,7 @@ fn deadline_aware_lookahead_count(
         .unwrap_or(MIN_LOOKAHEAD_FRAMES)
         .max(MIN_LOOKAHEAD_FRAMES);
 
-    configured_count
-        .min(latency_cap)
-        .max(decode_floor)
-        .max(1)
+    configured_count.min(latency_cap).max(decode_floor).max(1)
 }
 
 fn default_clear_color() -> [f32; 4] {
@@ -2122,15 +2119,14 @@ async fn render_native_video_project_frame_bytes_timed(
                     // always receives an already-upright texture and applies only the
                     // user/author rotation via the transform matrix.
                     let (tex_w, tex_h);
-                    let texture = if *source_rotation != 0 {
-                        let (ry, ruv, rw, rh) =
-                            crate::thumbnail_engine::decoder::rotate_nv12(
-                                y_plane,
-                                uv_plane,
-                                *width,
-                                *height,
-                                *source_rotation,
-                            );
+                    if *source_rotation != 0 {
+                        let (ry, ruv, rw, rh) = crate::thumbnail_engine::decoder::rotate_nv12(
+                            y_plane,
+                            uv_plane,
+                            *width,
+                            *height,
+                            *source_rotation,
+                        );
                         tex_w = rw;
                         tex_h = rh;
                         session.render_nv12_frame_to_texture(
@@ -2142,8 +2138,7 @@ async fn render_native_video_project_frame_bytes_timed(
                         session.render_nv12_frame_to_texture(
                             layer_key, tex_w, tex_h, tex_w, tex_h, y_plane, uv_plane, &params,
                         )?
-                    };
-                    texture
+                    }
                 }
             };
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -2659,6 +2654,27 @@ struct LookaheadWorkerState {
 static LOOKAHEAD_WORKER: std::sync::Mutex<Option<LookaheadWorkerState>> =
     std::sync::Mutex::new(None);
 
+/// Read the capability-probe-selected quality tier from the active render session.
+///
+/// The startup probe in `configure_native_playback_render` writes the chosen
+/// tier into `render_session.snapshot.quality` via `set_preview_quality()`.
+/// This helper propagates that decision into the lookahead worker so that
+/// pre-decode frames use the same scaled resolution as foreground frames —
+/// critical on constrained iGPUs where `Proxy` (÷4) is chosen at probe time.
+///
+/// Returns `None` if no render session is active, letting the caller fall back
+/// to the per-request quality embedded in the frame request itself.
+fn current_lookahead_quality(
+    app: &tauri::AppHandle,
+) -> Option<crate::native_core::QualityTier> {
+    let playback = app.try_state::<Arc<std::sync::Mutex<
+        crate::commands::native_playback::NativePlaybackRuntime,
+    >>>()?;
+    let runtime_arc = playback.inner().clone();
+    let runtime = runtime_arc.lock().ok()?;
+    runtime.render_session_quality()
+}
+
 /// Non-blocking lookahead pre-decode worker.
 /// Pre-decodes upcoming frames sequentially into `NativePreviewFrameQueue`
 /// ahead of the presentation playhead. Because sequential forward decoding in FFmpeg
@@ -3125,7 +3141,7 @@ pub(crate) async fn present_native_frame_internal(
         // the single bounded worker is running before reporting the drop so
         // the next audio deadline can consume newly ready work. The scheduler
         // coalesces an already-running worker for this generation.
-        schedule_lookahead_predecode(app.clone(), request.clone(), 16, None);
+        schedule_lookahead_predecode(app.clone(), request.clone(), 16, current_lookahead_quality(&app));
         let probe = surface_state
             .lock()
             .unwrap_or_else(|poisoned| {
@@ -3511,15 +3527,14 @@ pub(crate) async fn present_native_frame_internal(
                     Some((y_plane, uv_plane)) => {
                         used_cpu_nv12 = true;
                         let (tex_w, tex_h);
-                        let texture = if *source_rotation != 0 {
-                            let (ry, ruv, rw, rh) =
-                                crate::thumbnail_engine::decoder::rotate_nv12(
-                                    y_plane,
-                                    uv_plane,
-                                    *width,
-                                    *height,
-                                    *source_rotation,
-                                );
+                        if *source_rotation != 0 {
+                            let (ry, ruv, rw, rh) = crate::thumbnail_engine::decoder::rotate_nv12(
+                                y_plane,
+                                uv_plane,
+                                *width,
+                                *height,
+                                *source_rotation,
+                            );
                             tex_w = rw;
                             tex_h = rh;
                             session.render_nv12_frame_to_texture(
@@ -3531,8 +3546,7 @@ pub(crate) async fn present_native_frame_internal(
                             session.render_nv12_frame_to_texture(
                                 layer_key, tex_w, tex_h, tex_w, tex_h, y_plane, uv_plane, &params,
                             )?
-                        };
-                        texture
+                        }
                     }
                     None => {
                         crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
@@ -3806,7 +3820,7 @@ pub(crate) async fn present_native_frame_internal(
     );
 
     if request.mode.as_deref() != Some("prefetch") && request.mode.as_deref() != Some("scrub") {
-        schedule_lookahead_predecode(app.clone(), request.clone(), 16, None);
+        schedule_lookahead_predecode(app.clone(), request.clone(), 16, current_lookahead_quality(&app));
     }
 
     Ok(NativeSurfacePresentation {
@@ -3875,18 +3889,19 @@ pub async fn render_native_frame(
     request: FrameRequest,
 ) -> Result<tauri::ipc::Response, String> {
     let started = Instant::now();
-    eprintln!(
+    log::debug!(
         "[preview-diag][rust] render_native_frame called: frame={} mode={:?} quality={:?}",
-        request.frame_time.frame_index,
-        request.mode,
-        request.quality,
+        request.frame_time.frame_index, request.mode, request.quality,
     );
     if request.contract_version != NATIVE_CORE_CONTRACT_VERSION {
         let err = format!(
             "Unsupported native core contract version: {}",
             request.contract_version
         );
-        eprintln!("[preview-diag][rust] render_native_frame contract version mismatch: {}", err);
+        log::error!(
+            "[preview-diag][rust] render_native_frame contract version mismatch: {}",
+            err
+        );
         return Err(err);
     }
     if request.mode.as_deref() != Some("frameStep") {
@@ -3962,33 +3977,37 @@ pub async fn render_native_frame(
     let legacy_request = match to_video_project_request(&request) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[preview-diag][rust] to_video_project_request FAILED: {}", e);
+            log::error!(
+                "[preview-diag][rust] to_video_project_request FAILED: {}",
+                e
+            );
             return Err(e);
         }
     };
-    eprintln!(
+    log::debug!(
         "[preview-diag][rust] rendering legacy video request: layers={}, rasters={}, texts={}, clear_color={:?}",
         legacy_request.layers.len(),
         legacy_request.raster_layers.len(),
         legacy_request.text_layers.len(),
         legacy_request.clear_color,
     );
-    let (rgba, stage_timings) = match render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await {
-        Ok(res) => {
-            eprintln!(
-                "[preview-diag][rust] render_native_video_project_frame_bytes_timed OK: bytes={}",
-                res.0.len()
-            );
-            res
-        }
-        Err(e) => {
-            eprintln!(
-                "[preview-diag][rust] render_native_video_project_frame_bytes_timed FAILED: {}",
-                e
-            );
-            return Err(e);
-        }
-    };
+    let (rgba, stage_timings) =
+        match render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await {
+            Ok(res) => {
+                log::debug!(
+                    "[preview-diag][rust] render_native_video_project_frame_bytes_timed OK: bytes={}",
+                    res.0.len()
+                );
+                res
+            }
+            Err(e) => {
+                log::error!(
+                    "[preview-diag][rust] render_native_video_project_frame_bytes_timed FAILED: {}",
+                    e
+                );
+                return Err(e);
+            }
+        };
     if request.mode.as_deref() != Some("frameStep") {
         if let Some(generation) = request.generation {
             if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>()
@@ -4227,10 +4246,12 @@ mod tests {
 
     #[test]
     fn full_range_rec601_selects_the_explicit_matrix() {
-        let mut color = VideoColorMetadata::default();
-        color.range = "full".to_string();
-        color.matrix = "bt601_625".to_string();
-        color.transfer = "bt709".to_string();
+        let color = VideoColorMetadata {
+            range: "full".to_string(),
+            matrix: "bt601_625".to_string(),
+            transfer: "bt709".to_string(),
+            ..Default::default()
+        };
 
         let params = color_params(&color).expect("Rec.601 SDR should be supported");
         assert_eq!(params.color_space, 3);
@@ -4239,22 +4260,28 @@ mod tests {
 
     #[test]
     fn unsupported_partial_metadata_is_rejected() {
-        let mut color = VideoColorMetadata::default();
-        color.matrix = "bt2020_ncl".to_string();
-        color.transfer = "unspecified".to_string();
+        let color = VideoColorMetadata {
+            matrix: "bt2020_ncl".to_string(),
+            transfer: "unspecified".to_string(),
+            ..Default::default()
+        };
 
         assert!(color_params(&color).is_err());
     }
 
     #[test]
     fn frame_color_metadata_wins_with_stream_fallbacks() {
-        let mut stream = VideoColorMetadata::default();
-        stream.range = "full".to_string();
-        stream.matrix = "bt601_625".to_string();
-        stream.transfer = "bt709".to_string();
+        let stream = VideoColorMetadata {
+            range: "full".to_string(),
+            matrix: "bt601_625".to_string(),
+            transfer: "bt709".to_string(),
+            ..Default::default()
+        };
 
-        let mut frame = VideoColorMetadata::default();
-        frame.matrix = "bt709".to_string();
+        let frame = VideoColorMetadata {
+            matrix: "bt709".to_string(),
+            ..Default::default()
+        };
 
         let merged = merge_color_metadata(frame, &stream);
         assert_eq!(merged.range, "full");

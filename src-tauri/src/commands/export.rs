@@ -354,11 +354,11 @@ async fn has_audio_stream(path: &str) -> bool {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let has_audio = stdout.contains("audio");
-                eprintln!("[has_audio_stream] {} → has_audio={}", path, has_audio);
+                log::debug!("[has_audio_stream] {} → has_audio={}", path, has_audio);
                 has_audio
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                eprintln!(
+                log::debug!(
                     "[has_audio_stream] ffprobe non-zero exit for {}: {}",
                     path,
                     stderr.trim()
@@ -367,7 +367,7 @@ async fn has_audio_stream(path: &str) -> bool {
             }
         }
         Err(e) => {
-            eprintln!("[has_audio_stream] Could not spawn ffprobe: {}", e);
+            log::debug!("[has_audio_stream] Could not spawn ffprobe: {}", e);
             false
         }
     }
@@ -430,7 +430,8 @@ fn apply_export_codec_args(
                 cmd.arg("-c:v").arg(&encoder.codec_name);
                 cmd.arg("-tag:v").arg("hvc1");
                 cmd.arg("-b:v").arg(target_bitrate.to_string());
-                cmd.arg("-maxrate").arg((target_bitrate * 10 / 7).to_string());
+                cmd.arg("-maxrate")
+                    .arg((target_bitrate * 10 / 7).to_string());
                 cmd.arg("-bufsize").arg((target_bitrate * 2).to_string());
                 cmd.arg("-allow_sw").arg("1");
                 cmd.arg("-realtime").arg("1");
@@ -441,7 +442,8 @@ fn apply_export_codec_args(
             } else {
                 cmd.arg("-c:v").arg(&encoder.codec_name);
                 cmd.arg("-b:v").arg(target_bitrate.to_string());
-                cmd.arg("-maxrate").arg((target_bitrate * 10 / 7).to_string());
+                cmd.arg("-maxrate")
+                    .arg((target_bitrate * 10 / 7).to_string());
                 cmd.arg("-bufsize").arg((target_bitrate * 2).to_string());
                 cmd.arg("-allow_sw").arg("1");
                 cmd.arg("-realtime").arg("1");
@@ -455,7 +457,8 @@ fn apply_export_codec_args(
             cmd.arg("-c:v").arg(&encoder.codec_name);
             cmd.arg("-preset").arg("p4");
             cmd.arg("-b:v").arg(target_bitrate.to_string());
-            cmd.arg("-maxrate").arg((target_bitrate * 10 / 7).to_string());
+            cmd.arg("-maxrate")
+                .arg((target_bitrate * 10 / 7).to_string());
             cmd.arg("-bufsize").arg((target_bitrate * 2).to_string());
             cmd.arg("-bf").arg("0");
             cmd.arg("-g").arg(gop_size.to_string());
@@ -474,42 +477,41 @@ fn apply_export_codec_args(
                 cmd.arg("-tag:v").arg("hvc1");
             }
         }
-        HwAccelType::Software => {
-            match config.codec.as_str() {
-                "h264" => {
-                    cmd.arg("-c:v").arg("libx264");
-                    cmd.arg("-preset").arg(&config.preset);
-                    cmd.arg("-crf").arg(config.crf.to_string());
-                    cmd.arg("-pix_fmt").arg(&config.pixel_format);
-                    cmd.arg("-g").arg(gop_size.to_string());
-                    cmd.arg("-keyint_min").arg(gop_size.to_string());
-                    cmd.arg("-x264-params").arg("scenecut=0:open_gop=0");
-                    cmd.arg("-force_key_frames").arg("expr:eq(n,0)");
-                }
-                "h265" | "hevc" => {
-                    cmd.arg("-c:v").arg("libx265");
-                    cmd.arg("-tag:v").arg("hvc1");
-                    cmd.arg("-preset").arg(&config.preset);
-                    cmd.arg("-crf").arg(config.crf.to_string());
-                    cmd.arg("-pix_fmt").arg(&config.pixel_format);
-                    cmd.arg("-g").arg(gop_size.to_string());
-                    cmd.arg("-keyint_min").arg(gop_size.to_string());
-                    cmd.arg("-x265-params").arg("scenecut=0:open-gop=0:force-idr=1");
-                }
-                "prores" => {
-                    cmd.arg("-c:v").arg("prores_ks");
-                    let (prores_profile, prores_pix_fmt) = match config.pixel_format.as_str() {
-                        "yuva444p10le" | "yuv444p10le" => ("4444", "yuva444p10le"),
-                        "yuv422p10le" => ("hq", "yuv422p10le"),
-                        "yuv422p" => ("standard", "yuv422p10le"),
-                        _ => ("hq", "yuv422p10le"),
-                    };
-                    cmd.arg("-profile:v").arg(prores_profile);
-                    cmd.arg("-pix_fmt").arg(prores_pix_fmt);
-                }
-                _ => return Err(format!("Unsupported codec: {}", config.codec)),
+        HwAccelType::Software => match config.codec.as_str() {
+            "h264" => {
+                cmd.arg("-c:v").arg("libx264");
+                cmd.arg("-preset").arg(&config.preset);
+                cmd.arg("-crf").arg(config.crf.to_string());
+                cmd.arg("-pix_fmt").arg(&config.pixel_format);
+                cmd.arg("-g").arg(gop_size.to_string());
+                cmd.arg("-keyint_min").arg(gop_size.to_string());
+                cmd.arg("-x264-params").arg("scenecut=0:open_gop=0");
+                cmd.arg("-force_key_frames").arg("expr:eq(n,0)");
             }
-        }
+            "h265" | "hevc" => {
+                cmd.arg("-c:v").arg("libx265");
+                cmd.arg("-tag:v").arg("hvc1");
+                cmd.arg("-preset").arg(&config.preset);
+                cmd.arg("-crf").arg(config.crf.to_string());
+                cmd.arg("-pix_fmt").arg(&config.pixel_format);
+                cmd.arg("-g").arg(gop_size.to_string());
+                cmd.arg("-keyint_min").arg(gop_size.to_string());
+                cmd.arg("-x265-params")
+                    .arg("scenecut=0:open-gop=0:force-idr=1");
+            }
+            "prores" => {
+                cmd.arg("-c:v").arg("prores_ks");
+                let (prores_profile, prores_pix_fmt) = match config.pixel_format.as_str() {
+                    "yuva444p10le" | "yuv444p10le" => ("4444", "yuva444p10le"),
+                    "yuv422p10le" => ("hq", "yuv422p10le"),
+                    "yuv422p" => ("standard", "yuv422p10le"),
+                    _ => ("hq", "yuv422p10le"),
+                };
+                cmd.arg("-profile:v").arg(prores_profile);
+                cmd.arg("-pix_fmt").arg(prores_pix_fmt);
+            }
+            _ => return Err(format!("Unsupported codec: {}", config.codec)),
+        },
     }
     Ok(())
 }
@@ -565,7 +567,7 @@ pub async fn start_video_export(
             if *probe_results.get(&clip.path).unwrap_or(&false) {
                 valid_audio_clips.push(clip.clone());
             } else {
-                eprintln!(
+                log::debug!(
                     "[start_video_export] Skipping file (no audio stream found): {}",
                     clip.path
                 );
@@ -757,7 +759,7 @@ pub async fn start_video_export(
         .stderr(Stdio::piped());
 
     // Log the full FFmpeg command for debugging
-    eprintln!("[start_video_export] FFmpeg command: {:?}", cmd);
+    log::debug!("[start_video_export] FFmpeg command: {:?}", cmd);
 
     super::native_export::acquire_export_slot()?;
     let mut child = match cmd.spawn() {
@@ -804,7 +806,7 @@ pub async fn start_video_export(
         .await
         .insert(session_id.clone(), Arc::new(Mutex::new(session)));
 
-    eprintln!(
+    log::debug!(
         "[start_video_export] Started session {} ({}x{} @ {}fps, {} frames, codec={})",
         session_id,
         config.width,
@@ -978,7 +980,7 @@ pub async fn write_export_frame(request: Request<'_>) -> Result<(), String> {
             .cloned()
             .fold(0.0f64, f64::max);
 
-        eprintln!(
+        log::debug!(
             "[write_export_frame] Session {}: {}/{} frames ({:.1}%) @ {:.1} fps, ETA {:.1}s | Frame write: avg={:.2}ms max={:.2}ms",
             session_id,
             session.current_frame,
@@ -993,7 +995,7 @@ pub async fn write_export_frame(request: Request<'_>) -> Result<(), String> {
         // Log detailed performance every 5 seconds
         if session.last_perf_log_time.elapsed().as_secs() >= 5 {
             session.last_perf_log_time = std::time::Instant::now();
-            eprintln!(
+            log::debug!(
                 "[EXPORT_PERF] Session {}: fps={:.1}, frame_write_avg={:.2}ms, frame_write_max={:.2}ms, frames={}/{}",
                 session_id,
                 fps,
@@ -1148,7 +1150,7 @@ pub async fn write_export_frames_batch(request: Request<'_>) -> Result<(), Strin
     let batch_duration = batch_start.elapsed().as_secs_f64() * 1000.0;
     let batch_fps = frame_count as f64 / (batch_duration / 1000.0);
 
-    eprintln!(
+    log::debug!(
         "[write_export_frames_batch] Session {}: Wrote {} frames in {:.2}ms ({:.2}ms/frame, {:.1} fps) | Total: {}/{} ({:.1}%) @ {:.1} fps overall, ETA {:.1}s",
         session_id,
         frame_count,
@@ -1198,7 +1200,8 @@ pub async fn render_and_write_export_frame(
                 // source frame. Only recover the terminal export frame; an earlier miss
                 // is a real project/media error and must still surface to the caller.
                 let session = session_arc.lock().await;
-                let is_terminal_frame = session.current_frame.saturating_add(1) >= session.total_frames;
+                let is_terminal_frame =
+                    session.current_frame.saturating_add(1) >= session.total_frames;
                 let fallback = if is_terminal_frame {
                     session.last_composited_frame.clone()
                 } else {
@@ -1209,7 +1212,7 @@ pub async fn render_and_write_export_frame(
                 let Some(fallback) = fallback else {
                     return Err(error);
                 };
-                eprintln!(
+                log::debug!(
                     "[render_and_write_export_frame] Recovering terminal source EOF for session {} by repeating the preceding composition: {}",
                     session_id, error
                 );
@@ -1223,7 +1226,10 @@ pub async fn render_and_write_export_frame(
     if rgba.len() != expected_size {
         return Err(format!(
             "Rendered frame size mismatch: expected {} bytes ({}x{}x4), got {} bytes",
-            expected_size, session.width, session.height, rgba.len()
+            expected_size,
+            session.width,
+            session.height,
+            rgba.len()
         ));
     }
 
@@ -1331,7 +1337,8 @@ pub async fn render_and_write_export_frames_batch(
         if rgba.len() != expected_size {
             return Err(format!(
                 "Batch frame size mismatch: expected {} bytes, got {} bytes",
-                expected_size, rgba.len()
+                expected_size,
+                rgba.len()
             ));
         }
         stdin
@@ -1465,7 +1472,7 @@ pub async fn finalize_video_export(session_id: String) -> Result<ExportTimings, 
             return Err(format!("Failed to commit final export file: {}", e));
         }
 
-        eprintln!(
+        log::debug!(
             "[finalize_video_export] Session {} completed successfully in {:.2}s ({} frames, ffmpeg={:.0}ms)",
             session_id,
             total_export_ms / 1000.0,
@@ -1484,7 +1491,7 @@ pub async fn finalize_video_export(session_id: String) -> Result<ExportTimings, 
     } else {
         let _ = tokio::fs::remove_file(&temp_output_path).await;
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!(
+        log::debug!(
             "[finalize_video_export] Session {} failed:\n{}",
             session_id, stderr
         );
@@ -1519,7 +1526,7 @@ pub async fn cancel_video_export(session_id: String) -> Result<(), String> {
     // Kill FFmpeg process if running
     if let Some(mut child) = process {
         if let Err(e) = child.kill().await {
-            eprintln!(
+            log::debug!(
                 "[cancel_video_export] Could not kill FFmpeg (already exited?): {}",
                 e
             );
@@ -1531,18 +1538,18 @@ pub async fn cancel_video_export(session_id: String) -> Result<(), String> {
 
     // Clean up temporary partial file
     if let Err(e) = tokio::fs::remove_file(&temp_output_path).await {
-        eprintln!(
+        log::debug!(
             "[cancel_video_export] Could not delete temporary file {:?}: {}",
             temp_output_path, e
         );
     } else {
-        eprintln!(
+        log::debug!(
             "[cancel_video_export] Deleted temporary output: {:?}",
             temp_output_path
         );
     }
 
-    eprintln!(
+    log::debug!(
         "[cancel_video_export] Session {} cancelled ({} frames written)",
         session_id, current_frame
     );

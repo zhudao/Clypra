@@ -1945,7 +1945,9 @@ impl VideoDecoder {
             return Ok((y_clone, uv_clone, width, height, color));
         }
 
-        if let Some((cached_pts, y, uv, width, height, color, quality, is_approx)) = &self.last_raw_nv12 {
+        if let Some((cached_pts, y, uv, width, height, color, quality, is_approx)) =
+            &self.last_raw_nv12
+        {
             if *quality == options.quality
                 && (!*is_approx || options.allow_keyframe_approx)
                 && (*cached_pts - target_pts).abs() <= pts_tolerance
@@ -2044,7 +2046,17 @@ impl VideoDecoder {
             }
         }
 
+        // Budget: 3 s maximum scan per seek. On constrained iGPUs (Intel HD 520)
+        // HEVC GOPs can span 2–4 s of packets. Without a budget, a single
+        // backward seek blocks the decode thread for 7–14 s (measured in
+        // session `launch-1790401877377-4m5myb`). When the budget is reached
+        // we return the best partial frame decoded so far (a nearby keyframe)
+        // as a stale-ok approximation rather than failing with `Err("No frame
+        // found")`, which would force a full pipeline restart.
+        const SEEK_SCAN_BUDGET: Duration = Duration::from_secs(3);
+
         if !found {
+            let scan_deadline = Instant::now();
             'decode: for (stream, packet) in self.input_ctx.packets() {
                 if is_cancelled() {
                     return Err("Native preview request cancelled".to_string());
@@ -2071,6 +2083,12 @@ impl VideoDecoder {
                     best_frame = frame;
                     frame = ffmpeg::frame::Video::empty();
                 }
+                // Bail out after the budget to prevent multi-second stalls on
+                // long-GOP HEVC files. `best_frame` holds the most recent
+                // keyframe decoded so far — close enough for interactive preview.
+                if scan_deadline.elapsed() > SEEK_SCAN_BUDGET {
+                    break 'decode;
+                }
             }
         }
 
@@ -2093,6 +2111,7 @@ impl VideoDecoder {
                     self.state.current_pts = -1;
                     self.state.gop_start_pts = retry_pts;
 
+                    let retry_scan_deadline = Instant::now();
                     'retry_decode: for (stream, packet) in self.input_ctx.packets() {
                         if is_cancelled() {
                             return Err("Native preview request cancelled".to_string());
@@ -2118,6 +2137,9 @@ impl VideoDecoder {
                                 break 'retry_decode;
                             }
                             frame = ffmpeg::frame::Video::empty();
+                        }
+                        if retry_scan_deadline.elapsed() > SEEK_SCAN_BUDGET {
+                            break 'retry_decode;
                         }
                     }
                 }
@@ -2162,20 +2184,10 @@ impl VideoDecoder {
                     normalize_converted_nv12_color(frame_color),
                 ))
             } else {
-                scale_frame_to_nv12(
-                    &cpu_frame,
-                    target_width,
-                    target_height,
-                    frame_color.clone(),
-                )
+                scale_frame_to_nv12(&cpu_frame, target_width, target_height, frame_color.clone())
             }
         } else {
-            scale_frame_to_nv12(
-                &cpu_frame,
-                target_width,
-                target_height,
-                frame_color.clone(),
-            )
+            scale_frame_to_nv12(&cpu_frame, target_width, target_height, frame_color.clone())
         }?;
         let y_arc: Arc<[u8]> = Arc::from(result.0);
         let uv_arc: Arc<[u8]> = Arc::from(result.1);
@@ -2359,6 +2371,97 @@ impl VideoDecoder {
                         break 'dec;
                     }
                     frame = ffmpeg::frame::Video::empty();
+                }
+            }
+        }
+
+        // Drain delayed codec output after packet iteration. If this path is
+        // used, force the next request to seek because the decoder is at EOF.
+        if !found && self.decoder.send_eof().is_ok() {
+            let mut frame = ffmpeg::frame::Video::empty();
+            while self.decoder.receive_frame(&mut frame).is_ok() {
+                if is_cancelled() {
+                    return Err("Native preview request cancelled".to_string());
+                }
+                let pts = frame.pts().unwrap_or(0);
+                self.state.current_pts = pts;
+                let frame_ts = pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
+                best_frame = frame;
+                if frame_ts >= ts - (1.0 / 60.0) {
+                    found = true;
+                    break;
+                }
+                frame = ffmpeg::frame::Video::empty();
+            }
+            self.state.current_pts = -1;
+        }
+
+        // Some containers report a duration slightly beyond the last packet,
+        // and some codecs hold the final decoded frame until EOF is signalled.
+        // Retry from an earlier keyframe before giving up so a late timeline
+        // request resolves to the last available frame instead of an error.
+        if !found && best_frame.width() == 0 {
+            let retry_ts = (ts - 1.0).max(0.0);
+            let retry_pts = (retry_ts * self.time_base.1 as f64 / self.time_base.0 as f64) as i64;
+
+            unsafe {
+                let ret = ffmpeg::ffi::av_seek_frame(
+                    self.input_ctx.as_mut_ptr(),
+                    self.stream_index as i32,
+                    retry_pts,
+                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                );
+                if ret >= 0 {
+                    self.decoder.flush();
+                    self.state.current_pts = -1;
+                    self.state.gop_start_pts = retry_pts;
+
+                    'retry_dxgi: for (stream, packet) in self.input_ctx.packets() {
+                        if is_cancelled() {
+                            return Err("Native preview request cancelled".to_string());
+                        }
+                        if stream.index() != self.stream_index {
+                            continue;
+                        }
+                        if self.decoder.send_packet(&packet).is_err() {
+                            continue;
+                        }
+                        let mut frame = ffmpeg::frame::Video::empty();
+                        while self.decoder.receive_frame(&mut frame).is_ok() {
+                            if is_cancelled() {
+                                return Err("Native preview request cancelled".to_string());
+                            }
+                            let pts = frame.pts().unwrap_or(0);
+                            self.state.current_pts = pts;
+                            let frame_ts =
+                                pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
+                            best_frame = frame;
+                            if frame_ts >= ts - (1.0 / 60.0) {
+                                found = true;
+                                break 'retry_dxgi;
+                            }
+                            frame = ffmpeg::frame::Video::empty();
+                        }
+                    }
+
+                    if !found && self.decoder.send_eof().is_ok() {
+                        let mut frame = ffmpeg::frame::Video::empty();
+                        while self.decoder.receive_frame(&mut frame).is_ok() {
+                            if is_cancelled() {
+                                return Err("Native preview request cancelled".to_string());
+                            }
+                            let pts = frame.pts().unwrap_or(0);
+                            self.state.current_pts = pts;
+                            let frame_ts =
+                                pts as f64 * self.time_base.0 as f64 / self.time_base.1 as f64;
+                            best_frame = frame;
+                            if frame_ts >= ts - (1.0 / 60.0) {
+                                found = true;
+                                break;
+                            }
+                            frame = ffmpeg::frame::Video::empty();
+                        }
+                    }
                 }
             }
         }
@@ -2599,7 +2702,7 @@ impl VideoDecoder {
 /// NV12 has two planes:
 ///   - Y plane: one byte per pixel, stride == width
 ///   - UV plane: interleaved U/V pairs, one pair per 2×2 luma block,
-///               stride == width (same as luma), height == ceil(luma_h / 2)
+///     stride == width (same as luma), height == ceil(luma_h / 2)
 ///
 /// Returns `(rotated_y, rotated_uv, out_width, out_height)`.
 /// For 90° and 270° the output dimensions are the transpose of the input.
@@ -2715,7 +2818,6 @@ pub fn rotate_nv12(
         _ => (y_src.to_vec(), uv_src.to_vec(), w as u32, h as u32),
     }
 }
-
 
 // ─── Global Decoder Pool with LRU Eviction ──────────────────────────────────
 // One decoder per video path. Created on first use, reused with LRU tracking.
@@ -3197,7 +3299,7 @@ mod still_image_tests {
         let is_hw_supported = VideoDecoder::macos_supports_hw_av1();
         // On M1/M2/Intel, VTIsHardwareDecodeSupported('av01') is false.
         // On M3/M4, it is true. Either is valid, but the query must run safely and return a bool.
-        assert!(is_hw_supported == true || is_hw_supported == false);
+        let _: bool = is_hw_supported;
     }
 
     #[test]
@@ -3361,13 +3463,13 @@ mod still_image_tests {
 
         // Exact request (allow_keyframe_approx == false): must NOT match
         let exact_match = cache.iter().position(|cached| {
-            (!cached.is_approximate || false) && (cached.pts - target_pts).abs() <= pts_tolerance
+            !cached.is_approximate && (cached.pts - target_pts).abs() <= pts_tolerance
         });
         assert_eq!(exact_match, None);
 
         // Approximate request (allow_keyframe_approx == true): matches
         let approx_match = cache.iter().position(|cached| {
-            (!cached.is_approximate || true) && (cached.pts - target_pts).abs() <= pts_tolerance
+            (cached.pts - target_pts).abs() <= pts_tolerance
         });
         assert_eq!(approx_match, Some(0));
     }
@@ -3409,7 +3511,9 @@ mod still_image_tests {
         }
 
         println!("=== TEST: extract_poster_frame_command with CLI fallback ===");
-        let poster_res = crate::commands::thumbnail::extract_poster_frame_command(path.to_string(), 17.8, 2.0).await;
+        let poster_res =
+            crate::commands::thumbnail::extract_poster_frame_command(path.to_string(), 17.8, 2.0)
+                .await;
         println!(
             "extract_poster_frame_command result: is_ok={}, len={}",
             poster_res.is_ok(),
@@ -3418,15 +3522,29 @@ mod still_image_tests {
         if let Err(ref e) = poster_res {
             println!("extract_poster_frame_command error: {}", e);
         }
-        assert!(poster_res.is_ok(), "extract_poster_frame_command failed: {:?}", poster_res.err());
+        assert!(
+            poster_res.is_ok(),
+            "extract_poster_frame_command failed: {:?}",
+            poster_res.err()
+        );
         let poster_data = poster_res.unwrap();
         assert!(poster_data.starts_with("data:image/webp;base64,"));
-        println!("Poster extraction succeeded! Data URL length: {} chars", poster_data.len());
+        println!(
+            "Poster extraction succeeded! Data URL length: {} chars",
+            poster_data.len()
+        );
 
         // Also test legacy command fallback
         println!("=== TEST: legacy extract_poster_frame ===");
         let legacy_res = crate::commands::media::extract_poster_frame(path.to_string(), 2.0).await;
-        assert!(legacy_res.is_ok(), "legacy extract_poster_frame failed: {:?}", legacy_res.err());
-        println!("Legacy poster extraction succeeded! Data URL length: {} chars", legacy_res.unwrap().len());
+        assert!(
+            legacy_res.is_ok(),
+            "legacy extract_poster_frame failed: {:?}",
+            legacy_res.err()
+        );
+        println!(
+            "Legacy poster extraction succeeded! Data URL length: {} chars",
+            legacy_res.unwrap().len()
+        );
     }
 }

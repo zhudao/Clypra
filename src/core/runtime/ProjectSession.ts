@@ -161,6 +161,7 @@ export class ProjectSession {
   private _nativeRasterIdlePrewarmTimer: ReturnType<typeof setTimeout> | null =
     null;
   private _fontIdlePrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+  private _filmstripPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
   private _nativeRasterPrewarmInFlight: Promise<boolean> | null = null;
   private _nativePreviewStartupUnlisten: UnlistenFn | null = null;
   private _nativePreviewStartupTimeout: ReturnType<typeof setTimeout> | null =
@@ -474,6 +475,22 @@ export class ProjectSession {
       // background canvas work outlive this session.
       this._startDeferredNativeRasterPrewarm();
 
+      // ── Background filmstrip coarse-baseline pre-warm ────────────────────
+      // The first filmstrip tile fetch after project open can stall 4+ seconds
+      // because OPFS and the video decoder are both cold (observed: 4,328ms on
+      // M1). Pre-warm the coarse thumbnail tier for every video clip here,
+      // fire-and-forget, so the OPFS atlas and Rust thumbnail cache are already
+      // populated before the user can scroll the filmstrip.
+      //
+      // Defer this by 4 seconds so the immediate viewport filmstrip fetch and
+      // program preview have exclusive access to decoder/GPU queues during open.
+      this._filmstripPrewarmTimer = setTimeout(() => {
+        this._filmstripPrewarmTimer = null;
+        if (this._state === "active") {
+          void this._prewarmFilmstripCoarseBaseline();
+        }
+      }, 4000);
+
       // ── Telemetry: record session creation ──────────────────────────────
       lifecycleMonitor.record("SESSION_CREATE", {
         projectId: this.projectId,
@@ -565,6 +582,10 @@ export class ProjectSession {
       if (this._fontIdlePrewarmTimer !== null) {
         clearTimeout(this._fontIdlePrewarmTimer);
         this._fontIdlePrewarmTimer = null;
+      }
+      if (this._filmstripPrewarmTimer !== null) {
+        clearTimeout(this._filmstripPrewarmTimer);
+        this._filmstripPrewarmTimer = null;
       }
       this._cancelRAFLoops();
       this._playback = null;
@@ -931,6 +952,56 @@ export class ProjectSession {
     // shows instant previews without blocking the project open sequence.
     fontLoader.getFontLoader().prewarmRemainingFontsOnIdle();
     fontRegistry.prewarmNativeFontsOnIdle();
+  }
+
+  /**
+   * Background-warm the coarse filmstrip tile tier for all video clips.
+   *
+   * The first cold decode of a filmstrip tile can stall 4+ seconds on macOS
+   * when the APFS page-cache and the Rust thumbnail decoder are both cold.
+   * Calling `preloadAssetCoarseBaseline` here triggers the thumbnail engine to
+   * decode and cache coarse-tier tiles across the full video duration at low
+   * priority (priority=3), so the OPFS atlas is warm before the user scrolls.
+   *
+   * This is fire-and-forget. Errors are swallowed — a failure only means the
+   * first filmstrip scroll may still be slow, which is the current baseline.
+   */
+  private async _prewarmFilmstripCoarseBaseline(): Promise<void> {
+    if (!this._renderRuntime) return;
+    const runtime = this._renderRuntime;
+
+    try {
+      const [{ useProjectStore }, { useTimelineStore }] = await Promise.all([
+        import("@/store/projectStore"),
+        import("@/store/timelineStore"),
+      ]);
+      const mediaAssets = useProjectStore.getState().mediaAssets;
+      const { clips } = useTimelineStore.getState();
+      const assetMap = new Map(mediaAssets.map((a) => [a.id, a]));
+
+      // Collect unique video assets referenced by clips (deduplicated by path).
+      const seenPaths = new Set<string>();
+      for (const clip of clips) {
+        if (this._state === "disposed" || this._state === "disposing") return;
+        const asset = assetMap.get(clip.mediaId ?? "");
+        if (!asset || asset.type !== "video") continue;
+        const videoPath = asset.path ?? "";
+        if (!videoPath || seenPaths.has(videoPath)) continue;
+        seenPaths.add(videoPath);
+
+        // Kick off coarse baseline load and yield to avoid saturating the
+        // thumbnail worker queue during the session open sequence.
+        runtime.preloadAssetCoarseBaseline({
+          videoPath,
+          duration: asset.duration ?? 0,
+        });
+
+        // Yield between clips so the Rust side processes requests in batches.
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      }
+    } catch {
+      // Non-fatal — the filmstrip will decode on demand as before.
+    }
   }
 
   private async _prewarmNativeRasterAssets(options: {
