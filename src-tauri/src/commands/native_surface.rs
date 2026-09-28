@@ -53,7 +53,7 @@ impl NativeSurfaceRuntime {
 
         match surface.get_current_texture() {
             Ok(texture) => Ok(texture),
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Other) => {
                 let configuration = self
                     .configuration
                     .as_ref()
@@ -70,7 +70,6 @@ impl NativeSurfaceRuntime {
             Err(wgpu::SurfaceError::OutOfMemory) => {
                 Err("Native surface ran out of memory".to_string())
             }
-            Err(wgpu::SurfaceError::Other) => Err("Native surface acquisition failed".to_string()),
         }
     }
 
@@ -233,6 +232,17 @@ fn configure_surface(
         state
     });
     let surface_window = if let Some(surface_window) = runtime_state.surface_window.clone() {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let parent = app.get_window("main").unwrap_or(window);
+            if let (Ok(ns_win), Ok(parent_ns_win)) = (surface_window.ns_window(), parent.ns_window()) {
+                let _: () = objc2::msg_send![
+                    parent_ns_win as *mut objc2::runtime::AnyObject,
+                    addChildWindow: ns_win as *mut objc2::runtime::AnyObject,
+                    ordered: 1isize
+                ];
+            }
+        }
         surface_window
     } else {
         let parent = app.get_window("main").unwrap_or(window);
@@ -277,6 +287,14 @@ fn configure_surface(
                     ns_win as *mut objc2::runtime::AnyObject,
                     setCollectionBehavior: current_behavior | behavior
                 ];
+
+                if let Ok(parent_ns_win) = parent.ns_window() {
+                    let _: () = objc2::msg_send![
+                        parent_ns_win as *mut objc2::runtime::AnyObject,
+                        addChildWindow: ns_win as *mut objc2::runtime::AnyObject,
+                        ordered: 1isize // NSWindowAbove = 1
+                    ];
+                }
             }
         }
 
