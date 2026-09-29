@@ -19,21 +19,21 @@ import {
 describe("classifyGpuTier", () => {
   // --- Discrete ---
   it("classifies AMD Radeon RX 6800 XT as discrete", () => {
-    expect(
-      classifyGpuTier("AMD Radeon RX 6800 XT", "DiscreteGpu"),
-    ).toBe("discrete");
+    expect(classifyGpuTier("AMD Radeon RX 6800 XT", "DiscreteGpu")).toBe(
+      "discrete",
+    );
   });
 
   it("classifies AMD Radeon RX 7900 XTX as discrete", () => {
-    expect(
-      classifyGpuTier("AMD Radeon RX 7900 XTX", "DiscreteGpu"),
-    ).toBe("discrete");
+    expect(classifyGpuTier("AMD Radeon RX 7900 XTX", "DiscreteGpu")).toBe(
+      "discrete",
+    );
   });
 
   it("classifies Nvidia RTX 4090 as discrete", () => {
-    expect(
-      classifyGpuTier("NVIDIA GeForce RTX 4090", "DiscreteGpu"),
-    ).toBe("discrete");
+    expect(classifyGpuTier("NVIDIA GeForce RTX 4090", "DiscreteGpu")).toBe(
+      "discrete",
+    );
   });
 
   it("classifies Intel Arc A770 as discrete", () => {
@@ -44,15 +44,15 @@ describe("classifyGpuTier", () => {
 
   // --- Legacy iGPU ---
   it("classifies Intel HD 520 as legacy-igpu via DeviceType", () => {
-    expect(
-      classifyGpuTier("Intel(R) HD Graphics 520", "IntegratedGpu"),
-    ).toBe("legacy-igpu");
+    expect(classifyGpuTier("Intel(R) HD Graphics 520", "IntegratedGpu")).toBe(
+      "legacy-igpu",
+    );
   });
 
   it("classifies Intel UHD 630 as legacy-igpu via DeviceType", () => {
-    expect(
-      classifyGpuTier("Intel(R) UHD Graphics 630", "IntegratedGpu"),
-    ).toBe("legacy-igpu");
+    expect(classifyGpuTier("Intel(R) UHD Graphics 630", "IntegratedGpu")).toBe(
+      "legacy-igpu",
+    );
   });
 
   it("classifies AMD Radeon Vega 8 as legacy-igpu", () => {
@@ -68,15 +68,15 @@ describe("classifyGpuTier", () => {
   });
 
   it("classifies Nvidia MX 150 as legacy-igpu (weak discrete)", () => {
-    expect(
-      classifyGpuTier("NVIDIA GeForce MX 150", "DiscreteGpu"),
-    ).toBe("legacy-igpu");
+    expect(classifyGpuTier("NVIDIA GeForce MX 150", "DiscreteGpu")).toBe(
+      "legacy-igpu",
+    );
   });
 
   it("classifies Nvidia MX 250 as legacy-igpu (weak discrete)", () => {
-    expect(
-      classifyGpuTier("NVIDIA GeForce MX250", "DiscreteGpu"),
-    ).toBe("legacy-igpu");
+    expect(classifyGpuTier("NVIDIA GeForce MX250", "DiscreteGpu")).toBe(
+      "legacy-igpu",
+    );
   });
 
   // --- Capable iGPU ---
@@ -87,33 +87,31 @@ describe("classifyGpuTier", () => {
   });
 
   it("classifies AMD Radeon 680M (Ryzen 6000 RDNA2 APU) as capable-igpu", () => {
-    expect(
-      classifyGpuTier("AMD Radeon(TM) 680M", "IntegratedGpu"),
-    ).toBe("capable-igpu");
+    expect(classifyGpuTier("AMD Radeon(TM) 680M", "IntegratedGpu")).toBe(
+      "capable-igpu",
+    );
   });
 
   it("classifies AMD Radeon 780M (Ryzen 7000 RDNA3 APU) as capable-igpu", () => {
-    expect(
-      classifyGpuTier("AMD Radeon(TM) 780M", "IntegratedGpu"),
-    ).toBe("capable-igpu");
+    expect(classifyGpuTier("AMD Radeon(TM) 780M", "IntegratedGpu")).toBe(
+      "capable-igpu",
+    );
   });
 
   it("classifies Apple M2 GPU as capable-igpu", () => {
-    expect(
-      classifyGpuTier("Apple M2", "IntegratedGpu"),
-    ).toBe("capable-igpu");
+    expect(classifyGpuTier("Apple M2", "IntegratedGpu")).toBe("capable-igpu");
   });
 
   it("classifies Nvidia MX 350 as capable-igpu", () => {
-    expect(
-      classifyGpuTier("NVIDIA GeForce MX350", "DiscreteGpu"),
-    ).toBe("capable-igpu");
+    expect(classifyGpuTier("NVIDIA GeForce MX350", "DiscreteGpu")).toBe(
+      "capable-igpu",
+    );
   });
 
   it("classifies Nvidia MX 550 as capable-igpu", () => {
-    expect(
-      classifyGpuTier("NVIDIA GeForce MX 550", "DiscreteGpu"),
-    ).toBe("capable-igpu");
+    expect(classifyGpuTier("NVIDIA GeForce MX 550", "DiscreteGpu")).toBe(
+      "capable-igpu",
+    );
   });
 
   // --- Software renderer ---
@@ -173,9 +171,9 @@ describe("isLegacyIntelIntegratedGpu", () => {
       false,
     ));
   it("rejects Arc A770", () =>
-    expect(
-      isLegacyIntelIntegratedGpu("Intel(R) Arc(TM) A770 Graphics"),
-    ).toBe(false));
+    expect(isLegacyIntelIntegratedGpu("Intel(R) Arc(TM) A770 Graphics")).toBe(
+      false,
+    ));
   it("rejects AMD GPU", () =>
     expect(isLegacyIntelIntegratedGpu("AMD Radeon RX 6800 XT")).toBe(false));
 });
@@ -186,9 +184,9 @@ describe("isModernIntelIntegratedGpu", () => {
       true,
     ));
   it("rejects Arc A770 (discrete)", () =>
-    expect(
-      isModernIntelIntegratedGpu("Intel(R) Arc(TM) A770 Graphics"),
-    ).toBe(false));
+    expect(isModernIntelIntegratedGpu("Intel(R) Arc(TM) A770 Graphics")).toBe(
+      false,
+    ));
   it("rejects Intel HD 520", () =>
     expect(isModernIntelIntegratedGpu("Intel(R) HD Graphics 520")).toBe(false));
 });
@@ -292,17 +290,17 @@ describe("preview hardware policy", () => {
     ).toEqual({ capabilityPolicy: "full" });
   });
 
-  it("does not constrain Intel HD 520 on sub-1440p canvas", () => {
-    expect(
-      selectPreviewHardwarePolicy(
-        "Intel(R) HD Graphics 520",
-        1920,
-        1080,
-        undefined,
-        undefined,
-        "IntegratedGpu",
-      ),
-    ).toEqual({ capabilityPolicy: "full" });
+  it("forces proxy for Intel HD 520 even on sub-1440p canvas", () => {
+    const policy = selectPreviewHardwarePolicy(
+      "Intel(R) HD Graphics 520",
+      1920,
+      1080,
+      undefined,
+      undefined,
+      "IntegratedGpu",
+    );
+    expect(policy.capabilityPolicy).toBe("proxy");
+    expect(policy.maximumQuality).toBe("proxy");
   });
 
   // --- AMD iGPU ---
@@ -470,8 +468,12 @@ describe("preview hardware policy", () => {
       maxDimension: 1920,
       maximumQuality: "half" as const,
     };
-    expect(applyPreviewHardwarePolicy(1920, 1080, "full", halfPolicy).quality).toBe("half");
-    expect(applyPreviewHardwarePolicy(1920, 1080, "quarter", halfPolicy).quality).toBe("quarter");
+    expect(
+      applyPreviewHardwarePolicy(1920, 1080, "full", halfPolicy).quality,
+    ).toBe("half");
+    expect(
+      applyPreviewHardwarePolicy(1920, 1080, "quarter", halfPolicy).quality,
+    ).toBe("quarter");
   });
 });
 
@@ -483,7 +485,10 @@ describe("PreviewPerformancePolicyController", () => {
   it("steps down Intel Iris Xe after a sustained miss burst", () => {
     const controller = new PreviewPerformancePolicyController();
     for (let index = 0; index < 12; index += 1) {
-      controller.observe({ totalTimeUs: index < 3 ? 20_000 : 10_000, dropped: false });
+      controller.observe({
+        totalTimeUs: index < 3 ? 20_000 : 10_000,
+        dropped: false,
+      });
     }
     expect(
       controller.policyFor(
@@ -500,7 +505,10 @@ describe("PreviewPerformancePolicyController", () => {
   it("steps down AMD Radeon Vega 8 after a sustained miss burst", () => {
     const controller = new PreviewPerformancePolicyController();
     for (let index = 0; index < 12; index += 1) {
-      controller.observe({ totalTimeUs: index < 3 ? 20_000 : 10_000, dropped: false });
+      controller.observe({
+        totalTimeUs: index < 3 ? 20_000 : 10_000,
+        dropped: false,
+      });
     }
     // Vega 8 on 4K is already at proxy baseline — no further escalation
     const policy = controller.policyFor(
@@ -515,12 +523,13 @@ describe("PreviewPerformancePolicyController", () => {
     expect(policy.capabilityPolicy).toBe("proxy");
   });
 
-  it("does NOT escalate backpressure for discrete AMD RX 6800 XT", () => {
+  it("reduces a discrete AMD GPU only after sustained measured pressure", () => {
     const controller = new PreviewPerformancePolicyController();
     for (let index = 0; index < 60; index += 1) {
       controller.observe({ totalTimeUs: 20_000, dropped: true });
     }
-    // Discrete GPU — backpressure skipped, always full
+    // Device type is an initial hint, not proof that this runtime can sustain
+    // the active project (driver fallback and external displays can change it).
     expect(
       controller.policyFor(
         "AMD Radeon RX 6800 XT",
@@ -530,10 +539,10 @@ describe("PreviewPerformancePolicyController", () => {
         undefined,
         "DiscreteGpu",
       ),
-    ).toEqual({ capabilityPolicy: "full" });
+    ).toMatchObject({ capabilityPolicy: "reduced", maximumQuality: "half" });
   });
 
-  it("does NOT escalate backpressure for Nvidia RTX discrete", () => {
+  it("reduces a discrete Nvidia GPU only after sustained measured pressure", () => {
     const controller = new PreviewPerformancePolicyController();
     for (let index = 0; index < 60; index += 1) {
       controller.observe({ totalTimeUs: 20_000, dropped: true });
@@ -547,13 +556,16 @@ describe("PreviewPerformancePolicyController", () => {
         undefined,
         "DiscreteGpu",
       ),
-    ).toEqual({ capabilityPolicy: "full" });
+    ).toMatchObject({ capabilityPolicy: "reduced", maximumQuality: "half" });
   });
 
   it("does not react to isolated cold frames", () => {
     const controller = new PreviewPerformancePolicyController();
     for (let index = 0; index < 60; index += 1) {
-      controller.observe({ totalTimeUs: index === 0 ? 100_000 : 10_000, dropped: false });
+      controller.observe({
+        totalTimeUs: index === 0 ? 100_000 : 10_000,
+        dropped: false,
+      });
     }
     expect(
       controller.policyFor(
@@ -589,11 +601,17 @@ describe("PreviewPerformancePolicyController", () => {
     const controller = new PreviewPerformancePolicyController();
     // First burst: escalates to 1 (reduced)
     for (let index = 0; index < 12; index += 1) {
-      controller.observe({ totalTimeUs: index < 3 ? 20_000 : 10_000, dropped: false });
+      controller.observe({
+        totalTimeUs: index < 3 ? 20_000 : 10_000,
+        dropped: false,
+      });
     }
     // Second burst: escalates to 2
     for (let index = 0; index < 12; index += 1) {
-      controller.observe({ totalTimeUs: index < 3 ? 20_000 : 10_000, dropped: false });
+      controller.observe({
+        totalTimeUs: index < 3 ? 20_000 : 10_000,
+        dropped: false,
+      });
     }
     // Should stay at reduced (1080p half) rather than falling back to unaccelerated software proxy
     expect(
@@ -606,5 +624,60 @@ describe("PreviewPerformancePolicyController", () => {
         "IntegratedGpu",
       ),
     ).toMatchObject({ capabilityPolicy: "reduced", maximumQuality: "half" });
+  });
+
+  it("classifies Primary Display GPU as legacy-igpu to prevent false discrete promotion", () => {
+    expect(classifyGpuTier("Primary Display GPU", null)).toBe("legacy-igpu");
+    expect(classifyGpuTier("Primary Display GPU", "Other")).toBe("legacy-igpu");
+  });
+
+  it("gives precedence to authoritative native engine QoS snapshot over frontend heuristics", () => {
+    const controller = new PreviewPerformancePolicyController();
+
+    // With decode starvation signaled by native engine:
+    controller.updateFromNativeSnapshot({
+      mediaVariant: "Original",
+      renderQuality: "Full",
+      effectsPolicy: "Full",
+      reason: {
+        DecodeStarvation: {
+          decode_mean_us: 41171,
+          ready_depth: 0,
+        },
+      },
+      isDecodeStarved: true,
+    });
+
+    const policy = controller.policyFor(
+      "NVIDIA GeForce RTX 4090",
+      3840,
+      2160,
+      3840,
+      2160,
+      "DiscreteGpu",
+    );
+    expect(policy.capabilityPolicy).toBe("proxy");
+    expect(policy.maximumQuality).toBe("proxy");
+
+    // With render degradation signaled by native engine:
+    controller.updateFromNativeSnapshot({
+      mediaVariant: "Original",
+      renderQuality: "Quarter",
+      effectsPolicy: "Reduced",
+      reason: "GpuRenderDeadlinePressure",
+      isDecodeStarved: false,
+    });
+
+    const renderPolicy = controller.policyFor(
+      "NVIDIA GeForce RTX 4090",
+      3840,
+      2160,
+      3840,
+      2160,
+      "DiscreteGpu",
+    );
+    expect(renderPolicy.capabilityPolicy).toBe("reduced");
+    expect(renderPolicy.maximumQuality).toBe("quarter");
+    expect(renderPolicy.maxDimension).toBe(1280);
   });
 });

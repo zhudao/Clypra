@@ -6,6 +6,120 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-09-29
+
+### 🐛 Bug Fixes
+
+- **Native preview embedded in editor canvas** — native preview is now always rendered inside Clypra's main editor canvas instead of a separate Tauri/OS child window. Prevents the preview from escaping and overlapping dialogs, appearing on a different Space/desktop on macOS, or failing to track the app window on Windows, X11, and Wayland. Covers `nativeCore.ts`, `useNativeSurfaceController.ts`, `NativeProgramPreview.tsx`, and `nativeSurfaceLifecycle.ts` (#428).
+
+- **Source preview timecode no longer shows frame counter** — replaced `formatTimecode` (MM:SS:FF) with `formatTime` (MM:SS / HH:MM:SS) in `SourcePreview` so the player transport no longer shows a rapidly counting frames segment next to current and total time (#427).
+
+- **QoS oscillation causing audio cracking** — QoS controller was evaluating on every RAF tick (every 16ms) instead of complete non-overlapping 250ms windows, causing Full→Half→Quarter→Full quality thrashing hundreds of times per minute. Surface resize churn from the oscillation interrupted the CPAL audio pipeline. Fixed by requiring `window_capacity` (15) new samples between evaluations (#429).
+
+- **Audio stops near end of clip** — when video reached the terminal frame the CPAL stream was not closed promptly, draining to silence and stalling. Fixed with explicit terminal-frame stream close emitting `clypra://playback-ended` (#429).
+
+- **Restart desync after silence gap** — on restart after the audio dropout, the video clock was not re-anchored to the new CPAL stream. `begin_transport()` now resets the full QoS state (window, counters, decision) before each new play run (#429).
+
+- **Persistent -12ms AV drift from first frame** — CPAL `firstAudibleUs=51ms` was not fed into the video clock anchor. `nativeAudioPreviewController` now hard-reanchors the UI clock to the first non-silent hardware callback, eliminating inherited extrapolation from any prior stream (#430).
+
+- **Preview transport stuck at 00:00** — `NativeProgramPreview` was reading transport time from a React subscription snapshot that could remain stale after a project reset. Transport time is now driven from a 30 Hz RAF read of `getPlaybackClock()` — the same singleton used by the timeline playhead. Project resets reset state on the existing clock instance so mounted controls retain valid subscriptions (#430).
+
+- **Seek storm at 00:02 (130ms repeated seeks)** — `nativeAudioPreviewController` fired one native audio seek per RAF notification while a frame was settling. Transport acknowledgement is now separated from visual-frame settlement; native audio receives exactly one seek per monotonic `seekRevision` increment (#430).
+
+- **Audio goes silent before end of long clips** — in-process FFmpeg resampler tail samples were not drained at EOF and any decode shortfall >100ms was silently accepted, causing long clips to lose seconds of audio. Decoder now drains the resampler at EOF, treats shortfall >100ms as invalid, and recovers through the independent CLI FFmpeg decoder before installing audio into the mixer (#430).
+
+### ⚡ Performance
+
+- **Filmstrip no longer competes with playback** — filmstrip thumbnail batch jobs are deferred and cancelled while playback is running, preventing thumbnail decoding from competing with the audio/video decoder for memory bandwidth. Session data showed a 659ms filmstrip artifact job causing max AV drift to grow from 38ms to 157ms over a session (#430).
+
+- **Adaptive embedded-preview readback cap** — new `adaptiveReadbackPolicy.ts` monitors WebView readback/IPC duration and automatically steps the canvas resolution cap down under pressure: 960→840→720→600→480px. Fallback FPS paces at 30fps, dropping to 24/20fps at reduced tiers. Quality recovers only after 90 consecutive fast transfers, preventing oscillation. Affects only the CPU-RGBA embedded canvas fallback path (#430).
+
+### 🔧 Architecture
+
+- **PlaybackClock monotonic `seekRevision`** — `PlaybackClock` exposes a monotonic seek identity counter. Consumers deduplicate seek side effects (native audio seeks, decoder seeks, telemetry) by identity rather than reacting to every `isSeeking` notification. Global clock identity now survives project resets (#430).
+
+- **Apple Silicon `HighEnd` capability tier** — Apple Silicon with VideoToolbox is now classified as `HighEnd` (was `Constrained`/`Moderate`), starting at full quality with QoS degrading only under real measured pressure (#429, #430).
+
+- **Intel GPU detection case-insensitive** — driver strings reporting `intel` (lowercase) were bypassing constrained policies. Detection is now case-insensitive (#430).
+
+- **UHD 630 2GB boundary corrected to `Moderate`** (#430).
+
+- **Low-end Windows discrete GPUs start constrained** — entry-level discrete GPUs (GT 1030, GTX 750 Ti class) no longer assumed fast just because they are discrete. Quality degrades only under sustained measured frame pressure (#430).
+
+### 🛠️ CI / Testing
+
+- **Clippy `-D warnings` clean across all engine v2 Rust code** — 20 Clippy lint errors in the native realtime engine v2 code fixed: `derivable_impls`, `collapsible_match`, `needless_borrow`, `borrowed_box`, `get_first`, `module_inception`, `large_enum_variant`, `cast_lossless`, `clone_on_copy` (#426).
+
+## [1.5.5] - 2026-09-28
+
+### � Features & Architecture
+
+- **Native Realtime Playback Engine v2 (Phases A–J)** — complete architectural overhaul of the realtime playback and presentation pipeline (#418, #419, #420):
+  - _Phase A_: Engine contracts and core foundation.
+  - _Phase B_: Native `ProjectState` and `TimelineEvaluator` — authoritative zero-IPC evaluation model.
+  - _Phase C_: Native `PlaybackController` with monotonic audio-master clock.
+  - _Phase D_: Hardware decode contracts for D3D12VA / VideoToolbox with same-adapter topology enforcement.
+  - _Phase E_: `VideoSurface` ownership, fence synchronization, and swapchain presentation.
+  - _Phase F_: Prioritized work planner with bounded prefetch queue.
+  - _Phase G_: Temporal navigation and seek/scrub state machine with cancellation and keyframe recovery.
+  - _Phase H_: Render graph DAG, transient resource pooling, and barrier scheduling.
+  - _Phase I_: Dynamic QoS governor with non-blocking bottleneck diagnosis.
+  - _Phase J_: Telemetry integration, zero-copy audit, and live hardware verification.
+  - Verified with 191 Rust engine unit tests and 57 frontend preview tests.
+
+- **Hardware Capability Profiling Module** — new `engine::hardware::capability` module profiles runtime GPU capabilities (vendor, VRAM, decode acceleration, zero-copy support) and feeds results into the QoS controller and telemetry pipeline (#421, #422).
+
+- **NLE-Grade Media Presence Watchdog & GPU Invalidation Pipeline** — full offline/relink lifecycle for media assets (#417):
+  - Heartbeat watchdog detects files that disappear at runtime (unmounted drives, moved folders) and marks `isMissing` on the affected asset.
+  - New `unregister_native_raster_asset` Tauri command evicts the GPU texture slot and purges the in-memory raster cache entry when an asset goes offline.
+  - `evictMissingAsset` in `PreviewMediaPool` removes the pool entry, preventing stale frames from compositing.
+  - Relinking clears the missing flag and triggers an immediate GPU re-upload.
+  - `isMissing` busts the evaluator asset version hash so missing layers are skipped immediately.
+
+### 🐛 Bug Fixes
+
+- **Bundled FFmpeg Pipeline Always Falling Back to System Decode** — three root causes fixed (#424):
+  - `is_real_executable()` accepted 316-byte `#!/bin/sh` stubs on macOS/Linux (only validated PE headers on Windows). Fix: reject files whose first two bytes are `#!` and enforce a 1 MB minimum size floor.
+  - `is_bundled_path()` only matched the triple-qualified name (e.g. `ffmpeg-aarch64-apple-darwin`), missing plain `ffmpeg` copies. Fix: accept both forms.
+  - `ensure-sidecars.mjs` was a stub from May that never copied the real sidecar into `target/{debug,release}/`. Fix: now syncs stale copies whenever the destination is missing, under 1 MB, or older than the source.
+  - Verified: session perf log confirms `ffmpegRuntime='bundled'`, D3D12VA hardware decode, `is_zero_copy=true`.
+
+- **Temporal Discontinuity and Restart Desync in Native Playback** — seven targeted fixes (#420):
+  - Temporal discontinuity detection in `NativePreviewFrameQueue` (`discard_discontinuity`) discards stale lookahead frames on backward jumps.
+  - `cancel_native_preview_requests` now invalidates the generation and aborts in-flight lookahead workers.
+  - `schedule_lookahead_predecode` deadlock resolved — `start > target_end` on backward jumps no longer hangs.
+  - Lookahead worker active range `[start_frame..=end_frame]` tracked to abort out-of-range workers immediately.
+  - `NativeRenderSession` re-anchors from snapshot when audio clock regresses backwards.
+  - `last_materialized` cleared and render loop notified on re-start or seek from audio.
+  - Seek controller generation synced in frontend RAF loop; request key cache cleared on seek.
+
+- **QoS Decode vs Render Scaling Separation & Authoritative Native Policy** — forensic analysis of session `launch-1790581694397-4qx5x7` revealed Intel HD 520 render scaling (Half/Quarter) reduced canvas compositing but did not alleviate decode starvation (#419):
+  - `RenderQuality` (canvas compositing) separated from `MediaVariant` (decode scaling via proxy stream) in engine QoS hierarchy.
+  - `probe_machine_identity()` replaced hardcoded `'Primary Display GPU'` with probed DXGI `GpuAdapterIdentity` (vendor ID, device ID, LUID, VRAM) — the misclassification was treating the Intel HD 520 as `discrete` and bypassing all backpressure escalation.
+  - Severe A/V drift recovery: when video lags >120 ms behind audio, stale backlogs are purged and predecoders re-anchored to the live playhead.
+  - `PlaybackPolicySnapshot`, `PerformanceEnvelope`, `PlaybackResolutionDemand`, and `DecodeStrategy` added to `engine::qos`.
+  - Frontend GPU-vendor guessing removed; `get_playback_policy` Tauri command and `listenForEngineQoSDecision` make native QoS the sole authority.
+
+- **Windows Blank Video (HEVC Codec)** — HEVC+AAC proxy was cached by hash; WebView2 decoded audio but rendered blank video because no HEVC codec was available and `onError` never fired. `can_stream_copy_video` now returns `false` on non-macOS for `hevc/hvc1/av1/prores`; cached proxies are revalidated to confirm browser playability (#415).
+
+- **Windows Video Preview Platform-Aware Codec Rules** — added `probe_audio_codec()` and `is_browser_playable_audio()` to detect E-AC-3/AC-3 streams incompatible with WebView2. H.264 + E-AC-3 on Windows now takes a stream-copy + audio transcode path instead of a full re-encode (#414).
+
+- **Blocking 'Preparing Video' Spinner Removed** — video elements now render immediately against the raw file path on all platforms. Background optimization runs silently; when the H.264 proxy is ready the `src` switches seamlessly. `isOptimizingPreview` state, pre-emptive transcoding gate, and the spinner block removed entirely (#416).
+
+- **CI Test Suite Fully Green** — resolved 3 failing tests blocking CI on every PR (#425):
+  - _Frontend_: `previewHardwarePolicy.test.ts` updated — the test expected `full` for Intel HD 520 on 1080p canvas but the policy unconditionally returns `proxy` for all `legacy-igpu` regardless of canvas size.
+  - _Rust J14 / J15_: Fixed stale ring-buffer contamination in `run_qos_scenario`. After degradation filled the 15-slot ring, the first recovery window still saw `miss_ratio > 0.25`, triggering a second degradation step (`Half → Quarter`). Fix: pre-flush the ring with `window_capacity` clean frames before the recovery loop.
+
+### ⚡ Performance
+
+- **Legacy iGPU Unconditional Proxy** — `legacy-igpu` tier (Intel HD/UHD, AMD Vega 8/11, Nvidia MX 1xx) now always returns `PROXY_POLICY` for preview regardless of canvas size, removing the 2500px dimension gate that allowed these adapters into native compositor mode and caused stutter (#423).
+
+- **Text Alpha Channel Scan Cache** — `hasVisibleAlpha` results in `textRasterizer.ts` are now cached in a module-level `Map<string, boolean>` (capped at 256 entries, LRU eviction). The synchronous `getImageData` + full-pixel scan runs once per unique layer state instead of every frame (#423).
+
+- **Rasterization Hot-Path Console Logs Removed** — two `console.log` calls firing on every text layer rasterization removed from `nativeTextPreview.ts`, recovering 1–3 ms per text layer per frame on Tauri's WebView console channel (#423).
+
+- **Faster Legacy iGPU Backpressure Escalation** — `legacy-igpu` tier escalates after 5 samples / 2 overloaded (down from 12 / 3), dropping quality within ~85 ms of the first bad burst instead of several hundred ms (#423).
+
 ## [1.5.4] - 2026-09-27
 
 ### 🚀 Features & Architecture

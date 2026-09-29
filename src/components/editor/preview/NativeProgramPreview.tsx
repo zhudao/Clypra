@@ -84,10 +84,12 @@ import {
   getNativeFrameServiceSamples,
   getNativeSyncMetricsSnapshot,
   getNativeGpuStatus,
+  getPlaybackPolicy,
   registerNativeRasterAsset,
   renderNativeFrame,
   queueNativeFrame,
   listenForNativePlaybackStats,
+  listenForEngineQoSDecision,
   listenForNativeMaskEviction,
   listenForNativeRasterEviction,
   type NativePlaybackStatsPayload,
@@ -127,6 +129,7 @@ import {
   NativePreviewFrameScheduler,
   type NativePreviewRequestSource,
 } from "./nativePreviewScheduler";
+import { AdaptiveReadbackPolicy } from "./adaptiveReadbackPolicy";
 import { previewQualificationController } from "@/core/playback/previewPerformanceContract";
 import {
   NativeSurfaceOutput,
@@ -134,6 +137,7 @@ import {
 } from "@/core/playback/previewOutputAdapters";
 import { ensureNativeFontsRegistered } from "@/core/fonts/nativeFontRegistry";
 import {
+  EMBEDDED_PREVIEW_ONLY,
   NATIVE_PREVIEW_ONLY,
   createNativePlaybackFrameDemand,
   type NativeFrameRequest,
@@ -262,9 +266,9 @@ function capWebViewRenderTarget(target: {
   width: number;
   height: number;
   quality: NativeFrameRequest["quality"];
-}): typeof target {
+}, maxDimension = getWebViewReadbackLimit()): typeof target {
   const largest = Math.max(target.width, target.height);
-  const limit = getWebViewReadbackLimit();
+  const limit = maxDimension;
   if (largest <= limit) return target;
   const scale = limit / largest;
   return {
@@ -326,9 +330,50 @@ interface ConnectedProgramTransportProps {
   setScopesOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
+/**
+ * Program transport is a live readout, not a render dependency. Read the
+ * same singleton used by the timeline playhead on animation frames so a React
+ * subscription or project-lifecycle transition can never leave the controls
+ * displaying an obsolete clock snapshot.
+ */
+function useAuthoritativeProgramTransportClock() {
+  const [snapshot, setSnapshot] = useState(() => getPlaybackClock().getState());
+
+  useEffect(() => {
+    let rafId = 0;
+    let lastPublishedAt = -Infinity;
+    const tick = (now: number) => {
+      const next = getPlaybackClock().getState();
+      // 30Hz is visually smooth for the scrub bar but confines React work to
+      // this small transport leaf. State transitions publish immediately.
+      if (now - lastPublishedAt >= 1000 / 30) {
+        lastPublishedAt = now;
+        setSnapshot((previous) => {
+          if (
+            previous.state === next.state &&
+            previous.speed === next.speed &&
+            previous.duration === next.duration &&
+            Math.abs(previous.time - next.time) < 1 / 120
+          ) {
+            return previous;
+          }
+          return next;
+        });
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+    // The singleton is intentionally resolved inside tick().
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return snapshot;
+}
+
 const ConnectedProgramTransport: React.FC<ConnectedProgramTransportProps> =
   React.memo((props) => {
-    const clockState = usePlaybackClock();
+    const clockState = useAuthoritativeProgramTransportClock();
     return (
       <PreviewTransport
         currentTime={clockState.time}
@@ -606,10 +651,26 @@ export const NativeProgramPreview: React.FC = () => {
     let unlisten: (() => void) | undefined;
     void listenForNativePlaybackStats((stats) => {
       setPlaybackStats(stats);
-      console.log(
-        `%c[av-sync][perf] 📊 ${stats.framesRendered} frames (${stats.fps}fps) | Lookahead: ${stats.hitRatePercent.toFixed(1)}% cache hit | Avg Latency: ${stats.avgTotalMs.toFixed(2)}ms (decode: ${stats.avgDecodeMs.toFixed(2)}ms) | Peak: ${stats.maxFrameMs.toFixed(2)}ms | Streams: ${stats.stackedStreams}`,
-        "color: #06b6d4; font-weight: bold;",
-      );
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listenForEngineQoSDecision(() => {
+      getPlaybackPolicy()
+        .then((policy) => {
+          previewPerformancePolicyRef.current.updateFromNativeSnapshot(policy);
+          forceRepaintNativeProgramPreview();
+        })
+        .catch(() => {});
     })
       .then((fn) => {
         unlisten = fn;
@@ -636,6 +697,13 @@ export const NativeProgramPreview: React.FC = () => {
             });
             forceRepaintNativeProgramPreview();
           }
+        })
+        .catch(() => {});
+
+      getPlaybackPolicy()
+        .then((policy) => {
+          previewPerformancePolicyRef.current.updateFromNativeSnapshot(policy);
+          forceRepaintNativeProgramPreview();
         })
         .catch(() => {});
     }
@@ -689,10 +757,14 @@ export const NativeProgramPreview: React.FC = () => {
             sample.dropReason === "cancelled" ||
             sample.dropReason === "stale";
           if (!isTransportDrop) {
-            previewPerformancePolicyRef.current.observe({
-              totalTimeUs: sample.totalTimeUs,
-              dropped: sample.dropped === true,
-            });
+            previewPerformancePolicyRef.current.observe(
+              {
+                totalTimeUs: sample.totalTimeUs,
+                dropped: sample.dropped === true,
+              },
+              nativeGpuAdapterNameRef.current,
+              nativeGpuDeviceTypeRef.current,
+            );
           }
           const sequence = nativeSampleBatch.firstSequence + index;
           telemetryCollector.recordNativeSyncSnapshot(
@@ -1184,6 +1256,9 @@ export const NativeProgramPreview: React.FC = () => {
     let lastLoggedMissingTextSignature = "";
     let lastLoggedTextDropSignature = "";
     let nativeReadinessQueueKey = "";
+    const adaptiveReadbackPolicy = new AdaptiveReadbackPolicy(
+      getWebViewReadbackLimit(),
+    );
     const nativeTextPrefetchInFlight =
       nativePrefetchStateRef.current.textInFlight;
     const nativeTextPrefetchCompleted =
@@ -1199,7 +1274,6 @@ export const NativeProgramPreview: React.FC = () => {
     let nativeTextPrefetchTimer: number | null = null;
 
     let nativeSurfaceShown = false;
-    let playbackPipelineLogged = false;
     let lastNativePlaybackRequestKey = "";
     let visibleRequestKey = "";
     const seekController =
@@ -1858,11 +1932,15 @@ export const NativeProgramPreview: React.FC = () => {
         frontendSpan?.markDispatchStarted();
         if (frontendSpan) nativeFrontendPerfSpans.set(requestKey, frontendSpan);
         const render = async () => {
+          const readbackStartedAt = performance.now();
           frontendSpan?.markIpcStarted();
           try {
             return await renderNativeFrame(request);
           } finally {
             frontendSpan?.markIpcFinished();
+            adaptiveReadbackPolicy.recordReadback(
+              performance.now() - readbackStartedAt,
+            );
           }
         };
         let rgba: ArrayBuffer;
@@ -1897,6 +1975,7 @@ export const NativeProgramPreview: React.FC = () => {
         intent.generation,
       );
       nativePreviewScheduler.setVisibleGeneration(intent.generation);
+      lastNativePlaybackRequestKey = "";
       void cancelNativePreviewRequests(intent.generation).catch(
         () => undefined,
       );
@@ -2425,7 +2504,10 @@ export const NativeProgramPreview: React.FC = () => {
           qualificationState.path === "webview" ||
           !nativeSurfaceCanOwnPlayback;
         const renderTarget = webViewTargetRequired
-          ? capWebViewRenderTarget(baseRenderTarget)
+          ? capWebViewRenderTarget(
+              baseRenderTarget,
+              adaptiveReadbackPolicy.maxDimension,
+            )
           : baseRenderTarget;
 
         // Dual-lane preview:
@@ -2763,6 +2845,11 @@ export const NativeProgramPreview: React.FC = () => {
           visibleRequestGeneration += 1;
           nativePreviewScheduler.setVisibleGeneration();
         }
+        const seekGeneration = seekController?.getGeneration() ?? 0;
+        if (seekGeneration > visibleRequestGeneration) {
+          visibleRequestGeneration = seekGeneration;
+          nativePreviewScheduler.setVisibleGeneration(visibleRequestGeneration);
+        }
         const interactionGeneration =
           previewInteractionCoordinator.getGeneration().revision;
         if (interactionGeneration > visibleRequestGeneration) {
@@ -2876,6 +2963,7 @@ export const NativeProgramPreview: React.FC = () => {
           nativeContinuousBlockedRevision = "";
         }
         const nativeSurfaceUsable =
+          !EMBEDDED_PREVIEW_ONLY &&
           nativeSurfaceReadyNow &&
           nativeSurfaceGeometrySettledRef.current &&
           nativeContinuousBlockedRevision !== nativeRevision;
@@ -2890,6 +2978,7 @@ export const NativeProgramPreview: React.FC = () => {
         // transition completes; explicit GPU errors and qualification runs
         // remain eligible for the compatibility renderer.
         const deferWebViewFallbackForNativeStartup =
+          !EMBEDDED_PREVIEW_ONLY &&
           isTauriRuntime() &&
           isPlaying &&
           Boolean(nativePlaybackRequest) &&
@@ -2907,7 +2996,7 @@ export const NativeProgramPreview: React.FC = () => {
         const nativeDirectSurfacePath =
           nativeSurfaceUsable &&
           Boolean(nativeRequest) &&
-          nativePlaybackPath &&
+          (nativePlaybackPath || nativePausedPath) &&
           !qualificationForcesWebView;
         const outputAdapter = nativeDirectSurfacePath
           ? NativeSurfaceOutput
@@ -2988,7 +3077,6 @@ export const NativeProgramPreview: React.FC = () => {
         // SafeOverlay, captions).
         if (!isPlaying) {
           nativePlaybackRenderFailed = false;
-          playbackPipelineLogged = false;
         }
         const nativeSurfaceNeedsHide =
           nativeSurfaceShown &&
@@ -3046,21 +3134,6 @@ export const NativeProgramPreview: React.FC = () => {
               dragPreviewRevision === dragPreviewRevisionAtStart) &&
             (!requireExactFrame ||
               currentFrameIndex === frameIndex);
-          if (!matches) {
-            console.log("%c[preview-diag] targetStillCurrent rejected frame:", "color:#f43f5e;font-weight:bold", {
-              isActive,
-              generationMatches,
-              visibleRequestGeneration,
-              targetGeneration,
-              hasDisplayedFrame: Boolean(nativeDisplayedFrameRef.current),
-              projectMatch: current.project?.id === state.project?.id,
-              epochMatch: current.epoch === state.epoch,
-              clockStateMatch: current.clock.state === playbackState,
-              frameMatch: !requireExactFrame || currentFrameIndex === frameIndex,
-              currentFrameIndex,
-              frameIndex,
-            });
-          }
           return matches;
         };
 
@@ -3073,6 +3146,9 @@ export const NativeProgramPreview: React.FC = () => {
           (isPlaying ? !cachedNativeFrame : true) &&
           nativeBlockedKey !== nativeRequestKey &&
           performance.now() >= nativeRetryAt &&
+          (!nativeReadbackFallbackPath ||
+            !isPlaying ||
+            adaptiveReadbackPolicy.canDispatchPlayback()) &&
           !nativePlaybackInFlight
         ) {
           const requestToPresent = isPlaying
@@ -3118,13 +3194,6 @@ export const NativeProgramPreview: React.FC = () => {
                     nativePlaybackRenderSnapshotInFlight === null) ||
                   (nativePlaybackRenderSnapshotKey !== "" && isPlaying)
                 ) {
-                  if (!playbackPipelineLogged) {
-                    playbackPipelineLogged = true;
-                    console.log(
-                      `%c[av-sync][pipeline] Continuous playback ACTIVE via persistent Native background worker (frame: ${requestToPresent.frameTime.frameIndex})`,
-                      "color: #10b981; font-weight: bold;",
-                    );
-                  }
                   // Rust owns the active decode/present operation and keeps
                   // one latest pending demand. This command contains only
                   // dynamic layer values; it never sends paths or the full
@@ -3171,25 +3240,9 @@ export const NativeProgramPreview: React.FC = () => {
                   lastNativePlaybackRequestKey = requestKey;
                 }
               } else if (
-                isPlaying &&
                 nativeSurfaceUsable &&
                 !qualificationForcesWebView
               ) {
-                if (!playbackPipelineLogged) {
-                  playbackPipelineLogged = true;
-                  console.warn(
-                    "[av-sync][pipeline] Fallback synchronous presentation active (not persistent worker):",
-                    {
-                      persistentNativePlaybackEligible,
-                      nativePlaybackRenderFailed,
-                      snapshotKeyMatch:
-                        nativePlaybackRenderSnapshotKey ===
-                        nativePlaybackSnapshotKeyFor(requestToPresent),
-                      snapshotInFlight:
-                        nativePlaybackRenderSnapshotInFlight !== null,
-                    },
-                  );
-                }
                 const tracePresentation = isFirstFrame || !isPlaying;
                 if (tracePresentation) {
                   // tracePlayback("native-present-start", {
@@ -3219,7 +3272,9 @@ export const NativeProgramPreview: React.FC = () => {
                         previewQualificationController.getState().status ===
                         "running"
                           ? "qualification"
-                          : "playback",
+                          : isPlaying
+                            ? "playback"
+                            : "seek",
                     })
                   : null;
                 frontendSpan?.markDispatchStarted();
@@ -3529,6 +3584,7 @@ export const NativeProgramPreview: React.FC = () => {
                   requestKey: readbackRequestKey,
                   request: readbackRequest,
                 };
+                adaptiveReadbackPolicy.markPlaybackDispatch();
                 nativePlaybackInFlight = nativePreviewScheduler
                   .requestVisible(readbackSource)
                   .then((frame) => {
@@ -3611,7 +3667,12 @@ export const NativeProgramPreview: React.FC = () => {
             nativeSurfaceOwnsCurrentFrame ||
             nativeDirectSurfacePath;
           if (state.clock.isSeeking && nativeFrameReady) {
-            state.clock.completeSeek();
+            const seekLatencyMs = state.clock.completeSeek();
+            if (seekLatencyMs !== null) {
+              // The embedded canvas is the presentation boundary. This is
+              // input-to-visible-frame latency, not merely seek IPC time.
+              telemetryCollector.recordSeekSpan(seekLatencyMs, false);
+            }
           }
         }
 
@@ -3648,36 +3709,6 @@ export const NativeProgramPreview: React.FC = () => {
               !nativeDirectSurfacePath &&
               performance.now() >= nativeRetryAt &&
               nativeBlockedKey !== nativeRequestKey;
-
-            // ── First-frame diagnostic ────────────────────────────────────
-            // Logs exactly ONE line per render loop start-up to expose which
-            // guard prevents the initial frame from being decoded.
-            if (isFirstFrame || forceRenderNeeded) {
-              console.log(
-                "%c[preview-diag] first-frame gate",
-                "color:#f59e0b;font-weight:bold",
-                {
-                  isFirstFrame,
-                  forceRenderNeeded,
-                  needsRender,
-                  nativePausedPath,
-                  canUseNativePreview,
-                  nativeRequest: Boolean(nativeRequest),
-                  cachedNativeFrame: Boolean(cachedNativeFrame),
-                  nativeDirectSurfacePath,
-                  nativeSurfaceShown,
-                  nativeBlockedKey: nativeBlockedKey || "(none)",
-                  nativeRequestKey: nativeRequestKey.slice(0, 60) + "…",
-                  nativeRetryAt: nativeRetryAt > 0 ? `${(nativeRetryAt - performance.now()).toFixed(0)}ms` : "ready",
-                  nativeFailureCount,
-                  surfaceReady: nativeSurfaceReadyRef.current,
-                  surfaceGeometrySettled: nativeSurfaceGeometrySettledRef.current,
-                  surfaceReadyRevision: nativeSurfaceReadyRevisionRef.current,
-                  lastSeenRevision: lastSeenNativeSurfaceReadyRevision,
-                },
-              );
-            }
-            // ─────────────────────────────────────────────────────────────
 
             if (
               canUseNativePreview &&
@@ -3724,17 +3755,6 @@ export const NativeProgramPreview: React.FC = () => {
                 nativeFrame = loadedFrame;
                 nativeDisplayedFrameRef.current = loadedFrame;
                 nativeRetryAt = 0;
-                // ── Readback success diagnostic ──
-                console.log(
-                  "%c[preview-diag] readback OK — frame received from Rust",
-                  "color:#10b981;font-weight:bold",
-                  {
-                    frameIndex,
-                    width: loadedFrame.width,
-                    height: loadedFrame.height,
-                    rgbaBytes: loadedFrame.rgba.byteLength,
-                  },
-                );
               } catch (error) {
                 // Keep the last native frame visible for this render boundary, then
                 // retry this exact request. One failed readback must not
@@ -3821,53 +3841,10 @@ export const NativeProgramPreview: React.FC = () => {
             if (nativeFrame && canvasEl) {
               const canvasPaintStarted = performance.now();
               const drawn = drawNativeFrameToCanvas(canvasEl, nativeFrame);
-              console.log(
-                "%c[preview-diag] drawNativeFrameToCanvas painted!",
-                "color:#06b6d4;font-weight:bold",
-                {
-                  drawn,
-                  canvasWidth: canvasEl.width,
-                  canvasHeight: canvasEl.height,
-                  displayWidth,
-                  displayHeight,
-                },
-              );
               if (!drawn) {
                 throw new Error(
                   "Native preview returned a frame that could not be drawn to the preview canvas",
                 );
-              }
-              // ── Diagnostic: inspect canvas pixels & DOM layering ──
-              try {
-                const sampleCtx = canvasEl.getContext("2d");
-                if (sampleCtx) {
-                  const midX = Math.floor(canvasEl.width / 2);
-                  const midY = Math.floor(canvasEl.height / 2);
-                  const sample = sampleCtx.getImageData(midX, midY, 1, 1).data;
-                  console.log(
-                    "%c[preview-diag] CANVAS PIXEL SAMPLE (center):",
-                    "color:#ec4899;font-weight:bold",
-                    `R=${sample[0]} G=${sample[1]} B=${sample[2]} A=${sample[3]}`,
-                    sample[0] === 0 && sample[1] === 0 && sample[2] === 0 ? "(ALL BLACK)" : "(COLORED PIXELS OK!)",
-                  );
-                }
-                const rect = canvasEl.getBoundingClientRect();
-                const elemAtPoint = document.elementFromPoint(
-                  rect.left + rect.width / 2,
-                  rect.top + rect.height / 2,
-                );
-                console.log(
-                  "%c[preview-diag] TOPMOST DOM ELEMENT AT CANVAS CENTER:",
-                  "color:#a855f7;font-weight:bold",
-                  {
-                    tagName: elemAtPoint?.tagName,
-                    className: elemAtPoint?.className?.slice(0, 80),
-                    testId: elemAtPoint?.getAttribute("data-testid"),
-                    isCanvas: elemAtPoint === canvasEl,
-                  },
-                );
-              } catch (diagErr) {
-                console.warn("[preview-diag] sampling failed", diagErr);
               }
               canvasPaintMs = performance.now() - canvasPaintStarted;
               if (
@@ -3975,7 +3952,10 @@ export const NativeProgramPreview: React.FC = () => {
               isPlaying ||
               nativeSurfaceOwnsCurrentFrame;
             if (state.clock.isSeeking && nativeFrameReady) {
-              state.clock.completeSeek();
+              const seekLatencyMs = state.clock.completeSeek();
+              if (seekLatencyMs !== null) {
+                telemetryCollector.recordSeekSpan(seekLatencyMs, false);
+              }
             }
           } catch (error) {
             console.error("[native-preview] paused-frame-failed", {

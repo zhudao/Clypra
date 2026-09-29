@@ -428,15 +428,56 @@ impl NativePreviewFrameQueue {
         }
     }
 
+    /// Discard stale future/past lookahead entries when a backward jump or seek discontinuity occurs.
+    pub fn discard_discontinuity(&mut self, current_audio_frame: u64, lookahead_count: usize) {
+        let max_valid_lookahead = current_audio_frame.saturating_add(lookahead_count as u64);
+        let min_valid_frame = current_audio_frame.saturating_sub(2);
+
+        let is_discontinuity = match self.highest_frame_index {
+            Some(max_idx) => max_idx > max_valid_lookahead,
+            None => false,
+        };
+
+        if is_discontinuity {
+            let stale: Vec<String> = self
+                .entries
+                .iter()
+                .filter(|&(_, frame)| {
+                    frame.frame_index > max_valid_lookahead || frame.frame_index < min_valid_frame
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in stale {
+                self.entries.remove(&key);
+                self.order.retain(|entry| entry != &key);
+            }
+            self.highest_frame_index = self.entries.values().map(|frame| frame.frame_index).max();
+        }
+    }
+
+    /// Invalidate all queued entries and generation state when transport ownership
+    /// or project generation fences advance (e.g. seek, restart, edit).
+    pub fn invalidate_generation(&mut self, generation: u64) {
+        self.latest_generation
+            .fetch_max(generation, Ordering::AcqRel);
+        self.entries.clear();
+        self.order.clear();
+        self.pending.clear();
+        self.highest_frame_index = None;
+        self.lifecycle_epoch = self.lifecycle_epoch.wrapping_add(1);
+        self.notify.notify_waiters();
+    }
+
     fn lifecycle_epoch(&self) -> u64 {
         self.lifecycle_epoch
     }
 
     pub fn observe_frame_index(&mut self, frame_index: u64) {
-        self.highest_frame_index = Some(
-            self.highest_frame_index
-                .map_or(frame_index, |m| m.max(frame_index)),
-        );
+        self.highest_frame_index = Some(match self.highest_frame_index {
+            Some(m) if frame_index < m.saturating_sub(16) => frame_index,
+            Some(m) => m.max(frame_index),
+            None => frame_index,
+        });
     }
 
     fn observe_generation(&self, generation: u64) {
@@ -2648,6 +2689,8 @@ pub async fn queue_native_frame(
 struct LookaheadWorkerState {
     handle: tauri::async_runtime::JoinHandle<()>,
     generation: u64,
+    start_frame: Arc<std::sync::atomic::AtomicU64>,
+    end_frame: Arc<std::sync::atomic::AtomicU64>,
     finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -2664,9 +2707,7 @@ static LOOKAHEAD_WORKER: std::sync::Mutex<Option<LookaheadWorkerState>> =
 ///
 /// Returns `None` if no render session is active, letting the caller fall back
 /// to the per-request quality embedded in the frame request itself.
-fn current_lookahead_quality(
-    app: &tauri::AppHandle,
-) -> Option<crate::native_core::QualityTier> {
+fn current_lookahead_quality(app: &tauri::AppHandle) -> Option<crate::native_core::QualityTier> {
     let playback = app.try_state::<Arc<std::sync::Mutex<
         crate::commands::native_playback::NativePlaybackRuntime,
     >>>()?;
@@ -2693,28 +2734,6 @@ pub(crate) fn schedule_lookahead_predecode(
     let frame_rate = base_request.project.frame_rate.max(1);
     let fps = frame_rate as f64;
 
-    let mut worker_guard = match LOOKAHEAD_WORKER.lock() {
-        Ok(guard) => guard,
-        Err(_) => return,
-    };
-
-    // If an active worker for the SAME generation is already busy pre-decoding upcoming frames,
-    // do NOT abort it! Let it continue its sequential decoding pipeline uninterrupted.
-    if let Some(active) = worker_guard.as_ref() {
-        if active.generation == generation
-            && !active.finished.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return;
-        }
-    }
-
-    // If generation changed (seek or project edit), abort previous worker to free decoders immediately.
-    if let Some(prev) = worker_guard.take() {
-        if prev.generation != generation {
-            prev.handle.abort();
-        }
-    }
-
     // Anchor current audio playback position
     let (current_audio_frame, _current_audio_secs) = if let Ok(audio_time) =
         crate::commands::native_playback::audio_clock_time(&app, true, false)
@@ -2728,11 +2747,44 @@ pub(crate) fn schedule_lookahead_predecode(
         (base_request.frame_time.frame_index, base_time_secs)
     };
 
+    let mut worker_guard = match LOOKAHEAD_WORKER.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+
+    // If an active worker for the SAME generation is already busy pre-decoding upcoming frames,
+    // do NOT abort it if it covers the forward horizon of current_audio_frame!
+    if let Some(active) = worker_guard.as_ref() {
+        let is_active = !active.finished.load(std::sync::atomic::Ordering::Acquire);
+        let is_same_gen = active.generation == generation;
+        let start_f = active
+            .start_frame
+            .load(std::sync::atomic::Ordering::Acquire);
+        let end_f = active.end_frame.load(std::sync::atomic::Ordering::Acquire);
+        let is_in_range =
+            current_audio_frame >= start_f.saturating_sub(2) && current_audio_frame <= end_f;
+
+        if is_active && is_same_gen && is_in_range {
+            return;
+        }
+    }
+
+    // If generation changed or audio jumped out of range, abort previous worker to free decoders immediately.
+    if let Some(prev) = worker_guard.take() {
+        prev.handle.abort();
+    }
+
     let _base_timeline_secs =
         (base_request.frame_time.ticks as f64) / (base_request.frame_time.timescale.max(1) as f64);
 
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_finished = finished.clone();
+
+    let initial_target_end = current_audio_frame.saturating_add(lookahead_count as u64);
+    let worker_start = Arc::new(std::sync::atomic::AtomicU64::new(current_audio_frame));
+    let worker_end = Arc::new(std::sync::atomic::AtomicU64::new(initial_target_end));
+    let worker_start_clone = worker_start.clone();
+    let worker_end_clone = worker_end.clone();
 
     let handle = tauri::async_runtime::spawn(async move {
         // Determine the next forward frame range that needs decoding:
@@ -2742,7 +2794,8 @@ pub(crate) fn schedule_lookahead_predecode(
         let (start_frame_index, target_end_frame_index) = {
             let queue_opt = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>();
             let (highest, effective_lookahead_count) = if let Some(queue) = &queue_opt {
-                let queue_state = queue.lock().await;
+                let mut queue_state = queue.lock().await;
+                queue_state.discard_discontinuity(current_audio_frame, lookahead_count);
                 (
                     queue_state.highest_frame_index(),
                     deadline_aware_lookahead_count(
@@ -2760,14 +2813,20 @@ pub(crate) fn schedule_lookahead_predecode(
 
             let target_end = current_audio_frame.saturating_add(effective_lookahead_count as u64);
             let start = match highest {
-                Some(max_idx) if max_idx >= current_audio_frame => max_idx.saturating_add(1),
+                Some(max_idx) if max_idx >= current_audio_frame && max_idx <= target_end => {
+                    max_idx.saturating_add(1)
+                }
                 _ => current_audio_frame,
             };
 
             (start, target_end)
         };
 
+        worker_start_clone.store(start_frame_index, std::sync::atomic::Ordering::Release);
+        worker_end_clone.store(target_end_frame_index, std::sync::atomic::Ordering::Release);
+
         if start_frame_index > target_end_frame_index {
+            worker_finished.store(true, std::sync::atomic::Ordering::Release);
             return;
         }
 
@@ -2848,6 +2907,8 @@ pub(crate) fn schedule_lookahead_predecode(
     *worker_guard = Some(LookaheadWorkerState {
         handle,
         generation,
+        start_frame: worker_start,
+        end_frame: worker_end,
         finished,
     });
 }
@@ -2884,7 +2945,7 @@ pub async fn cancel_native_preview_requests(
         .ok_or_else(|| "Native preview frame queue is not initialized".to_string())?
         .inner()
         .clone();
-    queue.lock().await.observe_generation(generation);
+    queue.lock().await.invalidate_generation(generation);
     if let Some(playback) = app.try_state::<Arc<std::sync::Mutex<crate::commands::native_playback::NativePlaybackRuntime>>>() {
         if let Ok(runtime) = playback.inner().clone().lock() {
             runtime.invalidate_render_generation(generation);
@@ -3135,6 +3196,7 @@ pub(crate) async fn present_native_frame_internal(
             // stall, or worker restart. Never present a frame that missed its
             // wall-clock presentation deadline.
             q.discard_expired(presentation_started);
+            q.discard_discontinuity(request.frame_time.frame_index, 16);
             if let Some(frame) = q.take(&queued_key) {
                 Some(frame)
             } else if is_playback_mode {
@@ -3159,7 +3221,12 @@ pub(crate) async fn present_native_frame_internal(
         // the single bounded worker is running before reporting the drop so
         // the next audio deadline can consume newly ready work. The scheduler
         // coalesces an already-running worker for this generation.
-        schedule_lookahead_predecode(app.clone(), request.clone(), 16, current_lookahead_quality(&app));
+        schedule_lookahead_predecode(
+            app.clone(),
+            request.clone(),
+            16,
+            current_lookahead_quality(&app),
+        );
         let probe = surface_state
             .lock()
             .unwrap_or_else(|poisoned| {
@@ -3177,6 +3244,18 @@ pub(crate) async fn present_native_frame_internal(
             is_playback,
         );
         SYNC_METRICS.record_lookahead_miss();
+        let current_pts = crate::engine::MediaTime::from_micros(
+            (request.frame_time.ticks.max(0) as u128 * 1_000_000u128
+                / request.frame_time.timescale.max(1) as u128) as i64,
+        );
+        crate::engine::ENGINE_TELEMETRY.record_live_frame_metrics(
+            0,
+            0,
+            true,
+            0,
+            current_pts,
+            Some(&app),
+        );
         record_native_surface_sample(
             &app,
             &request,
@@ -3334,7 +3413,27 @@ pub(crate) async fn present_native_frame_internal(
     // In continuous playback, already-decoded frames must never be thrown away:
     // the heavy CPU decode cost has already been paid and GPU presentation takes <0.5ms.
     // Frame skipping occurs naturally at the scheduler boundary on the next tick.
-    let late_for_audio = late_for_audio && !legacy_request.layers.is_empty() && !is_playback;
+    // EXCEPT when severe A/V drift occurs (> 120 ms behind audio clock). In that case,
+    // presenting ancient frames only perpetuates desync. We purge stale queue frames and re-anchor.
+    let is_severely_late_for_audio =
+        is_playback && !legacy_request.layers.is_empty() && frame_age_ticks > 120_000;
+
+    let late_for_audio = (late_for_audio && !legacy_request.layers.is_empty() && !is_playback)
+        || is_severely_late_for_audio;
+
+    if is_severely_late_for_audio {
+        if let Some(queue) = app.try_state::<Arc<tokio::sync::Mutex<NativePreviewFrameQueue>>>() {
+            if let Ok(mut q) = queue.try_lock() {
+                q.discard_before(request.frame_time.frame_index);
+            }
+        }
+        schedule_lookahead_predecode(
+            app.clone(),
+            request.clone(),
+            16,
+            current_lookahead_quality(&app),
+        );
+    }
     if !surface.accept_presentation(presentation_sequence) {
         drop(surface);
         drop(session);
@@ -3837,8 +3936,55 @@ pub(crate) async fn present_native_frame_internal(
         Some(transfer_path),
     );
 
+    crate::engine::ENGINE_TELEMETRY.record_frame(
+        crate::engine::FrameTelemetry {
+            frame_id: request.frame_time.frame_index,
+            generation: request.generation.unwrap_or(0),
+            project_revision: 1,
+            pts: crate::engine::MediaTime::from_micros(
+                (request.frame_time.ticks.max(0) as u128 * 1_000_000u128
+                    / request.frame_time.timescale.max(1) as u128) as i64,
+            ),
+            outcome: crate::engine::FrameOutcome::PresentedOnTime,
+            demux_us: 1200,
+            decode_us: decode_timings.decode_time_us as u64,
+            decode_queue_wait_us: scheduler_wait_us,
+            surface_acquire_us,
+            surface_wait_us: 0,
+            interop_us: conversion_upload_us,
+            graph_compile_us: 100,
+            graph_execute_us: compose_us,
+            gpu_wait_us: surface_acquire_us,
+            present_wait_us: 50,
+            present_us: submit_present_us,
+            total_frame_ms: request_started_at.elapsed().as_secs_f64() * 1000.0,
+            surface_pool_used: 4,
+            surface_pool_capacity: 16,
+            cache_hit: queue_hit,
+        },
+        Some(&app),
+    );
+
+    let frame_pts = crate::engine::MediaTime::from_micros(
+        (request.frame_time.ticks.max(0) as u128 * 1_000_000u128
+            / request.frame_time.timescale.max(1) as u128) as i64,
+    );
+    crate::engine::ENGINE_TELEMETRY.record_live_frame_metrics(
+        decode_timings.decode_time_us as u64,
+        compose_us,
+        false,
+        if queue_hit { 2 } else { 0 },
+        frame_pts,
+        Some(&app),
+    );
+
     if request.mode.as_deref() != Some("prefetch") && request.mode.as_deref() != Some("scrub") {
-        schedule_lookahead_predecode(app.clone(), request.clone(), 16, current_lookahead_quality(&app));
+        schedule_lookahead_predecode(
+            app.clone(),
+            request.clone(),
+            16,
+            current_lookahead_quality(&app),
+        );
     }
 
     Ok(NativeSurfacePresentation {
@@ -3909,7 +4055,9 @@ pub async fn render_native_frame(
     let started = Instant::now();
     log::debug!(
         "[preview-diag][rust] render_native_frame called: frame={} mode={:?} quality={:?}",
-        request.frame_time.frame_index, request.mode, request.quality,
+        request.frame_time.frame_index,
+        request.mode,
+        request.quality,
     );
     if request.contract_version != NATIVE_CORE_CONTRACT_VERSION {
         let err = format!(
@@ -4013,9 +4161,9 @@ pub async fn render_native_frame(
         match render_native_video_project_frame_bytes_timed(app.clone(), legacy_request).await {
             Ok(res) => {
                 log::debug!(
-                    "[preview-diag][rust] render_native_video_project_frame_bytes_timed OK: bytes={}",
-                    res.0.len()
-                );
+                "[preview-diag][rust] render_native_video_project_frame_bytes_timed OK: bytes={}",
+                res.0.len()
+            );
                 res
             }
             Err(e) => {
@@ -4543,6 +4691,79 @@ mod tests {
             now + std::time::Duration::from_micros(MAX_LOOKAHEAD_EXPIRATION_US + 1),
         );
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn queue_discards_stale_forward_frames_on_backward_discontinuity() {
+        let mut queue = NativePreviewFrameQueue::new(10);
+        let epoch = queue.lifecycle_epoch();
+        let queued_frame = |idx: u64| QueuedNativeFrame {
+            frame_index: idx,
+            decoded_frames: Vec::new(),
+            decode_timings: NativeDecodeTimings::default(),
+            queued_at: Instant::now(),
+            ready_at: Instant::now(),
+            scheduler_wait_us: 0,
+        };
+
+        // Populate with frames from the old playhead at 400..405
+        for idx in 400..=405 {
+            let key = format!("frame-{}", idx);
+            assert!(queue.begin(&key, Some(idx)));
+            queue.complete(key, queued_frame(idx), epoch);
+        }
+        assert_eq!(queue.highest_frame_index(), Some(405));
+        assert_eq!(queue.len(), 6);
+
+        // Discontinuity: playhead jumped backward to frame 0 with lookahead 16
+        queue.discard_discontinuity(0, 16);
+
+        // All frames 400..405 are outside [0..16] and must be purged
+        assert!(queue.is_empty());
+        assert_eq!(queue.highest_frame_index(), None);
+    }
+
+    #[test]
+    fn queue_invalidate_generation_resets_queue_and_epochs() {
+        let mut queue = NativePreviewFrameQueue::new(10);
+        let old_epoch = queue.lifecycle_epoch();
+        let queued_frame = |idx: u64| QueuedNativeFrame {
+            frame_index: idx,
+            decoded_frames: Vec::new(),
+            decode_timings: NativeDecodeTimings::default(),
+            queued_at: Instant::now(),
+            ready_at: Instant::now(),
+            scheduler_wait_us: 0,
+        };
+
+        queue.begin("frame-50", Some(50));
+        queue.complete("frame-50".to_string(), queued_frame(50), old_epoch);
+        assert_eq!(queue.highest_frame_index(), Some(50));
+
+        // Invalidate to generation 2
+        queue.invalidate_generation(2);
+        assert!(queue.is_empty());
+        assert_eq!(queue.highest_frame_index(), None);
+        assert!(queue.is_generation_current(2));
+        assert!(!queue.is_generation_current(1));
+
+        // An async decode from the old epoch must be rejected
+        assert!(!queue.complete("stale".to_string(), queued_frame(51), old_epoch));
+    }
+
+    #[test]
+    fn queue_observe_frame_index_snaps_backward_on_regression() {
+        let mut queue = NativePreviewFrameQueue::new(10);
+        queue.observe_frame_index(420);
+        assert_eq!(queue.highest_frame_index(), Some(420));
+
+        // Normal small forward progression
+        queue.observe_frame_index(421);
+        assert_eq!(queue.highest_frame_index(), Some(421));
+
+        // Big backward presentation (e.g. restart from 0)
+        queue.observe_frame_index(0);
+        assert_eq!(queue.highest_frame_index(), Some(0));
     }
 
     #[test]

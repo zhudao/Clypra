@@ -1,4 +1,5 @@
 import type { NativeQualityTier } from "@/lib/platform/nativeCore";
+import type { PlaybackPolicySnapshot } from "@/lib/platform/tauri";
 
 /**
  * A conservative preview-only policy for GPU tiers established by production
@@ -122,9 +123,7 @@ export function isAmdIntegratedGpu(
  * Detects entry-level Nvidia MX-series GPUs (discrete but weak).
  * MX 150 / 250 are legacy-igpu tier; MX 350 / 450 / 550 are capable-igpu.
  */
-export function isNvidiaMxGpu(
-  adapterName: string | null | undefined,
-): boolean {
+export function isNvidiaMxGpu(adapterName: string | null | undefined): boolean {
   if (!adapterName || !/nvidia/i.test(adapterName)) return false;
   return /\bmx\s*\d{3}/i.test(adapterName);
 }
@@ -232,7 +231,12 @@ export function classifyGpuTier(
     return isLegacyNvidiaMxGpu(name) ? "legacy-igpu" : "capable-igpu";
   }
   // Default: assume capable if we have a name but cannot classify it
-  if (name.length > 0) return "discrete";
+  if (name.length > 0) {
+    if (/primary display gpu/i.test(name)) {
+      return "legacy-igpu";
+    }
+    return "discrete";
+  }
   return "unknown";
 }
 
@@ -262,15 +266,31 @@ const REDUCED_1080_POLICY: PreviewHardwarePolicy = {
  * a brief resize. It deliberately never upscales again mid-session: stable
  * editing is more valuable than oscillating detail.
  *
- * Backpressure escalation now applies to ALL GPU tiers that are not
- * `discrete`-classified, not only Intel adapters. A weak Nvidia MX 150 or
- * AMD Vega 8 under heavy load will benefit from the same reduction.
+ * Backpressure escalation applies to every accelerated tier. A device type is
+ * an initial hint, not a performance guarantee: entry-level discrete Windows
+ * GPUs, eGPU docking paths, thermal throttling, and driver fallback can all
+ * miss real-time deadlines. Apple Silicon remains the sole exception because
+ * its proxy path may require a costly CPU readback; native QoS remains able to
+ * reduce its render quality without taking that path.
  */
 export class PreviewPerformancePolicyController {
   private observations: PreviewPerformanceObservation[] = [];
   private escalation = 0;
+  private nativeSnapshot: PlaybackPolicySnapshot | null = null;
 
-  observe(observation: PreviewPerformanceObservation): boolean {
+  updateFromNativeSnapshot(snapshot: PlaybackPolicySnapshot | null): void {
+    this.nativeSnapshot = snapshot;
+  }
+
+  getNativeSnapshot(): PlaybackPolicySnapshot | null {
+    return this.nativeSnapshot;
+  }
+
+  observe(
+    observation: PreviewPerformanceObservation,
+    adapterName?: string | null,
+    deviceType?: string | null,
+  ): boolean {
     this.observations.push(observation);
     if (this.observations.length > 60) this.observations.shift();
     if (this.escalation >= 2) return false;
@@ -278,6 +298,23 @@ export class PreviewPerformancePolicyController {
     const overloaded = this.observations.filter(
       (sample) => sample.dropped || sample.totalTimeUs > 16_667,
     ).length;
+
+    // Legacy iGPUs (Intel HD/UHD, AMD Vega 8/11, Nvidia MX 1xx) are so
+    // constrained that waiting for a 12-sample window means the user already
+    // experienced ~200ms of lag before quality drops. Use a tight 5-sample /
+    // 2-overloaded window so escalation fires within the first burst.
+    const tier =
+      adapterName !== undefined || deviceType !== undefined
+        ? classifyGpuTier(adapterName, deviceType)
+        : "unknown";
+    if (tier === "legacy-igpu") {
+      const hasFastBurst = this.observations.length >= 5 && overloaded >= 2;
+      if (!hasFastBurst) return false;
+      this.escalation += 1;
+      this.observations = [];
+      return true;
+    }
+
     // A short run of missed real-time frames is enough evidence to reduce
     // quality immediately. Waiting for 30 samples lets an Iris Xe/older Intel
     // queue accumulate stale work during an interactive scrub. A single cold
@@ -298,6 +335,25 @@ export class PreviewPerformancePolicyController {
     mediaHeight?: number,
     deviceType?: string | null,
   ): PreviewHardwarePolicy {
+    // If the native engine QoS controller has issued an authoritative policy,
+    // it takes precedence over frontend heuristics because it directly measures
+    // physical decode throughput, render deadlines, and queue starvation.
+    if (this.nativeSnapshot) {
+      if (this.nativeSnapshot.isDecodeStarved) {
+        return PROXY_POLICY;
+      }
+      if (this.nativeSnapshot.renderQuality === "Quarter") {
+        return {
+          capabilityPolicy: "reduced",
+          maxDimension: 1_280,
+          maximumQuality: "quarter",
+        };
+      }
+      if (this.nativeSnapshot.renderQuality === "Half") {
+        return REDUCED_1080_POLICY;
+      }
+      return FULL_POLICY;
+    }
     const baseline = selectPreviewHardwarePolicy(
       adapterName,
       canvasWidth,
@@ -307,15 +363,12 @@ export class PreviewPerformancePolicyController {
       deviceType,
     );
 
-    // Discrete GPUs do not participate in backpressure escalation — they can
-    // always handle the workload better than an iGPU. Software renderers
-    // already get the worst tier from selectPreviewHardwarePolicy.
+    // Software renderers already get the worst tier from the static policy.
     // Apple Silicon (M-series) has unified memory and dedicated hardware decode;
     // in Clypra, escalating Apple Silicon to proxy causes an unintended fallback
     // to unaccelerated cpu-rgba decode (~500ms), inducing severe drop loops.
     const tier = classifyGpuTier(adapterName, deviceType);
     if (
-      tier === "discrete" ||
       tier === "software" ||
       tier === "unknown" ||
       isAppleSiliconGpu(adapterName)
@@ -332,9 +385,10 @@ export class PreviewPerformancePolicyController {
         ? REDUCED_1080_POLICY
         : PROXY_POLICY;
     }
-    // Capable iGPUs stay at reduced (1080p half) rather than falling back to
-    // unaccelerated software proxy decode. Only legacy iGPUs drop to proxy.
-    if (tier === "capable-igpu") {
+    // Capable iGPUs and discrete adapters stay at reduced (1080p half) rather
+    // than falling back to an unaccelerated CPU proxy. Legacy iGPUs are the
+    // only class that begins on a proxy and therefore needs no second step.
+    if (tier === "capable-igpu" || tier === "discrete") {
       return REDUCED_1080_POLICY;
     }
     return PROXY_POLICY;
@@ -360,18 +414,11 @@ export function selectPreviewHardwarePolicy(
   // Software renderers always get proxy — even 1080p is too slow in realtime
   if (tier === "software") return PROXY_POLICY;
 
-  const maxWorkloadDimension = Math.max(
-    canvasWidth,
-    canvasHeight,
-    mediaWidth ?? 0,
-    mediaHeight ?? 0,
-  );
-
   // Legacy iGPU (Intel HD/UHD, AMD Vega 8/11, Nvidia MX 1xx/2xx):
-  // force proxy on ≥1440p workloads (maxDimension ≥ 2500px)
-  if (tier === "legacy-igpu" && maxWorkloadDimension >= 2_500) {
-    return PROXY_POLICY;
-  }
+  // Always force proxy regardless of canvas size. These adapters cannot
+  // sustain real-time compositing at any resolution in the editor preview.
+  // Export is unaffected — this policy is preview-path only.
+  if (tier === "legacy-igpu") return PROXY_POLICY;
 
   // All other tiers start at full quality. Backpressure escalation in
   // PreviewPerformancePolicyController handles runtime degradation.
