@@ -31,6 +31,11 @@ export interface TelemetryHardwareContext {
     | "unknown";
   gpuModel: string;
   gpuDriverVersion?: string;
+  gpuVendorId?: number;
+  gpuDeviceId?: number;
+  gpuDriver?: string;
+  gpuDriverInfo?: string;
+  isSoftwareAdapter?: boolean;
   dedicatedVramMb?: number;
   graphicsBackend:
     | "metal"
@@ -54,7 +59,11 @@ export interface TelemetryHardwareContext {
 function classifyGpuVendor(
   adapterName: string,
 ): TelemetryHardwareContext["gpuVendor"] {
-  if (/microsoft basic render driver|swiftshader|llvmpipe|software renderer|warp/i.test(adapterName)) {
+  if (
+    /microsoft basic render driver|swiftshader|llvmpipe|software renderer|warp/i.test(
+      adapterName,
+    )
+  ) {
     return "software";
   }
   if (/Apple/i.test(adapterName)) return "apple";
@@ -346,6 +355,8 @@ export interface TelemetryAudioMetrics {
   activeVoiceCount?: number;
   syncCalls?: number;
   playingSyncCalls?: number;
+  /** Transport speed during this audio-health window. */
+  playbackSpeed?: number;
   callbackCount?: number;
   renderedFrames?: number;
   nonSilentFrames?: number;
@@ -442,6 +453,16 @@ export interface TelemetryEvent {
     isSessionRollup?: boolean;
     jankEventsCount?: number;
     throttledAnomaliesCount?: number;
+    /** Embedded WebView readback dimension limit (e.g., 480px on Windows, 960px on macOS). */
+    readbackMaxDimension?: number;
+    /** Current adaptive readback tier (0=320px, 1=480px, 2=600px, 3=720px, 4=840px, 5=960px). */
+    readbackTier?: number;
+    /** Adaptive readback target cadence in FPS (e.g., 10, 20, 24, 30). */
+    readbackCadenceFps?: number;
+    /** Transport speed active when this embedded-preview request was sent. */
+    playbackSpeed?: number;
+    /** Source frames intentionally advanced between CPU-readback presentations. */
+    readbackSourceFrameStride?: number;
   };
   exportMetrics?: {
     exportDurationMs: number;
@@ -485,7 +506,14 @@ export interface TelemetryEvent {
 }
 
 export interface TelemetrySourcePreviewDiagnosticInput {
-  status: "mount" | "ready" | "error" | "blank_video_detected" | "recovery_start" | "recovery_success" | "recovery_failed";
+  status:
+    | "mount"
+    | "ready"
+    | "error"
+    | "blank_video_detected"
+    | "recovery_start"
+    | "recovery_success"
+    | "recovery_failed";
   assetId?: string;
   assetName?: string;
   assetPath?: string;
@@ -571,6 +599,11 @@ export interface TelemetryRenderOptions {
   renderPath?: string;
   /** Native samples are stage evidence for a frontend frame, not a second frame. */
   includeInRollup?: boolean;
+  readbackMaxDimension?: number;
+  readbackTier?: number;
+  readbackCadenceFps?: number;
+  playbackSpeed?: number;
+  readbackSourceFrameStride?: number;
 }
 
 export interface TelemetryAudioSnapshotInput extends TelemetryAudioMetrics {
@@ -743,6 +776,11 @@ class SessionRollupAccumulator {
   private lastKnownVideoProfile: Partial<TelemetryVideoProfile> = {};
   private capabilityPolicy?: "full" | "reduced" | "proxy" | string;
   private capabilityProbeUs?: number;
+  private readbackMaxDimension?: number;
+  private readbackTier?: number;
+  private readbackCadenceFps?: number;
+  private playbackSpeed?: number;
+  private readbackSourceFrameStride?: number;
 
   public recordThrottledAnomaly(): void {
     this.throttledAnomaliesCount++;
@@ -763,6 +801,11 @@ class SessionRollupAccumulator {
     cacheHit: boolean = true,
     capabilityPolicy?: "full" | "reduced" | "proxy" | string,
     capabilityProbeUs?: number,
+    readbackMaxDimension?: number,
+    readbackTier?: number,
+    readbackCadenceFps?: number,
+    playbackSpeed?: number,
+    readbackSourceFrameStride?: number,
   ): void {
     const now = Date.now();
 
@@ -853,6 +896,14 @@ class SessionRollupAccumulator {
     if (capabilityPolicy) this.capabilityPolicy = capabilityPolicy;
     if (capabilityProbeUs !== undefined)
       this.capabilityProbeUs = capabilityProbeUs;
+    if (readbackMaxDimension !== undefined)
+      this.readbackMaxDimension = readbackMaxDimension;
+    if (readbackTier !== undefined) this.readbackTier = readbackTier;
+    if (readbackCadenceFps !== undefined)
+      this.readbackCadenceFps = readbackCadenceFps;
+    if (playbackSpeed !== undefined) this.playbackSpeed = playbackSpeed;
+    if (readbackSourceFrameStride !== undefined)
+      this.readbackSourceFrameStride = readbackSourceFrameStride;
   }
 
   public recordSeek(seekLatencyMs: number): void {
@@ -885,6 +936,11 @@ class SessionRollupAccumulator {
     videoProfile: Partial<TelemetryVideoProfile>;
     capabilityPolicy?: "full" | "reduced" | "proxy" | string;
     capabilityProbeUs?: number;
+    readbackMaxDimension?: number;
+    readbackTier?: number;
+    readbackCadenceFps?: number;
+    playbackSpeed?: number;
+    readbackSourceFrameStride?: number;
   } | null {
     if (this.totalFrames === 0) {
       this.windowStartMs = Date.now();
@@ -985,6 +1041,11 @@ class SessionRollupAccumulator {
       videoProfile: this.lastKnownVideoProfile,
       capabilityPolicy: this.capabilityPolicy,
       capabilityProbeUs: this.capabilityProbeUs,
+      readbackMaxDimension: this.readbackMaxDimension,
+      readbackTier: this.readbackTier,
+      readbackCadenceFps: this.readbackCadenceFps,
+      playbackSpeed: this.playbackSpeed,
+      readbackSourceFrameStride: this.readbackSourceFrameStride,
     };
 
     this.windowStartMs = Date.now();
@@ -1018,6 +1079,11 @@ class SessionRollupAccumulator {
     this.firstFrameVisibleMs = undefined;
     this.capabilityPolicy = undefined;
     this.capabilityProbeUs = undefined;
+    this.readbackMaxDimension = undefined;
+    this.readbackTier = undefined;
+    this.readbackCadenceFps = undefined;
+    this.playbackSpeed = undefined;
+    this.readbackSourceFrameStride = undefined;
 
     return result;
   }
@@ -1490,6 +1556,11 @@ class TelemetryCollector {
     adapterName: string | null;
     backend: string | null;
     deviceType: string | null;
+    vendorId: number | null;
+    deviceId: number | null;
+    driver: string | null;
+    driverInfo: string | null;
+    isSoftwareAdapter: boolean | null;
   }): void {
     const hw = this.initHardwareContext();
     if (nativeGpu.adapterName) {
@@ -1505,6 +1576,30 @@ class TelemetryCollector {
         hw.graphicsBackend = "d3d12";
       else if (b.includes("vulkan")) hw.graphicsBackend = "vulkan";
       else if (b.includes("webgpu")) hw.graphicsBackend = "webgpu";
+    }
+
+    // Add new GPU diagnostic fields
+    if (nativeGpu.vendorId != null) {
+      hw.gpuVendorId = nativeGpu.vendorId;
+    }
+    if (nativeGpu.deviceId != null) {
+      hw.gpuDeviceId = nativeGpu.deviceId;
+    }
+    if (nativeGpu.driver) {
+      hw.gpuDriver = nativeGpu.driver;
+    }
+    if (nativeGpu.driverInfo) {
+      hw.gpuDriverInfo = nativeGpu.driverInfo;
+      // Also use as gpuDriverVersion for backward compatibility
+      hw.gpuDriverVersion = nativeGpu.driverInfo;
+    }
+    if (nativeGpu.isSoftwareAdapter != null) {
+      hw.isSoftwareAdapter = nativeGpu.isSoftwareAdapter;
+      // If software adapter, override vendor and backend
+      if (nativeGpu.isSoftwareAdapter) {
+        hw.gpuVendor = "software";
+        hw.graphicsBackend = "software";
+      }
     }
   }
 
@@ -1644,6 +1739,11 @@ class TelemetryCollector {
         options.cacheHit ?? true,
         options.capabilityPolicy,
         options.capabilityProbeUs,
+        options.readbackMaxDimension,
+        options.readbackTier,
+        options.readbackCadenceFps,
+        options.playbackSpeed,
+        options.readbackSourceFrameStride,
       );
 
       if (accumulator.shouldEmitRollup()) {
@@ -1773,6 +1873,15 @@ class TelemetryCollector {
         renderPath: options.renderPath,
         capabilityPolicy: options.capabilityPolicy,
         capabilityProbeUs: options.capabilityProbeUs,
+        // `targetFps` above describes the timeline/source rate. Keep the
+        // embedded CPU-readback limit separate so sampled anomalies can be
+        // interpreted against the cadence the presentation path actually
+        // requested.
+        readbackMaxDimension: options.readbackMaxDimension,
+        readbackTier: options.readbackTier,
+        readbackCadenceFps: options.readbackCadenceFps,
+        playbackSpeed: options.playbackSpeed,
+        readbackSourceFrameStride: options.readbackSourceFrameStride,
       },
       timestampMs: Date.now(),
     };
@@ -2834,9 +2943,13 @@ class TelemetryCollector {
         renderedFps: 60,
         totalFrames: 1,
         droppedFrames:
-          input.status === "error" || input.status === "recovery_failed" ? 1 : 0,
+          input.status === "error" || input.status === "recovery_failed"
+            ? 1
+            : 0,
         droppedFramesRatio:
-          input.status === "error" || input.status === "recovery_failed" ? 1 : 0,
+          input.status === "error" || input.status === "recovery_failed"
+            ? 1
+            : 0,
         staleFrames: 0,
         cancelledFrames: 0,
         peakRamMb: perfLogService.getPeakMemoryMb() || 512,
@@ -3050,6 +3163,11 @@ class TelemetryCollector {
           isSessionRollup: true,
           jankEventsCount: rollup.jankEventsCount,
           throttledAnomaliesCount: rollup.throttledAnomaliesCount,
+          readbackMaxDimension: rollup.readbackMaxDimension,
+          readbackTier: rollup.readbackTier,
+          readbackCadenceFps: rollup.readbackCadenceFps,
+          playbackSpeed: rollup.playbackSpeed,
+          readbackSourceFrameStride: rollup.readbackSourceFrameStride,
         },
         timestampMs: Date.now(),
       });

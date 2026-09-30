@@ -32,6 +32,34 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     expect(telemetryCollector.getQueueLength()).toBe(1);
   });
 
+  it("records the adaptive embedded-readback policy on sampled spans", () => {
+    telemetryCollector.recordRenderSpan(
+      { totalTimeUs: 25_000 },
+      1,
+      1,
+      { nominalFps: 60 },
+      "playback",
+      undefined,
+      0,
+      0,
+      {
+        readbackMaxDimension: 480,
+        readbackTier: 1,
+        readbackCadenceFps: 20,
+        playbackSpeed: 2,
+        readbackSourceFrameStride: 3,
+      },
+    );
+
+    const event = (telemetryCollector as any).queue[0];
+    expect(event.workload.targetFps).toBe(60);
+    expect(event.workload.readbackMaxDimension).toBe(480);
+    expect(event.workload.readbackTier).toBe(1);
+    expect(event.workload.readbackCadenceFps).toBe(20);
+    expect(event.workload.playbackSpeed).toBe(2);
+    expect(event.workload.readbackSourceFrameStride).toBe(3);
+  });
+
   it("does not enqueue the same native stats sample twice", () => {
     const nativeRender = {
       lastSample: {
@@ -120,12 +148,10 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     );
     const enqueueSpy = vi
       .spyOn(telemetryCollector as any, "enqueueEvent")
-      .mockImplementation(
-        (event: unknown) => {
-          events.push(event);
-          originalEnqueue(event);
-        },
-      );
+      .mockImplementation((event: unknown) => {
+        events.push(event);
+        originalEnqueue(event);
+      });
 
     telemetryCollector.recordSeekSpan(120.5, true, {
       codec: "hevc",
@@ -145,12 +171,10 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     );
     const enqueueSpy = vi
       .spyOn(telemetryCollector as any, "enqueueEvent")
-      .mockImplementation(
-        (event: unknown) => {
-          events.push(event);
-          originalEnqueue(event);
-        },
-      );
+      .mockImplementation((event: unknown) => {
+        events.push(event);
+        originalEnqueue(event);
+      });
 
     telemetryCollector.recordRenderSpan(
       { totalTimeUs: 25_000 },
@@ -170,7 +194,7 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     expect(events[0].workload.staleFrames).toBe(60);
     expect(events[0].workload.cancelledFrames).toBe(60);
     enqueueSpy.mockRestore();
-});
+  });
   it("records a hardware fallback event and enqueues it for session-file upload", () => {
     // recordFallbackEvent enqueues the event then immediately calls flush(),
     // which drains this.queue to 0 (the event was already forwarded to
@@ -324,12 +348,22 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
       adapterName: "Apple M3 Max",
       backend: "Metal",
       deviceType: "IntegratedGpu",
+      vendorId: 0x106b,
+      deviceId: 0x0001,
+      driver: "Metal",
+      driverInfo: "Metal 3.1",
+      isSoftwareAdapter: false,
     });
 
     const hw = telemetryCollector.initHardwareContext();
     expect(hw.gpuVendor).toBe("apple");
     expect(hw.gpuModel).toBe("Apple M3 Max");
     expect(hw.graphicsBackend).toBe("metal");
+    expect(hw.gpuVendorId).toBe(0x106b);
+    expect(hw.gpuDeviceId).toBe(0x0001);
+    expect(hw.gpuDriver).toBe("Metal");
+    expect(hw.gpuDriverInfo).toBe("Metal 3.1");
+    expect(hw.isSoftwareAdapter).toBe(false);
   });
 
   it("sanitizes video profile to coarse buckets without leaking file paths or user titles", () => {
@@ -475,7 +509,9 @@ describe("Production Telemetry Collector in Clypra Desktop", () => {
     expect(rollupEvent.sampleKind).toBe("window-rollup");
     expect(rollupEvent.workload.totalFrames).toBe(25);
     expect(rollupEvent.workload.throttledAnomaliesCount).toBe(15);
-    expect(rollupEvent.workload.stageTimings.totalTimeUs).toBeGreaterThanOrEqual(66400);
+    expect(
+      rollupEvent.workload.stageTimings.totalTimeUs,
+    ).toBeGreaterThanOrEqual(66400);
   });
 
   it("permits peak outliers that significantly exceed previous peak latency even after quota is filled", () => {
