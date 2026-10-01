@@ -227,7 +227,9 @@ pub fn run() {
             // Native frame contracts/cache are session-independent runtime
             // infrastructure. Project sessions provide the snapshot identity.
             app.manage(tokio::sync::Mutex::new(
-                native_core::NativeFrameService::new(1_073_741_824)
+                // CPU RGBA bridge frames are intentionally bounded. A 1 GiB
+                // cache retained hundreds of unique M1 frames in one session.
+                native_core::NativeFrameService::new(268_435_456)
                     .expect("native frame cache budget must be valid"),
             ));
 
@@ -246,6 +248,9 @@ pub fn run() {
                     commands::native_preview::NATIVE_PREVIEW_QUEUE_CAPACITY,
                 ),
             )));
+            app.manage(Arc::new(
+                commands::native_preview::NativePlaybackPushRuntime::default(),
+            ));
             app.manage(Arc::new(Mutex::new(
                 commands::native_playback::NativePlaybackRuntime::new(),
             )));
@@ -431,6 +436,13 @@ pub fn run() {
             decode_frame_gpu,
             decode_export_frame,
             render_native_preview_frame,
+            render_native_preview_transport_probe,
+            stream_native_playback_frames,
+            open_native_playback_push_stream,
+            submit_native_playback_push_frame,
+            acknowledge_native_playback_push_frame,
+            close_native_playback_push_stream,
+            get_native_push_transport_capabilities,
             render_native_project_frame,
             render_native_video_project_frame,
             get_video_scopes,

@@ -363,6 +363,111 @@ export async function renderNativeFrame(
   return invoke<ArrayBuffer>("render_native_frame", { request: nativeRequest });
 }
 
+/**
+ * Measure the raw Tauri binary response bridge without decode or GPU work.
+ * Diagnostics callers should run this only on demand; production preview must
+ * never use it.
+ */
+export async function renderNativePreviewTransportProbe(
+  byteLength = 518 * 1024,
+): Promise<ArrayBuffer> {
+  if (!isTauriRuntime()) {
+    throw new Error("renderNativePreviewTransportProbe requires the Tauri runtime");
+  }
+  return invoke<ArrayBuffer>("render_native_preview_transport_probe", {
+    byteLength: Math.max(1, Math.min(4 * 1024 * 1024, Math.floor(byteLength))),
+  });
+}
+
+/**
+ * Phase 2a only: exercise the candidate one-way playback Channel with the
+ * same approximately-518 KiB RGBA payload used by the bridge probe. The
+ * packet begins with a versioned binary header; production playback is not
+ * switched to this transport until its t8 → t9 gate passes.
+ */
+export async function streamNativePlaybackFrames(
+  generation: bigint,
+  onFrame: (packet: ArrayBuffer) => void,
+  options: {
+    frameCount?: number;
+    payloadBytes?: number;
+    paceMs?: number;
+  } = {},
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("streamNativePlaybackFrames requires the Tauri runtime");
+  }
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = onFrame;
+  return invoke("stream_native_playback_frames", {
+    // Tauri's serde boundary expects a JSON number for Rust `u64`. The Phase
+    // 2a diagnostic generation is deliberately tiny; production code will
+    // keep its own checked u64-to-wire conversion with the stream state.
+    generation: Number(generation),
+    frameCount: Math.max(1, Math.min(120, Math.floor(options.frameCount ?? 20))),
+    payloadBytes: Math.max(1024, Math.min(4 * 1024 * 1024, Math.floor(options.payloadBytes ?? 480 * 270 * 4))),
+    paceMs: Math.max(0, Math.min(1000, Math.floor(options.paceMs ?? 0))),
+    onFrame: channel,
+  });
+}
+
+/**
+ * Phase 2b benchmark transport. It is opt-in per session: callers retain the
+ * invoke-response bridge unless they explicitly open this stream.
+ */
+export async function openNativePlaybackPushStream(
+  generation: bigint,
+  onFrame: (packet: ArrayBuffer) => void,
+): Promise<void> {
+  if (!isTauriRuntime()) throw new Error("openNativePlaybackPushStream requires the Tauri runtime");
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = onFrame;
+  await invoke("open_native_playback_push_stream", { generation: Number(generation), onFrame: channel });
+}
+
+export async function submitNativePlaybackPushFrame(request: NativeFrameRequest): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const nativeRequest: NativeFrameRequest = {
+    ...request,
+    project: {
+      ...request.project,
+      videoLayers: request.project.videoLayers.map((layer) => ({ ...layer, videoPath: toNativePath(layer.videoPath) })),
+    },
+  };
+  await invoke("submit_native_playback_push_frame", { request: nativeRequest });
+}
+
+export async function acknowledgeNativePlaybackPushFrame(
+  generation: bigint,
+  consumedDeliverySeq: bigint,
+): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  return invoke<boolean>("acknowledge_native_playback_push_frame", {
+    generation: Number(generation),
+    consumedDeliverySeq: Number(consumedDeliverySeq),
+  });
+}
+
+export async function closeNativePlaybackPushStream(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("close_native_playback_push_stream");
+}
+
+export interface NativePushTransportCapabilities {
+  channel: boolean;
+  customProtocolLongPoll: boolean;
+  webview2SharedBuffer: boolean;
+  webviewRuntime?: string | null;
+}
+
+/** Candidate discovery for the measured Phase 2 transport selector. */
+export async function getNativePushTransportCapabilities(): Promise<NativePushTransportCapabilities> {
+  if (!isTauriRuntime()) {
+    return { channel: false, customProtocolLongPoll: false, webview2SharedBuffer: false };
+  }
+  return invoke<NativePushTransportCapabilities>("get_native_push_transport_capabilities");
+}
+
 /** Register a bundled/editor font in the strict native font registry. */
 export async function registerNativeFont(
   fontId: string,

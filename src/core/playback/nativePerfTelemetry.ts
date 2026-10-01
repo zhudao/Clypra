@@ -17,6 +17,13 @@ export interface NativeFrontendPerfSample {
   dispatchMs: number;
   ipcMs: number;
   canvasPaintMs?: number;
+  /** Time from canvas draw completion to the next rAF callback. */
+  paintRafMs?: number;
+  /** Rust send timestamp (t8) to WebView receipt (t9), for push transport. */
+  transportReceiveMs?: number;
+  /** Rust send timestamp (t8) to the canvas paint boundary (t11). */
+  frameAgeAtPaintMs?: number;
+  transport?: "invoke" | "push-channel";
   totalMs: number;
   dropped: boolean;
   stale: boolean;
@@ -48,10 +55,24 @@ export interface NativeFrontendModeStats {
   dispatch: NativeFrontendStagePercentiles;
   ipc: NativeFrontendStagePercentiles;
   canvasPaint: NativeFrontendStagePercentiles;
+  paintRaf: NativeFrontendStagePercentiles;
+  transportReceive: NativeFrontendStagePercentiles;
+  frameAgeAtPaint: NativeFrontendStagePercentiles;
   total: NativeFrontendStagePercentiles;
   droppedCount: number;
   staleCount: number;
   cancelledCount: number;
+  nativeSurfaceCount: number;
+  bridgeCount: number;
+  bridgeFallbackReasons: Record<string, number>;
+  transportCounts: Record<string, number>;
+}
+
+export interface NativePushBridgeFrontendStats {
+  paintedFrames: number;
+  rejectedGenerationPackets: number;
+  /** WebView receive silence; not equivalent to Rust flow-control stall. */
+  receiverIdle: number;
 }
 
 const TRACE_STORAGE_KEY = "clypra:debug:native-perf";
@@ -89,6 +110,15 @@ function stagePercentiles(
     p99: percentile(values, 0.99),
     sampleCount: values.length,
   };
+}
+
+export function previewFrameDeadlineUs(sample: NativeFrontendPerfSample): number {
+  // Playback frames deliberately follow the adaptive readback cadence. Using
+  // a fixed 60 Hz deadline marks every expected 30 Hz bridge frame as jank.
+  if (sample.mode === "playback" && (sample.readbackCadenceFps ?? 0) > 0) {
+    return Math.round(1_000_000 / (sample.readbackCadenceFps as number));
+  }
+  return 16_667;
 }
 
 export class NativePerfSpan {
@@ -133,6 +163,9 @@ export class NativePerfSpan {
   finish(
     options: {
       canvasPaintMs?: number;
+      transportReceiveMs?: number;
+      frameAgeAtPaintMs?: number;
+      transport?: "invoke" | "push-channel";
       dropped?: boolean;
       stale?: boolean;
       cancelled?: boolean;
@@ -153,7 +186,13 @@ export class NativePerfSpan {
     if (this.finished) return;
     this.markIpcFinished();
     this.finished = true;
-    this.collector.record({
+    // The synchronous canvas draw is the delivery boundary. The following
+    // rAF is retained as a separate compositor-observation metric; including
+    // it in `totalMs` waits for another frame tick and turns a 30 FPS bridge
+    // delivery into a misleading ~15 FPS latency measurement.
+    const deliveredAt = performance.now();
+    const deliveryTotalMs = Math.max(0, deliveredAt - this.startedAt);
+    const record = (paintRafMs?: number) => this.collector.record({
       requestId: this.request.requestId,
       generation: this.request.generation,
       frameIndex: this.request.frameTime.frameIndex,
@@ -161,7 +200,11 @@ export class NativePerfSpan {
       dispatchMs: Math.max(0, this.dispatchStartedAt - this.startedAt),
       ipcMs: this.ipcMs,
       canvasPaintMs: options.canvasPaintMs,
-      totalMs: Math.max(0, performance.now() - this.startedAt),
+      paintRafMs,
+      transportReceiveMs: options.transportReceiveMs,
+      frameAgeAtPaintMs: options.frameAgeAtPaintMs,
+      transport: options.transport,
+      totalMs: deliveryTotalMs,
       dropped: options.dropped === true,
       stale: options.stale === true,
       cancelled: options.cancelled === true,
@@ -178,6 +221,20 @@ export class NativePerfSpan {
         options.readbackSourceFrameStride ??
         this.readbackPolicy?.readbackSourceFrameStride,
     });
+    // Canvas APIs are synchronous but do not prove that the browser compositor
+    // presented the pixels. A following rAF is the least-invasive WebView
+    // boundary we can observe without introducing a per-frame IPC reply.
+    if (
+      options.canvasPaintMs !== undefined &&
+      typeof requestAnimationFrame !== "undefined"
+    ) {
+      const paintCommittedAt = performance.now();
+      requestAnimationFrame(() =>
+        record(Math.max(0, performance.now() - paintCommittedAt)),
+      );
+    } else {
+      record();
+    }
   }
 }
 
@@ -190,6 +247,11 @@ class NativePerfCollector {
   // collector is bounded and forwards through the existing batched transport;
   // the user telemetry setting can still disable it intentionally.
   private enabled = true;
+  private pushBridge: NativePushBridgeFrontendStats = {
+    paintedFrames: 0,
+    rejectedGenerationPackets: 0,
+    receiverIdle: 0,
+  };
 
   constructor() {
     for (const mode of [
@@ -253,6 +315,10 @@ class NativePerfCollector {
           sample.canvasPaintMs !== undefined
             ? Math.round(sample.canvasPaintMs * 1000)
             : undefined,
+        webviewPaintRafUs:
+          sample.paintRafMs !== undefined
+            ? Math.round(sample.paintRafMs * 1000)
+            : undefined,
         // The native invoke boundary includes the RGBA payload transfer for
         // WebView. Surface that measured bridge duration as transfer cost;
         // native-sample readback remains the GPU/CPU readback measurement.
@@ -275,7 +341,7 @@ class NativePerfCollector {
         measurementSource: "frontend-span",
         sampleKind: "frame-anomaly",
         frameSequence: sample.frameIndex,
-        deadlineUs: 16_667,
+        deadlineUs: previewFrameDeadlineUs(sample),
         dropReason: sample.dropped
           ? (sample.dropReason ??
             (sample.cancelled
@@ -300,15 +366,33 @@ class NativePerfCollector {
 
   statsFor(mode: NativePreviewMode): NativeFrontendModeStats {
     const samples = this.samples.get(mode) ?? [];
+    const bridgeFallbackReasons: Record<string, number> = {};
+    const transportCounts: Record<string, number> = {};
+    for (const sample of samples) {
+      const reason = sample.previewContext?.presenterFallbackReason;
+      if (reason) bridgeFallbackReasons[reason] = (bridgeFallbackReasons[reason] ?? 0) + 1;
+      if (sample.transport) transportCounts[sample.transport] = (transportCounts[sample.transport] ?? 0) + 1;
+    }
     return {
       mode,
       dispatch: stagePercentiles(samples, (sample) => sample.dispatchMs),
       ipc: stagePercentiles(samples, (sample) => sample.ipcMs),
       canvasPaint: stagePercentiles(samples, (sample) => sample.canvasPaintMs),
+      paintRaf: stagePercentiles(samples, (sample) => sample.paintRafMs),
+      transportReceive: stagePercentiles(samples, (sample) => sample.transportReceiveMs),
+      frameAgeAtPaint: stagePercentiles(samples, (sample) => sample.frameAgeAtPaintMs),
       total: stagePercentiles(samples, (sample) => sample.totalMs),
       droppedCount: samples.filter((sample) => sample.dropped).length,
       staleCount: samples.filter((sample) => sample.stale).length,
       cancelledCount: samples.filter((sample) => sample.cancelled).length,
+      nativeSurfaceCount: samples.filter(
+        (sample) => sample.previewContext?.presenterMode === "native-surface",
+      ).length,
+      bridgeCount: samples.filter(
+        (sample) => sample.previewContext?.presenterMode === "bridge",
+      ).length,
+      bridgeFallbackReasons,
+      transportCounts,
     };
   }
 
@@ -323,6 +407,22 @@ class NativePerfCollector {
     ].map((mode) => this.statsFor(mode as NativePreviewMode));
   }
 
+  recordPushBridgeFrame(): void {
+    this.pushBridge.paintedFrames += 1;
+  }
+
+  recordPushBridgeRejectedGeneration(): void {
+    this.pushBridge.rejectedGenerationPackets += 1;
+  }
+
+  recordPushBridgeReceiverIdle(): void {
+    this.pushBridge.receiverIdle += 1;
+  }
+
+  pushBridgeStats(): NativePushBridgeFrontendStats {
+    return { ...this.pushBridge };
+  }
+
   dump(mode?: NativePreviewMode): NativeFrontendPerfSample[] {
     if (mode) return [...(this.samples.get(mode) ?? [])];
     return [...this.samples.values()].flatMap((bucket) => bucket);
@@ -330,6 +430,7 @@ class NativePerfCollector {
 
   clear(): void {
     for (const bucket of this.samples.values()) bucket.length = 0;
+    this.pushBridge = { paintedFrames: 0, rejectedGenerationPackets: 0, receiverIdle: 0 };
   }
 }
 

@@ -31,14 +31,139 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 use crate::thumbnail_engine::stream_actor::DecodedVideoPlanes;
 
 type DecodedNativeVideoFrame = (DecodedVideoPlanes, u32, u32, VideoColorMetadata, u32);
 static NATIVE_SURFACE_PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Benchmark-only owner for the Phase 2b playback push path. It is not opened
+/// by default and therefore cannot change the invoke bridge until the caller
+/// explicitly opts into a measured session.
+pub struct NativePlaybackPushRuntime {
+    mailbox: Arc<crate::commands::playback_push_mailbox::PlaybackPushMailbox<PushBridgeFrame>>,
+    latest_render: Mutex<Option<FrameRequest>>,
+    render_notify: tokio::sync::Notify,
+    render_worker_started: std::sync::atomic::AtomicBool,
+    sender_started: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePlaybackPushStatus {
+    pub active: bool,
+    pub sender_started: bool,
+    pub render_worker_started: bool,
+    pub superseded_mailbox: u64,
+    pub stream_stall: u64,
+    pub stall_recovered: u64,
+    pub closed_channel: u64,
+}
+
+struct PushBridgeFrame {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+impl Default for NativePlaybackPushRuntime {
+    fn default() -> Self {
+        Self {
+            mailbox: Arc::new(Default::default()),
+            latest_render: Mutex::new(None),
+            render_notify: tokio::sync::Notify::new(),
+            render_worker_started: std::sync::atomic::AtomicBool::new(false),
+            sender_started: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+fn push_runtime(app: &tauri::AppHandle) -> Result<Arc<NativePlaybackPushRuntime>, String> {
+    app.try_state::<Arc<NativePlaybackPushRuntime>>()
+        .map(|state| Arc::clone(&state))
+        .ok_or_else(|| "Native playback push runtime is unavailable".to_string())
+}
+
+impl NativePlaybackPushRuntime {
+    fn status(&self) -> NativePlaybackPushStatus {
+        let counters = self.mailbox.counters();
+        NativePlaybackPushStatus {
+            active: self.mailbox.is_active(),
+            sender_started: self.sender_started.load(Ordering::Acquire),
+            render_worker_started: self.render_worker_started.load(Ordering::Acquire),
+            superseded_mailbox: counters.superseded_mailbox,
+            stream_stall: counters.stream_stall,
+            stall_recovered: counters.stall_recovered,
+            closed_channel: counters.closed_channel,
+        }
+    }
+}
+
+fn push_packet(
+    delivery: crate::commands::playback_push_mailbox::Delivery<PushBridgeFrame>,
+) -> Result<tauri::ipc::InvokeResponseBody, ()> {
+    const HEADER_BYTES: usize = 52;
+    let width = delivery.payload.width;
+    let height = delivery.payload.height;
+    let stride = width.checked_mul(4).ok_or(())?;
+    if delivery.payload.rgba.len() != stride as usize * height as usize {
+        return Err(());
+    }
+    let mut packet = vec![0_u8; HEADER_BYTES + delivery.payload.rgba.len()];
+    packet[0..4].copy_from_slice(&0x4350_4652_u32.to_le_bytes());
+    packet[4..6].copy_from_slice(&1_u16.to_le_bytes());
+    packet[6..8].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+    packet[8..16].copy_from_slice(&delivery.generation.to_le_bytes());
+    packet[16..24].copy_from_slice(&delivery.delivery_seq.to_le_bytes());
+    packet[24..32].copy_from_slice(&delivery.frame_id.to_le_bytes());
+    let t8 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_micros() as u64;
+    packet[32..40].copy_from_slice(&t8.to_le_bytes());
+    packet[40..44].copy_from_slice(&width.to_le_bytes());
+    packet[44..48].copy_from_slice(&height.to_le_bytes());
+    packet[48..52].copy_from_slice(&stride.to_le_bytes());
+    packet[HEADER_BYTES..].copy_from_slice(&delivery.payload.rgba);
+    Ok(tauri::ipc::InvokeResponseBody::Raw(packet))
+}
+
+async fn run_push_render_worker(app: tauri::AppHandle, runtime: Arc<NativePlaybackPushRuntime>) {
+    loop {
+        // Create the notification future before inspecting the mailbox. If a
+        // submit lands in the tiny interval between `take()` and `await`, the
+        // permit is retained by Notify instead of being lost forever.
+        let notified = runtime.render_notify.notified();
+        let request = {
+            runtime
+                .latest_render
+                .lock()
+                .expect("push render mailbox lock poisoned")
+                .take()
+        };
+        let Some(request) = request else {
+            notified.await;
+            continue;
+        };
+        let generation = request.generation.unwrap_or_default();
+        let frame_id = request.frame_time.frame_index;
+        if let Ok(rgba) = render_frame_request_rgba(&app, &request).await {
+            // The sender owns transport; this producer only replaces a slot.
+            let _ = runtime.mailbox.submit(
+                generation,
+                frame_id,
+                PushBridgeFrame {
+                    rgba,
+                    width: request.output_width,
+                    height: request.output_height,
+                },
+            );
+        }
+    }
+}
 
 /// A user-initiated, copyable snapshot of the native preview environment and
 /// telemetry. This endpoint is read-only: it never enables automatic field
@@ -57,6 +182,7 @@ pub struct NativePreviewPerformanceReport {
     /// Per-interaction p95 diagnosis. This is an evidence summary, not an
     /// automated policy change: it tells the maintainer which phase to pursue.
     pub stage_diagnoses: Vec<NativePreviewStageDiagnosis>,
+    pub push_bridge: Option<NativePlaybackPushStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +196,82 @@ pub struct NativePreviewStageDiagnosis {
     /// values intentionally preserve uncertainty instead of crediting a
     /// throughput gain to the wrong pipeline stage.
     pub recommended_next_step: String,
+}
+
+/// Runtime-discovered candidates for the Phase 2 bridge transport gate. This
+/// intentionally describes capability only: selection is made by the measured
+/// p95/FPS gate, never by operating system, adapter vendor, or wgpu backend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePushTransportCapabilities {
+    pub channel: bool,
+    pub custom_protocol_long_poll: bool,
+    pub webview2_shared_buffer: bool,
+    pub webview_runtime: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_native_push_transport_capabilities(
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] app: tauri::AppHandle,
+) -> NativePushTransportCapabilities {
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::{Arc, Mutex};
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2Environment12, ICoreWebView2_17,
+        };
+        use windows_core::Interface;
+
+        let shared_buffer = Arc::new(Mutex::new(false));
+        let runtime_version = Arc::new(Mutex::new(None));
+        if let Some(window) = app.get_webview_window("main") {
+            let shared_buffer_out = Arc::clone(&shared_buffer);
+            let runtime_version_out = Arc::clone(&runtime_version);
+            let _ = window.with_webview(move |webview| unsafe {
+                let environment = webview.environment();
+                let controller = webview.controller();
+                let webview_core = controller.CoreWebView2();
+                let supported = environment.cast::<ICoreWebView2Environment12>().is_ok()
+                    && webview_core
+                        .as_ref()
+                        .map(|core| core.cast::<ICoreWebView2_17>().is_ok())
+                        .unwrap_or(false);
+                if let Ok(mut value) = shared_buffer_out.lock() {
+                    *value = supported;
+                }
+
+                // BrowserVersionString now requires an output parameter
+                let mut version_string = windows_core::PWSTR::null();
+                if environment
+                    .BrowserVersionString(&mut version_string)
+                    .is_ok()
+                {
+                    if let Ok(mut value) = runtime_version_out.lock() {
+                        let version = version_string.to_string().unwrap_or_default();
+                        *value = Some(version);
+                        // Free the allocated string memory
+                        if !version_string.is_null() {
+                            windows_core::imp::CoTaskMemFree(version_string.0 as *const _);
+                        }
+                    }
+                }
+            });
+        }
+        return NativePushTransportCapabilities {
+            channel: true,
+            custom_protocol_long_poll: true,
+            webview2_shared_buffer: shared_buffer.lock().map(|value| *value).unwrap_or(false),
+            webview_runtime: runtime_version.lock().ok().and_then(|value| value.clone()),
+        };
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    NativePushTransportCapabilities {
+        channel: true,
+        custom_protocol_long_poll: true,
+        webview2_shared_buffer: false,
+        webview_runtime: None,
+    }
 }
 
 fn diagnose_mode_stats(mode: &ModeStats) -> Option<NativePreviewStageDiagnosis> {
@@ -93,6 +295,7 @@ fn diagnose_mode_stats(mode: &ModeStats) -> Option<NativePreviewStageDiagnosis> 
             "investigate-render-upload",
         ),
         ("readback", mode.readback.p95, "investigate-bridge"),
+        ("map_wait", mode.map_wait.p95, "investigate-readback"),
         ("ipc_wait", mode.ipc_wait.p95, "investigate-bridge"),
         ("present", mode.present.p95, "investigate-bridge"),
         (
@@ -136,6 +339,7 @@ fn diagnose_mode_stats(mode: &ModeStats) -> Option<NativePreviewStageDiagnosis> 
         mode.demux_wait.sample_count,
         mode.conversion_upload.sample_count,
         mode.compose.sample_count,
+        mode.map_wait.sample_count,
         mode.readback.sample_count,
         mode.ipc_wait.sample_count,
         mode.present.sample_count,
@@ -428,6 +632,8 @@ fn record_native_surface_sample(
         conversion_upload_us,
         compose_us,
         readback_us: None,
+        map_wait_us: None,
+        timestamp_query_available: None,
         present_us: submit_present_us,
         scheduler_wait_us: Some(scheduler_wait_us),
         lookahead_wait_us,
@@ -1817,6 +2023,182 @@ pub async fn render_native_preview_frame(
     Ok(tauri::ipc::Response::new(rgba))
 }
 
+/// Diagnostics-only transport isolation probe.
+///
+/// Returns a deterministic RGBA-sized byte buffer through the exact same
+/// Tauri `Response` path as `render_native_frame`, without decode, wgpu, or
+/// compositor work. The WebView-side loop owns timing so this command does
+/// not add another clock domain or telemetry IPC message per iteration.
+#[tauri::command]
+pub fn render_native_preview_transport_probe(
+    byte_length: Option<usize>,
+) -> Result<tauri::ipc::Response, String> {
+    const DEFAULT_BYTES: usize = 518 * 1024;
+    const MAX_BYTES: usize = 4 * 1024 * 1024;
+    let byte_length = byte_length.unwrap_or(DEFAULT_BYTES);
+    if byte_length == 0 || byte_length > MAX_BYTES {
+        return Err(format!(
+            "transport probe byte_length must be between 1 and {MAX_BYTES}"
+        ));
+    }
+    let mut bytes = vec![0u8; byte_length];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = (index & 0xff) as u8;
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Phase 2a transport gate for the playback push bridge.
+///
+/// This deliberately streams deterministic RGBA-sized buffers through a Tauri
+/// `Channel`, rather than the invoke-response route used by
+/// `render_native_frame`. It does not render or decode: its only job is to
+/// prove (or reject) Channel delivery before the production playback pipeline
+/// is moved to it. Every packet has the production header layout followed by
+/// tightly packed RGBA8 pixels.
+///
+/// Header layout (little endian, 52 bytes):
+/// magic u32, version u16, header_bytes u16, generation u64,
+/// delivery_seq u64, frame_id u64, t8_epoch_us u64, width u32,
+/// height u32, stride u32.
+#[tauri::command]
+pub fn stream_native_playback_frames(
+    generation: u64,
+    frame_count: Option<u32>,
+    payload_bytes: Option<usize>,
+    pace_ms: Option<u32>,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<(), String> {
+    const MAGIC: u32 = 0x4350_4652; // "RFPC" in little-endian byte order.
+    const VERSION: u16 = 1;
+    const HEADER_BYTES: usize = 52;
+    const WIDTH: u32 = 480;
+    const HEIGHT: u32 = 270;
+    const STRIDE: u32 = WIDTH * 4;
+    const MAX_FRAMES: u32 = 120;
+    const MIN_PAYLOAD_BYTES: usize = 1024;
+    const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+    let frame_count = frame_count.unwrap_or(20).clamp(1, MAX_FRAMES);
+    let default_pixel_bytes = (STRIDE as usize)
+        .checked_mul(HEIGHT as usize)
+        .ok_or_else(|| "Push-bridge probe frame size overflow".to_string())?;
+    let pixel_bytes = payload_bytes.unwrap_or(default_pixel_bytes);
+    if !(MIN_PAYLOAD_BYTES..=MAX_PAYLOAD_BYTES).contains(&pixel_bytes) {
+        return Err(format!(
+            "push-bridge payload_bytes must be between {MIN_PAYLOAD_BYTES} and {MAX_PAYLOAD_BYTES}"
+        ));
+    }
+    let pace = std::time::Duration::from_millis(u64::from(pace_ms.unwrap_or(0).min(1000)));
+
+    // `Channel::send` may schedule WebView work, but a synchronous command
+    // remains active until this function returns. Sleeping here made the old
+    // diagnostic measure command lifetime rather than t8 → t9. Return now;
+    // the background sender is the actual one-way transport being evaluated.
+    std::thread::spawn(move || {
+        for delivery_seq in 1..=u64::from(frame_count) {
+            let mut packet = vec![0_u8; HEADER_BYTES + pixel_bytes];
+            packet[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+            packet[4..6].copy_from_slice(&VERSION.to_le_bytes());
+            packet[6..8].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+            packet[8..16].copy_from_slice(&generation.to_le_bytes());
+            packet[16..24].copy_from_slice(&delivery_seq.to_le_bytes());
+            // This is intentionally a source-frame identity, not a delivery
+            // sequence. Phase 2b will allow it to skip when mailbox work is
+            // superseded; the two counters must never be conflated.
+            packet[24..32].copy_from_slice(&delivery_seq.to_le_bytes());
+            packet[40..44].copy_from_slice(&WIDTH.to_le_bytes());
+            packet[44..48].copy_from_slice(&HEIGHT.to_le_bytes());
+            packet[48..52].copy_from_slice(&STRIDE.to_le_bytes());
+
+            // t8 must bracket transport delivery, not packet allocation.
+            // Keep this immediately adjacent to `send`: on a weak machine
+            // allocating/filling half a MiB is measurable work of its own.
+            let t8_epoch_us = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_micros().min(u64::MAX as u128) as u64,
+                Err(_) => break,
+            };
+            packet[32..40].copy_from_slice(&t8_epoch_us.to_le_bytes());
+
+            if on_frame
+                .send(tauri::ipc::InvokeResponseBody::Raw(packet))
+                .is_err()
+            {
+                // A WebView reload or closed diagnostics pane is normal
+                // teardown, not an application-level playback error.
+                break;
+            }
+            if !pace.is_zero() {
+                std::thread::sleep(pace);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Open one benchmark-only playback stream. This does not alter the default
+/// invoke bridge; the frontend must explicitly opt into this command.
+#[tauri::command]
+pub fn open_native_playback_push_stream(
+    app: tauri::AppHandle,
+    generation: u64,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<(), String> {
+    let runtime = push_runtime(&app)?;
+    if runtime.sender_started.swap(true, Ordering::AcqRel) {
+        return Err("Native playback push stream is already open".to_string());
+    }
+    runtime.mailbox.begin_generation(generation);
+    let channel = on_frame.clone();
+    let mailbox = Arc::clone(&runtime.mailbox);
+    mailbox.spawn_sender(move |delivery| {
+        let packet = push_packet(delivery)?;
+        channel.send(packet).map_err(|_| ())
+    });
+    if !runtime.render_worker_started.swap(true, Ordering::AcqRel) {
+        let worker_runtime = Arc::clone(&runtime);
+        tauri::async_runtime::spawn(run_push_render_worker(app, worker_runtime));
+    }
+    Ok(())
+}
+
+/// Producer-side playback update. This returns immediately; rendering and
+/// transport happen on their respective workers.
+#[tauri::command]
+pub fn submit_native_playback_push_frame(
+    app: tauri::AppHandle,
+    request: FrameRequest,
+) -> Result<(), String> {
+    let runtime = push_runtime(&app)?;
+    let generation = request.generation.unwrap_or_default();
+    runtime.mailbox.begin_generation(generation);
+    let mut latest = runtime
+        .latest_render
+        .lock()
+        .map_err(|_| "Native playback push render mailbox lock is poisoned".to_string())?;
+    *latest = Some(request);
+    drop(latest);
+    runtime.render_notify.notify_one();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn acknowledge_native_playback_push_frame(
+    app: tauri::AppHandle,
+    generation: u64,
+    consumed_delivery_seq: u64,
+) -> Result<bool, String> {
+    Ok(push_runtime(&app)?
+        .mailbox
+        .acknowledge(generation, consumed_delivery_seq))
+}
+
+#[tauri::command]
+pub fn close_native_playback_push_stream(app: tauri::AppHandle) -> Result<(), String> {
+    push_runtime(&app)?.mailbox.close();
+    Ok(())
+}
+
 /// Render a project-sized frame from deterministic solid layers.
 ///
 /// This establishes the native timeline compositor contract independently of
@@ -1957,6 +2339,9 @@ struct NativeRenderStageTimings {
     conversion_time_us: u32,
     compose_time_us: u32,
     readback_time_us: u32,
+    /// CPU-side bracket from readback submission to map_async completion.
+    /// This is intentionally marked separately from GPU timestamp queries.
+    map_wait_us: u32,
     decoder_mutex_wait_us: u64,
 }
 
@@ -2461,7 +2846,7 @@ async fn render_native_video_project_frame_bytes_timed(
         b: request.clear_color[2].clamp(0.0, 1.0) as f64,
         a: request.clear_color[3].clamp(0.0, 1.0) as f64,
     };
-    let (rgba, compose_time_us, readback_time_us) =
+    let (rgba, compose_time_us, readback_time_us, map_wait_us) =
         if let Some(transition) = request.transition.as_ref() {
             let (from_layer, to_layer) = build_transition_sources(&request, &layers)?;
             let from_texture = create_transition_source_texture(
@@ -2495,7 +2880,7 @@ async fn render_native_video_project_frame_bytes_timed(
                 Some(clear_color),
             )?;
             let overlays = if layers.len() > 2 { &layers[2..] } else { &[] };
-            let (rgba, compositor_compose_us, readback_us) = compositor
+            let (rgba, compositor_compose_us, readback_us, map_wait_us) = compositor
                 .render_transition_with_overlays_to_rgba_bytes_timed(
                     &gpu.device,
                     &gpu.queue,
@@ -2508,7 +2893,7 @@ async fn render_native_video_project_frame_bytes_timed(
                     Some(clear_color),
                 )
                 .await?;
-            (rgba, compositor_compose_us, readback_us)
+            (rgba, compositor_compose_us, readback_us, map_wait_us)
         } else {
             compositor
                 .render_to_rgba_bytes_with_size_timed(
@@ -2528,6 +2913,7 @@ async fn render_native_video_project_frame_bytes_timed(
             conversion_time_us,
             compose_time_us: compose_time_us.min(u32::MAX as u64) as u32,
             readback_time_us: readback_time_us.min(u32::MAX as u64) as u32,
+            map_wait_us: map_wait_us.min(u32::MAX as u64) as u32,
             decoder_mutex_wait_us,
         },
     ))
@@ -4245,6 +4631,8 @@ pub async fn render_native_frame(
                 conversion_upload_us: None,
                 compose_us: None,
                 readback_us: None,
+                map_wait_us: None,
+                timestamp_query_available: None,
                 present_us: None,
                 scheduler_wait_us: None,
                 lookahead_wait_us: None,
@@ -4358,6 +4746,11 @@ pub async fn render_native_frame(
             conversion_upload_us: Some(u64::from(stage_timings.conversion_time_us)),
             compose_us: Some(u64::from(stage_timings.compose_time_us)),
             readback_us: Some(u64::from(stage_timings.readback_time_us)),
+            map_wait_us: Some(u64::from(stage_timings.map_wait_us)),
+            // The current compatibility path deliberately uses a portable
+            // CPU bracket. A timestamp-query implementation may replace this
+            // later without changing the telemetry schema.
+            timestamp_query_available: Some(false),
             present_us: None,
             scheduler_wait_us: None,
             lookahead_wait_us: None,
@@ -4458,6 +4851,9 @@ pub async fn get_native_preview_performance_report(
         preview,
         session,
         stage_diagnoses,
+        push_bridge: app
+            .try_state::<Arc<NativePlaybackPushRuntime>>()
+            .map(|state| state.status()),
     })
 }
 

@@ -87,6 +87,10 @@ import {
   getPlaybackPolicy,
   registerNativeRasterAsset,
   renderNativeFrame,
+  openNativePlaybackPushStream,
+  submitNativePlaybackPushFrame,
+  acknowledgeNativePlaybackPushFrame,
+  closeNativePlaybackPushStream,
   queueNativeFrame,
   listenForNativePlaybackStats,
   listenForEngineQoSDecision,
@@ -129,6 +133,7 @@ import {
   NativePreviewFrameScheduler,
   type NativePreviewRequestSource,
 } from "./nativePreviewScheduler";
+import { PlaybackPushBridge } from "./playbackPushBridge";
 import {
   AdaptiveReadbackPolicy,
   defaultEmbeddedReadbackLimit,
@@ -567,6 +572,9 @@ export const NativeProgramPreview: React.FC = () => {
     width: number;
     height: number;
   } | null>(null);
+  // The frame payload itself stays compatible with the scheduler contract;
+  // retain its correlation key beside it until the canvas paint completes.
+  const nativeDisplayedFrameRequestKeyRef = useRef("");
   // Persist text-prefetch identity across native surface/canvas effect
   // restarts. Text prewarming is isolated from the visible video decoder path.
   const nativePrefetchStateRef = useRef({
@@ -1108,6 +1116,7 @@ export const NativeProgramPreview: React.FC = () => {
 
   useEffect(() => {
     nativeDisplayedFrameRef.current = null;
+    nativeDisplayedFrameRequestKeyRef.current = "";
   }, [project?.id]);
 
   useEffect(() => {
@@ -1307,6 +1316,11 @@ export const NativeProgramPreview: React.FC = () => {
       NativeRasterLayerSnapshot
     >();
     const nativeFrontendPerfSpans = new Map<string, NativePerfSpan>();
+    const pushRequestKeysByFrameId = new Map<number, string>();
+    const pushTimingsByRequestKey = new Map<
+      string,
+      { receivedAtMs: number; t8EpochUs: bigint }
+    >();
 
     const standaloneVideoCache = new Map<string, HTMLVideoElement>();
     const standaloneImageCache = new Map<string, HTMLImageElement>();
@@ -1949,6 +1963,75 @@ export const NativeProgramPreview: React.FC = () => {
         };
       },
     });
+
+    // Deliberately off by default. This is enabled only for the live Phase 2b
+    // benchmark so the invoke bridge remains the unconditional rollback path.
+    const previewPushBridgeEnabled =
+      import.meta.env.VITE_CLYPRA_PREVIEW_PUSH_BRIDGE === "1";
+    let pushBridgeReady = false;
+    let pushBridgeOpening: Promise<void> | null = null;
+    let pushBridgeFailed = false;
+    const playbackPushBridge = previewPushBridgeEnabled
+      ? new PlaybackPushBridge({
+          paint: (packet) => {
+            const requestKey = pushRequestKeysByFrameId.get(
+              Number(packet.frameId),
+            );
+            if (requestKey) {
+              nativeFrontendPerfSpans.get(requestKey)?.markIpcFinished();
+              nativeDisplayedFrameRequestKeyRef.current = requestKey;
+              pushTimingsByRequestKey.set(requestKey, {
+                receivedAtMs: performance.now(),
+                t8EpochUs: packet.t8EpochUs,
+              });
+            }
+            nativeDisplayedFrameRef.current = {
+              rgba: packet.pixels.slice().buffer,
+              width: packet.width,
+              height: packet.height,
+            };
+            forceRenderNeeded = true;
+            wakeNativeRenderLoopRef.current?.();
+          },
+          reportWatermark: (watermark) => {
+            void acknowledgeNativePlaybackPushFrame(
+              watermark.generation,
+              watermark.consumedDeliverySeq,
+            ).catch(() => undefined);
+          },
+          onReceiverIdle: () => {
+            nativePerfCollector.recordPushBridgeReceiverIdle();
+            console.debug("[native-preview] push-receiver-idle");
+          },
+        })
+      : null;
+
+    const ensurePlaybackPushBridge = async (generation: bigint) => {
+      if (!playbackPushBridge || pushBridgeFailed) return false;
+      playbackPushBridge.beginGeneration(generation);
+      if (pushBridgeReady) return true;
+      if (!pushBridgeOpening) {
+        pushBridgeOpening = openNativePlaybackPushStream(generation, (packet) => {
+          if (playbackPushBridge.receive(packet)) {
+            nativePerfCollector.recordPushBridgeFrame();
+          } else {
+            nativePerfCollector.recordPushBridgeRejectedGeneration();
+          }
+        })
+          .then(() => {
+            pushBridgeReady = true;
+          })
+          .catch((error) => {
+            pushBridgeFailed = true;
+            console.warn("[native-preview] push-stream-open-failed", error);
+          })
+          .finally(() => {
+            pushBridgeOpening = null;
+          });
+      }
+      await pushBridgeOpening;
+      return pushBridgeReady;
+    };
 
     const unsubscribeSeekIntent = seekController?.subscribe((intent) => {
       latestSeekIntent = intent;
@@ -3002,6 +3085,22 @@ export const NativeProgramPreview: React.FC = () => {
           nativePlaybackPath &&
           (!nativeSurfaceUsable || qualificationForcesWebView) &&
           !deferWebViewFallbackForNativeStartup;
+        // Keep the presenter decision explicit in telemetry. A slow bridge
+        // sample is otherwise indistinguishable from a native surface that
+        // was expected to engage but never did.
+        const presenterFallbackReason = EMBEDDED_PREVIEW_ONLY
+          ? "policy-override"
+          : qualificationForcesWebView
+          ? "policy-override"
+          : nativeSurfaceErrorNow
+            ? "surface-creation-failed"
+            : !nativeSurfaceReadyNow
+              ? "unknown"
+              : !nativeSurfaceGeometrySettledRef.current
+                ? "resize"
+                : nativeContinuousBlockedRevision === nativeRevision
+                  ? "device-lost"
+                  : "unknown";
         const telemetryScenario =
           qualification.status === "running"
             ? "qualification"
@@ -3029,11 +3128,15 @@ export const NativeProgramPreview: React.FC = () => {
           ? {
               view: outputAdapter.path,
               surface: outputAdapter.surface,
+              presenterMode: "native-surface",
               ...telemetryContextBase,
             }
           : {
               view: outputAdapter.path,
               surface: outputAdapter.surface,
+              presenterMode: "bridge",
+              presenterFallbackReason:
+                nativeReadbackFallbackPath ? presenterFallbackReason : undefined,
               ...telemetryContextBase,
             };
         // Capture composition complexity from the evaluated scene—not clip
@@ -3256,6 +3359,7 @@ export const NativeProgramPreview: React.FC = () => {
                   ? nativePerfCollector.begin(requestToPresent, {
                       view: "native",
                       surface: "native-surface",
+                      presenterMode: "native-surface",
                       runtimeEnvironment: import.meta.env.DEV
                         ? "development"
                         : "production",
@@ -3603,6 +3707,8 @@ export const NativeProgramPreview: React.FC = () => {
                     {
                       view: "webview",
                       surface: "dom-canvas",
+                      presenterMode: "bridge",
+                      presenterFallbackReason,
                       runtimeEnvironment: import.meta.env.DEV
                         ? "development"
                         : "production",
@@ -3621,15 +3727,42 @@ export const NativeProgramPreview: React.FC = () => {
                   playbackSpan.markDispatchStarted();
                   nativeFrontendPerfSpans.set(readbackRequestKey, playbackSpan);
                 }
+                if (previewPushBridgeEnabled && !pushBridgeFailed) {
+                  const generation = BigInt(targetGeneration);
+                  void ensurePlaybackPushBridge(generation).then((ready) => {
+                    if (!ready || !isActive || renderStateRef.current.clock.state !== "playing") return;
+                    // The push stream is fenced by the playback generation.
+                    // `readbackRequest` can originate from an older cache
+                    // key with no generation field; stamp the target before
+                    // it crosses Rust so a valid frame is never rejected as
+                    // generation zero.
+                    const pushRequest = {
+                      ...readbackRequest,
+                      generation: targetGeneration,
+                    };
+                    void ensureNativeRequestFonts(pushRequest)
+                      .then(() => {
+                        // Correlate source identity separately from delivery
+                        // sequence: Rust may supersede source frames before
+                        // they receive a monotonically increasing delivery id.
+                        pushRequestKeysByFrameId.set(
+                          pushRequest.frameTime.frameIndex,
+                          readbackRequestKey,
+                        );
+                        nativeFrontendPerfSpans
+                          .get(readbackRequestKey)
+                          ?.markIpcStarted();
+                        return submitNativePlaybackPushFrame(pushRequest);
+                      })
+                      .catch((error) => {
+                        pushBridgeFailed = true;
+                        console.warn("[native-preview] push-frame-submit-failed", error);
+                      });
+                  });
+                } else {
                 nativePlaybackInFlight = nativePreviewScheduler
                   .requestVisible(readbackSource)
                   .then((frame) => {
-                    const frontendSpan =
-                      nativeFrontendPerfSpans.get(readbackRequestKey);
-                    frontendSpan?.finish({
-                      ...dispatchedReadbackPolicy,
-                    });
-                    nativeFrontendPerfSpans.delete(readbackRequestKey);
                     const current = renderStateRef.current;
                     if (
                       isActive &&
@@ -3639,9 +3772,20 @@ export const NativeProgramPreview: React.FC = () => {
                     ) {
                       if (frame) {
                         nativeDisplayedFrameRef.current = frame;
+                        nativeDisplayedFrameRequestKeyRef.current = readbackRequestKey;
                       }
                       nativeContinuousFailureStreak = 0;
                       forceRenderNeeded = true;
+                    } else {
+                      // The bridge response was received but a newer target
+                      // owns presentation; close its trace as superseded.
+                      const frontendSpan =
+                        nativeFrontendPerfSpans.get(readbackRequestKey);
+                      frontendSpan?.finish({
+                        ...dispatchedReadbackPolicy,
+                        stale: true,
+                      });
+                      nativeFrontendPerfSpans.delete(readbackRequestKey);
                     }
                   })
                   .catch((error) => {
@@ -3665,6 +3809,7 @@ export const NativeProgramPreview: React.FC = () => {
                   .finally(() => {
                     nativePlaybackInFlight = null;
                   });
+                }
               }
             }
           }
@@ -3779,6 +3924,8 @@ export const NativeProgramPreview: React.FC = () => {
                     {
                       view: "webview",
                       surface: "dom-canvas",
+                      presenterMode: "bridge",
+                      presenterFallbackReason: "paused-exact-frame",
                       runtimeEnvironment: import.meta.env.DEV
                         ? "development"
                         : "production",
@@ -3828,6 +3975,7 @@ export const NativeProgramPreview: React.FC = () => {
                 exactNativeFrame = loadedFrame;
                 nativeFrame = loadedFrame;
                 nativeDisplayedFrameRef.current = loadedFrame;
+                nativeDisplayedFrameRequestKeyRef.current = readbackRequestKey;
                 nativeRetryAt = 0;
               } catch (error) {
                 // Keep the last native frame visible for this render boundary, then
@@ -3961,14 +4109,30 @@ export const NativeProgramPreview: React.FC = () => {
               );
               canvasPaintMs = performance.now() - browserPaintStarted;
             }
-            if (nativeFrame && canvasEl && exactNativeFrame !== null) {
+            if (nativeFrame && canvasEl) {
+              const paintedRequestKey =
+                nativeDisplayedFrameRequestKeyRef.current || nativeRequestKey;
               const frontendSpan =
-                nativeFrontendPerfSpans.get(nativeRequestKey);
+                nativeFrontendPerfSpans.get(paintedRequestKey);
               if (frontendSpan) {
+                const pushTimings = pushTimingsByRequestKey.get(
+                  paintedRequestKey,
+                );
+                const nowEpochUs = BigInt(
+                  Math.round((performance.timeOrigin + performance.now()) * 1_000),
+                );
                 frontendSpan.finish({
                   canvasPaintMs,
+                  transport: pushTimings ? "push-channel" : "invoke",
+                  transportReceiveMs: pushTimings
+                    ? Math.max(0, (Number(BigInt(Math.round((performance.timeOrigin + pushTimings.receivedAtMs) * 1_000)) - pushTimings.t8EpochUs)) / 1_000)
+                    : undefined,
+                  frameAgeAtPaintMs: pushTimings
+                    ? Math.max(0, Number(nowEpochUs - pushTimings.t8EpochUs) / 1_000)
+                    : undefined,
                 });
-                nativeFrontendPerfSpans.delete(nativeRequestKey);
+                nativeFrontendPerfSpans.delete(paintedRequestKey);
+                pushTimingsByRequestKey.delete(paintedRequestKey);
               }
               if (latestSeekIntent?.scrubSpanId) {
                 const elapsedSinceInputUs = Math.max(
@@ -4249,6 +4413,8 @@ export const NativeProgramPreview: React.FC = () => {
       unsubscribeTransformGeometry();
       unsubscribeTransformEnd();
       nativePreviewScheduler.dispose();
+      playbackPushBridge?.stop();
+      if (pushBridgeReady) void closeNativePlaybackPushStream().catch(() => undefined);
       if (nativeTextPrefetchTimer !== null) {
         window.clearTimeout(nativeTextPrefetchTimer);
         nativeTextPrefetchTimer = null;
