@@ -122,6 +122,8 @@ export interface NativePreviewPerformanceReport {
   reportVersion: number;
   capturedAtMs: number;
   applicationVersion: string;
+  /** Cargo profile of the running native binary: debug or release. */
+  buildProfile: "debug" | "release" | string;
   operatingSystem: string;
   architecture: string;
   gpu: NativeGpuRuntimeStatus | null;
@@ -148,6 +150,7 @@ export interface NativePreviewStageDiagnosis {
   dominantP95Us: number;
   recommendedNextStep:
     | "prioritize-decode"
+    | "investigate-hardware-download"
     | "investigate-bridge"
     | "investigate-render-upload"
     | "investigate-queue"
@@ -222,6 +225,25 @@ export interface NativePerformanceSample {
   containerFormat?: string;
   /** Whether hardware decoding acceleration is active for the frame stream. */
   isHardwareAccelerated?: boolean;
+  /** Container seeks required for this decode; steady playback should be zero after warm-up. */
+  decoderSeekCount?: number;
+  /** Decoder output frames consumed to resolve one preview request. */
+  decoderFramesDecoded?: number;
+  /** CPU download time when a hardware frame had to leave GPU memory. */
+  hardwareFrameDownloadUs?: number;
+  /** CPU scale/colorspace conversion time before GPU upload. */
+  scaleColorspaceUs?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  sourceBitsPerRawSample?: number;
+  /** Source FPS × 1,000 (e.g. 29.97 FPS is 29970). */
+  sourceFrameRateMilli?: number;
+  unaccountedUs?: number;
+  codecName?: string;
+  hardwareFramesDownloaded?: number;
+  stageOverlapUs?: number;
+  /** How this request was satisfied by the decoder. */
+  servedFrom?: "decoded-in-request" | "ready-cache" | "reused-current";
   dropReason?:
     | "stale"
     | "cancelled"
@@ -258,6 +280,7 @@ export interface NativeStagePercentiles {
 export interface NativeModeStats {
   mode: NativePreviewMode;
   decode: NativeStagePercentiles;
+  packetDecode: NativeStagePercentiles;
   conversionUpload: NativeStagePercentiles;
   compose: NativeStagePercentiles;
   readback: NativeStagePercentiles;
@@ -270,9 +293,21 @@ export interface NativeModeStats {
   ipcWait: NativeStagePercentiles;
   decoderMutexWait: NativeStagePercentiles;
   demuxWait: NativeStagePercentiles;
+  decoderSeekCount: NativeStagePercentiles;
+  decoderFramesDecoded: NativeStagePercentiles;
+  hardwareFrameDownload: NativeStagePercentiles;
+  scaleColorspace: NativeStagePercentiles;
   gpuQueueWait: NativeStagePercentiles;
   surfaceAcquire: NativeStagePercentiles;
   submitPresent: NativeStagePercentiles;
+  stageOverlap: NativeStagePercentiles;
+  /** Time within each invoke not attributed to any measured stage (µs). */
+  unaccounted: NativeStagePercentiles;
+  uniqueFramesDelivered: number;
+  repeatedFramesDelivered: number;
+  deliveredUniqueFps: number | null;
+  windowSource: string;
+  sampleSpanMs: number | null;
   droppedCount: number;
   staleCount: number;
 }

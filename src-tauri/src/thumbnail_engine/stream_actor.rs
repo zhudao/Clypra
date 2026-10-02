@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::thumbnail_engine::decoder::{
     get_preview_decoder_for_stream, preview_pool_key, DecodeFrameOptions, VideoColorMetadata,
-    VideoDecoder,
+    VideoDecoder, VideoStreamMetadata,
 };
 use clypra_native_core::QualityTier;
 
@@ -92,6 +92,14 @@ pub struct DecodedActorFrame {
     pub demux_us: u32,
     pub container_format: String,
     pub is_hardware_accelerated: bool,
+    pub decoder_seek_count: u32,
+    pub decoder_frames_decoded: u32,
+    pub hardware_frame_download_us: Option<u64>,
+    pub scale_colorspace_us: u64,
+    pub hardware_frames_downloaded: u32,
+    pub source_metadata: VideoStreamMetadata,
+    /// How this frame request was satisfied by the decoder.
+    pub served_from: crate::native_core::performance::ServedFrom,
 }
 
 impl DecodedActorFrame {
@@ -161,8 +169,37 @@ impl StreamDecoderActorHandle {
     pub async fn decode_frame(
         &self,
         time_secs: f64,
+        mut options: DecodeFrameOptions,
+        is_prefetch: bool,
+        generation: u64,
+    ) -> Result<DecodedActorFrame, String> {
+        options.is_playback = false;
+        self.decode_frame_with_policy(time_secs, options, is_prefetch, false, generation)
+            .await
+    }
+
+    /// Playback is a forward-only stream, not an exact-frame query. If the
+    /// WebView asks for an older timestamp after a decode stall, serve the
+    /// newest already-decoded eligible frame instead of seeking backwards and
+    /// re-decoding an entire GOP. Exact seek/scrub continues through
+    /// `decode_frame` above.
+    pub async fn decode_playback_frame(
+        &self,
+        time_secs: f64,
+        mut options: DecodeFrameOptions,
+        generation: u64,
+    ) -> Result<DecodedActorFrame, String> {
+        options.is_playback = true;
+        self.decode_frame_with_policy(time_secs, options, false, true, generation)
+            .await
+    }
+
+    async fn decode_frame_with_policy(
+        &self,
+        time_secs: f64,
         options: DecodeFrameOptions,
         is_prefetch: bool,
+        playback_latest_frame_wins: bool,
         generation: u64,
     ) -> Result<DecodedActorFrame, String> {
         let start = Instant::now();
@@ -183,8 +220,49 @@ impl StreamDecoderActorHandle {
                     cache.push_back(item);
                 }
                 hit.from_prime_cache = true;
+                // These timings describe the frame's original decode. The
+                // presentation request consumed an already-ready frame, so
+                // reporting them here would falsely inflate live playback
+                // seek/amplification metrics.
+                hit.decode_us = 0;
+                hit.decoder_seek_count = 0;
+                hit.decoder_frames_decoded = 0;
+                hit.hardware_frame_download_us = None;
+                hit.scale_colorspace_us = 0;
                 hit.actor_wait_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 return Ok(hit);
+            }
+
+            // A completion that arrives late during playback must never force
+            // the decoder backwards merely to satisfy an obsolete clock tick.
+            // The ring is tiny by design, so choose only a frame that is at
+            // least as new as the requested time (within one frame) and keep
+            // exact requests on the strict branch above.
+            if playback_latest_frame_wins {
+                if let Some((pos, _)) = cache
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, frame)| {
+                        !frame.is_approximate
+                            && frame.quality == options.quality
+                            && frame.time_secs + tolerance >= time_secs
+                    })
+                    .max_by(|(_, left), (_, right)| left.time_secs.total_cmp(&right.time_secs))
+                {
+                    let mut hit = cache[pos].clone();
+                    if pos != cache.len() - 1 {
+                        let item = cache.remove(pos).unwrap();
+                        cache.push_back(item);
+                    }
+                    hit.from_prime_cache = true;
+                    hit.decode_us = 0;
+                    hit.decoder_seek_count = 0;
+                    hit.decoder_frames_decoded = 0;
+                    hit.hardware_frame_download_us = None;
+                    hit.scale_colorspace_us = 0;
+                    hit.actor_wait_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                    return Ok(hit);
+                }
             }
         }
 
@@ -481,6 +559,7 @@ impl StreamDecoderActor {
             let mutex_wait_us = mutex_started.elapsed().as_micros() as u64;
             let decode_started = Instant::now();
             let stream_color = guard.metadata().color;
+            let source_metadata = guard.metadata();
             let container_format = guard.container_format().to_string();
             let is_hardware_accelerated = guard.is_hardware_accelerated();
             let source_rotation = guard.rotation();
@@ -507,6 +586,8 @@ impl StreamDecoderActor {
                         );
                         let is_approx = guard.is_last_frame_approximate();
                         let demux_us = guard.last_demux_us();
+                        let (seek_count, frames_decoded, download_us, scale_us, hw_downloaded_count, served_from) =
+                            guard.last_decode_activity();
                         return Ok((
                             DecodedVideoPlanes::D3d11(Arc::new(shared)),
                             width,
@@ -519,10 +600,18 @@ impl StreamDecoderActor {
                             container_format,
                             is_hardware_accelerated,
                             source_rotation,
+                            seek_count,
+                            frames_decoded,
+                            download_us,
+                            scale_us,
+                            hw_downloaded_count,
+                            served_from,
+                            source_metadata,
                         ));
                     }
                     Ok(None) => {
-                        // Software or non-D3D11 frame; proceed to CPU fallback below
+                        // Software or non-D3D11 frame or unsupported zero-copy; disable runtime DXGI probing
+                        crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
                     }
                     Err(err) => {
                         if err.contains("cancelled") {
@@ -533,6 +622,7 @@ impl StreamDecoderActor {
                             target_time,
                             err
                         );
+                        crate::wgpu_compositor::adapter_selector::mark_dxgi_runtime_disabled();
                         // Non-fatal: proceed to CPU NV12 fallback below
                     }
                 }
@@ -542,6 +632,8 @@ impl StreamDecoderActor {
                 guard.decode_frame_raw_nv12_with_options(target_time, options, is_cancelled);
             let is_approx = guard.is_last_frame_approximate();
             let demux_us = guard.last_demux_us();
+            let (seek_count, frames_decoded, download_us, scale_us, hw_downloaded_count, served_from) =
+                guard.last_decode_activity();
 
             let decode_us = decode_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
 
@@ -566,6 +658,13 @@ impl StreamDecoderActor {
                         container_format,
                         is_hardware_accelerated,
                         source_rotation,
+                        seek_count,
+                        frames_decoded,
+                        download_us,
+                        scale_us,
+                        hw_downloaded_count,
+                        served_from,
+                        source_metadata,
                     ))
                 }
                 Err(err) => Err(err),
@@ -586,6 +685,13 @@ impl StreamDecoderActor {
             container_format,
             is_hardware_accelerated,
             source_rotation,
+            decoder_seek_count,
+            decoder_frames_decoded,
+            hardware_frame_download_us,
+            scale_colorspace_us,
+            hardware_frames_downloaded,
+            served_from,
+            source_metadata,
         ) = result?;
 
         Ok(DecodedActorFrame {
@@ -604,6 +710,13 @@ impl StreamDecoderActor {
             demux_us,
             container_format,
             is_hardware_accelerated,
+            decoder_seek_count,
+            decoder_frames_decoded,
+            hardware_frame_download_us,
+            scale_colorspace_us,
+            hardware_frames_downloaded,
+            served_from,
+            source_metadata,
         })
     }
 }
@@ -689,6 +802,13 @@ mod tests {
             demux_us: 10,
             container_format: "mp4".to_string(),
             is_hardware_accelerated: false,
+            decoder_seek_count: 0,
+            decoder_frames_decoded: 0,
+            hardware_frame_download_us: None,
+            scale_colorspace_us: 0,
+            hardware_frames_downloaded: 0,
+            source_metadata: VideoStreamMetadata::default(),
+            served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
         };
 
         prime_cache.lock().await.push_back(cached_frame);
@@ -706,6 +826,7 @@ mod tests {
         let opts = DecodeFrameOptions {
             allow_keyframe_approx: false,
             quality: QualityTier::Full,
+            is_playback: false,
         };
 
         // Exact match
@@ -743,6 +864,13 @@ mod tests {
             demux_us: 10,
             container_format: "mp4".to_string(),
             is_hardware_accelerated: false,
+            decoder_seek_count: 0,
+            decoder_frames_decoded: 0,
+            hardware_frame_download_us: None,
+            scale_colorspace_us: 0,
+            hardware_frames_downloaded: 0,
+            source_metadata: VideoStreamMetadata::default(),
+            served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
         };
         prime_cache.lock().await.push_back(approx_frame);
 
@@ -750,6 +878,7 @@ mod tests {
         let opts_approx = DecodeFrameOptions {
             allow_keyframe_approx: true,
             quality: QualityTier::Full,
+            is_playback: false,
         };
         let res_approx = handle
             .decode_frame(2.0, opts_approx, false, 0)
@@ -764,6 +893,7 @@ mod tests {
         let opts_exact = DecodeFrameOptions {
             allow_keyframe_approx: false,
             quality: QualityTier::Full,
+            is_playback: false,
         };
         let err_exact = handle.decode_frame(2.0, opts_exact, false, 0).await;
         assert!(
@@ -774,6 +904,7 @@ mod tests {
         let opts_half = DecodeFrameOptions {
             allow_keyframe_approx: false,
             quality: QualityTier::Half,
+            is_playback: false,
         };
         // Channel is closed, so decode_frame fails immediately
         let err = handle.decode_frame(1.0, opts_half, false, 0).await;
@@ -805,6 +936,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playback_uses_newest_eligible_cached_frame_without_seeking_back() {
+        let (urgent_tx, _urgent_rx) = mpsc::channel(1);
+        let (prefetch_tx, _prefetch_rx) = mpsc::channel(1);
+        let prime_cache = Arc::new(Mutex::new(VecDeque::new()));
+        prime_cache.lock().await.push_back(DecodedActorFrame {
+            time_secs: 2.0,
+            planes: DecodedVideoPlanes::Cpu {
+                y: Arc::from(vec![0u8; 16]),
+                uv: Arc::from(vec![0u8; 8]),
+            },
+            width: 4,
+            height: 4,
+            source_rotation: 0,
+            color: VideoColorMetadata::default(),
+            decode_us: 99,
+            decoder_mutex_wait_us: 0,
+            actor_wait_us: 0,
+            from_prime_cache: false,
+            quality: QualityTier::Full,
+            is_approximate: false,
+            demux_us: 0,
+            container_format: "mp4".to_string(),
+            is_hardware_accelerated: false,
+            decoder_seek_count: 1,
+            decoder_frames_decoded: 99,
+            hardware_frame_download_us: None,
+            scale_colorspace_us: 0,
+            hardware_frames_downloaded: 0,
+            source_metadata: VideoStreamMetadata::default(),
+            served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
+        });
+        let handle = StreamDecoderActorHandle {
+            key: "playback-cache-test".to_string(),
+            urgent_tx,
+            prefetch_tx,
+            current_generation: Arc::new(AtomicU64::new(0)),
+            cancel_in_flight: Arc::new(AtomicBool::new(false)),
+            prime_cache,
+            frame_duration_secs: 1.0 / 30.0,
+        };
+
+        // The requested clock time is older than the decoded cursor. Exact
+        // seek would re-seek here; playback must show the current frame.
+        let frame = handle
+            .decode_playback_frame(
+                1.8,
+                DecodeFrameOptions {
+                    allow_keyframe_approx: false,
+                    quality: QualityTier::Full,
+                    is_playback: true,
+                },
+                0,
+            )
+            .await
+            .expect("latest playback cache frame should satisfy late request");
+
+        assert_eq!(frame.time_secs, 2.0);
+        assert!(frame.from_prime_cache);
+        assert_eq!(frame.decode_us, 0);
+        assert_eq!(frame.decoder_seek_count, 0);
+        assert_eq!(frame.decoder_frames_decoded, 0);
+    }
+
+    #[tokio::test]
     async fn test_actor_with_real_video_asset_if_available() {
         let test_asset = "/Users/AIEraDev/Documents/clypra-testing-assets/Antler.mp4";
         if !Path::new(test_asset).exists() {
@@ -819,6 +1014,7 @@ mod tests {
         let opts = DecodeFrameOptions {
             allow_keyframe_approx: false,
             quality: QualityTier::Full,
+            is_playback: false,
         };
 
         // Frame 0 decode

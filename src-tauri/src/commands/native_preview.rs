@@ -174,6 +174,9 @@ pub struct NativePreviewPerformanceReport {
     pub report_version: u32,
     pub captured_at_ms: u64,
     pub application_version: String,
+    /// Rust's active Cargo profile. Performance percentiles from debug builds
+    /// must never be compared with release qualification baselines.
+    pub build_profile: String,
     pub operating_system: String,
     pub architecture: String,
     pub gpu: Option<NativeGpuRuntimeStatus>,
@@ -276,13 +279,23 @@ pub fn get_native_push_transport_capabilities(
 
 fn diagnose_mode_stats(mode: &ModeStats) -> Option<NativePreviewStageDiagnosis> {
     let stages = [
-        ("decode", mode.decode.p95, "prioritize-decode"),
+        ("packet_decode", mode.packet_decode.p95, "prioritize-decode"),
+        (
+            "hardware_frame_download",
+            mode.hardware_frame_download.p95,
+            "investigate-hardware-download",
+        ),
         (
             "decoder_mutex_wait",
             mode.decoder_mutex_wait.p95,
             "prioritize-decode",
         ),
         ("demux_wait", mode.demux_wait.p95, "prioritize-decode"),
+        (
+            "scale_colorspace",
+            mode.scale_colorspace.p95,
+            "investigate-render-upload",
+        ),
         (
             "conversion_upload",
             mode.conversion_upload.p95,
@@ -335,6 +348,8 @@ fn diagnose_mode_stats(mode: &ModeStats) -> Option<NativePreviewStageDiagnosis> 
         .max_by_key(|(_, value, _)| *value)?;
     let sample_count = [
         mode.decode.sample_count,
+        mode.packet_decode.sample_count,
+        mode.hardware_frame_download.sample_count,
         mode.decoder_mutex_wait.sample_count,
         mode.demux_wait.sample_count,
         mode.conversion_upload.sample_count,
@@ -438,6 +453,17 @@ struct NativeDecodeTimings {
     demux_wait_us: Option<u64>,
     container_format: Option<String>,
     is_hardware_accelerated: Option<bool>,
+    decoder_seek_count: Option<u32>,
+    decoder_frames_decoded: Option<u32>,
+    hardware_frame_download_us: Option<u64>,
+    scale_colorspace_us: Option<u64>,
+    source_width: Option<u32>,
+    source_height: Option<u32>,
+    source_bits_per_raw_sample: Option<u8>,
+    source_frame_rate_milli: Option<u32>,
+    codec_name: Option<String>,
+    hardware_frames_downloaded: Option<u32>,
+    served_from: Option<crate::native_core::performance::ServedFrom>,
 }
 
 struct QueuedNativeFrame {
@@ -597,13 +623,21 @@ fn record_native_surface_sample(
     let Ok(mut service) = service.try_lock() else {
         return;
     };
+    let total_time_us = started_at.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    let stages_sum = u64::from(decode_timings.decode_time_us)
+        + conversion_upload_us.unwrap_or(0)
+        + compose_us.unwrap_or(0)
+        + submit_present_us.unwrap_or(0)
+        + scheduler_wait_us;
+    let unaccounted_us = u64::from(total_time_us).saturating_sub(stages_sum);
+    let stage_overlap_us = stages_sum.saturating_sub(u64::from(total_time_us));
     service.record_sample(PerformanceSample {
         request_id: request.request_id.clone(),
         frame_index: request.frame_time.frame_index,
         decode_time_us: decode_timings.decode_time_us,
         compose_time_us: compose_us.unwrap_or(0).min(u32::MAX as u64) as u32,
         readback_time_us: 0,
-        total_time_us: started_at.elapsed().as_micros().min(u32::MAX as u128) as u32,
+        total_time_us,
         bytes_transferred: 0,
         // A queued decode is a playback staging hit, not a NativeFrameService
         // cache hit. Keep cache-rate telemetry scoped to the RGBA cache.
@@ -650,6 +684,23 @@ fn record_native_surface_sample(
         demux_wait_us: decode_timings.demux_wait_us,
         container_format: decode_timings.container_format.clone(),
         is_hardware_accelerated: decode_timings.is_hardware_accelerated,
+        decoder_seek_count: decode_timings.decoder_seek_count,
+        decoder_frames_decoded: decode_timings.decoder_frames_decoded,
+        hardware_frame_download_us: decode_timings.hardware_frame_download_us,
+        scale_colorspace_us: decode_timings.scale_colorspace_us,
+        source_width: decode_timings.source_width,
+        source_height: decode_timings.source_height,
+        source_bits_per_raw_sample: decode_timings.source_bits_per_raw_sample,
+        source_frame_rate_milli: decode_timings.source_frame_rate_milli,
+        unaccounted_us: Some(unaccounted_us),
+        codec_name: decode_timings.codec_name.clone(),
+        hardware_frames_downloaded: decode_timings.hardware_frames_downloaded,
+        stage_overlap_us: Some(stage_overlap_us),
+        served_from: if queue_hit {
+            Some(crate::native_core::performance::ServedFrom::ReadyCache)
+        } else {
+            decode_timings.served_from
+        },
     });
 }
 
@@ -2333,7 +2384,7 @@ pub async fn get_video_scopes(
 /// Decode, color-convert, and composite real video layers in native Rust/wgpu.
 /// This internal function returns bytes so versioned frame-service commands can
 /// add caching and stale-request handling without duplicating the renderer.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct NativeRenderStageTimings {
     decode_time_us: u32,
     conversion_time_us: u32,
@@ -2343,6 +2394,7 @@ struct NativeRenderStageTimings {
     /// This is intentionally marked separately from GPU timestamp queries.
     map_wait_us: u32,
     decoder_mutex_wait_us: u64,
+    decode_telemetry: NativeDecodeTimings,
 }
 
 fn resolve_mask_view<'a>(
@@ -2441,6 +2493,7 @@ async fn render_native_video_project_frame_bytes_timed(
     let mut views = Vec::with_capacity(request.layers.len() + request.raster_layers.len());
     let mut decode_time_us = 0u32;
     let mut decoder_mutex_wait_us = 0u64;
+    let mut decode_telemetry = NativeDecodeTimings::default();
 
     // ── Capability-Negotiated Render Path Selection ───────────────────────────
     // Before decoding, inspect the session's negotiated DXGI state. If zero-copy
@@ -2449,7 +2502,14 @@ async fn render_native_video_project_frame_bytes_timed(
     #[cfg(target_os = "windows")]
     let can_attempt_dxgi = !request.layers.is_empty() && {
         let session = state.lock().await;
+        // A failed/unsupported import still mutates the FFmpeg decoder while
+        // probing D3D11VA. Repeating that probe per playback frame resets the
+        // shared decoder cursor and turns a forward stream into GOP seeks.
+        // Attempt it only when the active wgpu adapter can actually consume
+        // the imported NV12 texture.
         session.dxgi_state.is_usable()
+            && session.gpu.capabilities.zero_copy_available()
+            && session.gpu.capabilities.wgpu_nv12
     };
 
     #[cfg(target_os = "windows")]
@@ -2464,6 +2524,7 @@ async fn render_native_video_project_frame_bytes_timed(
                 || request.is_scrubbing.unwrap_or(false)
                 || request.mode.as_deref() == Some("scrub"),
             quality: request.quality,
+            is_playback: request.mode.as_deref() == Some("playback"),
         };
 
         let mut frames = Vec::with_capacity(request.layers.len());
@@ -2526,7 +2587,7 @@ async fn render_native_video_project_frame_bytes_timed(
 
     let mut session = state.lock().await;
     let gpu = Arc::clone(&session.gpu);
-    let conversion_started = Instant::now();
+    let mut conversion_started = Instant::now();
 
     #[allow(unused_mut)]
     let mut render_path = FrameRenderPath::GpuUploadRing;
@@ -2623,8 +2684,13 @@ async fn render_native_video_project_frame_bytes_timed(
         let (decoded_frames, decode_timings) = decode_native_video_layers(&request, None).await?;
         decode_time_us = decode_timings.decode_time_us;
         decoder_mutex_wait_us = decode_timings.decoder_mutex_wait_us;
+        decode_telemetry = decode_timings;
 
         session = state.lock().await;
+        // The prior timer was started before awaiting CPU decode, making
+        // `conversionUpload` cumulative with decode. Start it at the actual
+        // GPU-upload/format-conversion boundary instead.
+        conversion_started = Instant::now();
         for (layer, (planes, width, height, color, source_rotation)) in
             request.layers.iter().zip(decoded_frames.iter())
         {
@@ -2915,6 +2981,7 @@ async fn render_native_video_project_frame_bytes_timed(
             readback_time_us: readback_time_us.min(u32::MAX as u64) as u32,
             map_wait_us: map_wait_us.min(u32::MAX as u64) as u32,
             decoder_mutex_wait_us,
+            decode_telemetry,
         },
     ))
 }
@@ -2932,6 +2999,7 @@ async fn decode_native_video_layers(
             || request.is_scrubbing.unwrap_or(false)
             || request.mode.as_deref() == Some("scrub"),
         quality: request.quality,
+        is_playback: request.mode.as_deref() == Some("playback"),
     };
 
     let is_prefetch = request.mode.as_deref() == Some("prefetch");
@@ -2953,15 +3021,28 @@ async fn decode_native_video_layers(
             stream_id,
         )
         .await?;
-        let actor_frame = actor
-            .decode_frame(layer.time_secs, decode_options, is_prefetch, generation)
-            .await?;
+        let actor_frame = if request.mode.as_deref() == Some("playback") {
+            actor
+                .decode_playback_frame(layer.time_secs, decode_options, generation)
+                .await?
+        } else {
+            actor
+                .decode_frame(layer.time_secs, decode_options, is_prefetch, generation)
+                .await?
+        };
         let decode_us = actor_frame.decode_us;
         let mutex_wait_us = actor_frame.decoder_mutex_wait_us;
         let actor_wait_us = actor_frame.actor_wait_us;
         let demux_us = actor_frame.demux_us;
         let container_format = actor_frame.container_format.clone();
         let is_hw = actor_frame.is_hardware_accelerated;
+        let decoder_seek_count = actor_frame.decoder_seek_count;
+        let decoder_frames_decoded = actor_frame.decoder_frames_decoded;
+        let hardware_frame_download_us = actor_frame.hardware_frame_download_us;
+        let hardware_frames_downloaded = actor_frame.hardware_frames_downloaded;
+        let scale_colorspace_us = actor_frame.scale_colorspace_us;
+        let source = actor_frame.source_metadata.clone();
+        let actor_served_from = actor_frame.served_from;
         let decoded = actor_frame.into_native_video_frame();
         return Ok((
             vec![decoded],
@@ -2972,6 +3053,17 @@ async fn decode_native_video_layers(
                 demux_wait_us: Some(u64::from(demux_us)),
                 container_format: Some(container_format),
                 is_hardware_accelerated: Some(is_hw),
+                decoder_seek_count: Some(decoder_seek_count),
+                decoder_frames_decoded: Some(decoder_frames_decoded),
+                hardware_frame_download_us,
+                scale_colorspace_us: Some(scale_colorspace_us),
+                source_width: Some(source.width),
+                source_height: Some(source.height),
+                source_bits_per_raw_sample: Some(source.bits_per_raw_sample),
+                source_frame_rate_milli: source.average_frame_rate_milli(),
+                codec_name: Some(source.codec_name),
+                hardware_frames_downloaded: Some(hardware_frames_downloaded),
+                served_from: Some(actor_served_from),
             },
         ));
     }
@@ -3077,6 +3169,10 @@ async fn decode_native_video_layers(
             demux_wait_us: Some(max_demux_us),
             container_format: primary_container,
             is_hardware_accelerated: Some(all_hw),
+            // Multi-layer aggregation currently records the critical-path
+            // maximum. Per-stream decode activity is intentionally omitted
+            // until the report can represent one row per source.
+            ..NativeDecodeTimings::default()
         },
     ))
 }
@@ -4649,6 +4745,19 @@ pub async fn render_native_frame(
                 demux_wait_us: None,
                 container_format: None,
                 is_hardware_accelerated: None,
+                decoder_seek_count: None,
+                decoder_frames_decoded: None,
+                hardware_frame_download_us: None,
+                scale_colorspace_us: None,
+                source_width: None,
+                source_height: None,
+                source_bits_per_raw_sample: None,
+                source_frame_rate_milli: None,
+                unaccounted_us: Some(0),
+                codec_name: None,
+                hardware_frames_downloaded: Some(0),
+                stage_overlap_us: Some(0),
+                served_from: Some(crate::native_core::performance::ServedFrom::ReadyCache),
             });
             record_successful_readback_metrics(&app, &request);
             return Ok(tauri::ipc::Response::new(packet.data));
@@ -4720,6 +4829,12 @@ pub async fn render_native_frame(
         let mut cache = cache.lock().await;
         let _ = cache.insert(&request, packet);
         let total_time_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        let stages_sum = u64::from(stage_timings.decode_time_us)
+            + u64::from(stage_timings.conversion_time_us)
+            + u64::from(stage_timings.compose_time_us)
+            + u64::from(stage_timings.readback_time_us);
+        let unaccounted_us = u64::from(total_time_us).saturating_sub(stages_sum);
+        let stage_overlap_us = stages_sum.saturating_sub(u64::from(total_time_us));
         cache.record_sample(PerformanceSample {
             request_id: request.request_id.clone(),
             frame_index: request.frame_time.frame_index,
@@ -4764,9 +4879,22 @@ pub async fn render_native_frame(
             submit_present_us: None,
             capability_policy: None,
             capability_probe_us: None,
-            demux_wait_us: None,
-            container_format: None,
-            is_hardware_accelerated: None,
+            demux_wait_us: stage_timings.decode_telemetry.demux_wait_us,
+            container_format: stage_timings.decode_telemetry.container_format.clone(),
+            is_hardware_accelerated: stage_timings.decode_telemetry.is_hardware_accelerated,
+            decoder_seek_count: stage_timings.decode_telemetry.decoder_seek_count,
+            decoder_frames_decoded: stage_timings.decode_telemetry.decoder_frames_decoded,
+            hardware_frame_download_us: stage_timings.decode_telemetry.hardware_frame_download_us,
+            scale_colorspace_us: stage_timings.decode_telemetry.scale_colorspace_us,
+            source_width: stage_timings.decode_telemetry.source_width,
+            source_height: stage_timings.decode_telemetry.source_height,
+            source_bits_per_raw_sample: stage_timings.decode_telemetry.source_bits_per_raw_sample,
+            source_frame_rate_milli: stage_timings.decode_telemetry.source_frame_rate_milli,
+            unaccounted_us: Some(unaccounted_us),
+            codec_name: stage_timings.decode_telemetry.codec_name.clone(),
+            hardware_frames_downloaded: stage_timings.decode_telemetry.hardware_frames_downloaded,
+            stage_overlap_us: Some(stage_overlap_us),
+            served_from: stage_timings.decode_telemetry.served_from,
         });
     }
 
@@ -4845,6 +4973,11 @@ pub async fn get_native_preview_performance_report(
         report_version: 1,
         captured_at_ms: crate::native_core::performance::now_ms(),
         application_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_profile: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
         operating_system: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
         gpu,

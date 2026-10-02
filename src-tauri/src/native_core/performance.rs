@@ -29,6 +29,24 @@ impl PreviewMode {
     }
 }
 
+/// Records how a frame request was satisfied so reports can distinguish
+/// true decode work from cache or in-place reuse.
+///
+/// Serialised as kebab-case strings so they are readable in JSON reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServedFrom {
+    /// FFmpeg decoded at least one packet during this request.
+    DecodedInRequest,
+    /// Frame was returned from the ready-frame ring-buffer or last-frame slot
+    /// without issuing any new FFmpeg decode call.
+    ReadyCache,
+    /// `decide_decoder_action` returned `ReuseCurrent`; the frame at
+    /// `current_pts` (which may be slightly ahead of `target_pts` by up to
+    /// one frame duration) was returned without decoding or seeking.
+    ReusedCurrent,
+}
+
 /// Runtime limits used to protect the fast editing path during migration.
 /// Durations are integer microseconds; timestamps remain governed by FrameTime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +198,52 @@ pub struct PerformanceSample {
     /// Whether hardware decoding acceleration is active for the frame stream.
     #[serde(default)]
     pub is_hardware_accelerated: Option<bool>,
+    /// Number of container seeks performed to satisfy this decode request.
+    /// Playback should normally remain at zero after its initial warm-up.
+    #[serde(default)]
+    pub decoder_seek_count: Option<u32>,
+    /// Frames emitted by the decoder while resolving this request. Comparing
+    /// this with delivered frames exposes GOP re-decode amplification.
+    #[serde(default)]
+    pub decoder_frames_decoded: Option<u32>,
+    /// CPU transfer time for a hardware-decoded frame, when that frame had to
+    /// be downloaded before preview conversion.
+    #[serde(default)]
+    pub hardware_frame_download_us: Option<u64>,
+    /// CPU scale / colorspace conversion to preview NV12 planes. This is kept
+    /// separate from packet decode and GPU upload.
+    #[serde(default)]
+    pub scale_colorspace_us: Option<u64>,
+    /// Source media facts needed to interpret a decode measurement.
+    #[serde(default)]
+    pub source_width: Option<u32>,
+    #[serde(default)]
+    pub source_height: Option<u32>,
+    #[serde(default)]
+    pub source_bits_per_raw_sample: Option<u8>,
+    #[serde(default)]
+    /// Source average frame rate multiplied by 1,000 to preserve common
+    /// fractional rates while keeping the sample comparable/Eq-friendly.
+    pub source_frame_rate_milli: Option<u32>,
+    /// Microseconds within the request lifecycle not accounted for by explicitly
+    /// measured stages (such as session mutex contention or task scheduling).
+    #[serde(default)]
+    pub unaccounted_us: Option<u64>,
+    /// Stream codec name (e.g. "h264", "hevc", "vp9", "av1").
+    #[serde(default)]
+    pub codec_name: Option<String>,
+    /// Number of hardware textures downloaded from GPU memory to CPU RAM.
+    #[serde(default)]
+    pub hardware_frames_downloaded: Option<u32>,
+    /// Microseconds where the sum of component stages exceeds total request time,
+    /// indicating overlapping execution or double-counting.
+    #[serde(default)]
+    pub stage_overlap_us: Option<u64>,
+    /// How this request was satisfied: decoded in-request, from the ready-frame
+    /// ring-buffer / last-frame cache, or by reusing the current decoder position.
+    /// `None` on legacy samples that predate this field.
+    #[serde(default)]
+    pub served_from: Option<ServedFrom>,
 }
 
 impl PerformanceSample {
@@ -262,6 +326,7 @@ pub struct StagePercentiles {
 pub struct ModeStats {
     pub mode: PreviewMode,
     pub decode: StagePercentiles,
+    pub packet_decode: StagePercentiles,
     pub conversion_upload: StagePercentiles,
     pub compose: StagePercentiles,
     pub readback: StagePercentiles,
@@ -276,9 +341,29 @@ pub struct ModeStats {
     pub ipc_wait: StagePercentiles,
     pub decoder_mutex_wait: StagePercentiles,
     pub demux_wait: StagePercentiles,
+    /// Actual container seeks per decoded frame request. Steady playback
+    /// should approach zero once the decoder is warm.
+    pub decoder_seek_count: StagePercentiles,
+    /// Decoder output-frame count per request; values above one reveal GOP
+    /// amplification rather than a simple presentation-rate problem.
+    pub decoder_frames_decoded: StagePercentiles,
+    pub hardware_frame_download: StagePercentiles,
+    pub scale_colorspace: StagePercentiles,
     pub gpu_queue_wait: StagePercentiles,
     pub surface_acquire: StagePercentiles,
     pub submit_present: StagePercentiles,
+    pub stage_overlap: StagePercentiles,
+    /// Microseconds within each invoke not attributed to any measured stage.
+    /// A persistently large value here points to OS scheduling, mutex wait, or
+    /// Tauri/IPC serialization overhead that the individual stage timers miss.
+    pub unaccounted: StagePercentiles,
+    pub unique_frames_delivered: usize,
+    pub repeated_frames_delivered: usize,
+    pub delivered_unique_fps: Option<f64>,
+    #[serde(default)]
+    pub window_source: String,
+    #[serde(default)]
+    pub sample_span_ms: Option<u64>,
     pub dropped_count: usize,
     pub stale_count: usize,
 }
@@ -379,6 +464,19 @@ mod tests {
             demux_wait_us: None,
             container_format: None,
             is_hardware_accelerated: None,
+            decoder_seek_count: None,
+            decoder_frames_decoded: None,
+            hardware_frame_download_us: None,
+            scale_colorspace_us: None,
+            source_width: None,
+            source_height: None,
+            source_bits_per_raw_sample: None,
+            source_frame_rate_milli: None,
+            unaccounted_us: None,
+            codec_name: None,
+            hardware_frames_downloaded: None,
+            stage_overlap_us: None,
+            served_from: None,
         };
         assert!(sample.exceeds_render_budget(&budget));
     }
