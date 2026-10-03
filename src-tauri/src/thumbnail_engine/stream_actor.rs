@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use tauri::Manager;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::thumbnail_engine::decoder::{
@@ -92,6 +93,7 @@ pub struct DecodedActorFrame {
     pub demux_us: u32,
     pub container_format: String,
     pub is_hardware_accelerated: bool,
+    pub decoder_seek_time_us: u32,
     pub decoder_seek_count: u32,
     pub decoder_frames_decoded: u32,
     pub hardware_frame_download_us: Option<u64>,
@@ -100,6 +102,71 @@ pub struct DecodedActorFrame {
     pub source_metadata: VideoStreamMetadata,
     /// How this frame request was satisfied by the decoder.
     pub served_from: crate::native_core::performance::ServedFrom,
+    pub hw_device_type: Option<String>,
+    /// Number of times this frame was served to a playback or scrub request.
+    /// If 0 when evicted from prime_cache, this was a wasted download.
+    pub served_count: u32,
+}
+
+static PRODUCER_DOWNLOADS_WASTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn producer_downloads_wasted() -> u64 {
+    PRODUCER_DOWNLOADS_WASTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn reset_producer_downloads_wasted() {
+    PRODUCER_DOWNLOADS_WASTED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+static PRODUCER_LOOKAHEAD_DOWNLOADS_SKIPPED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn producer_lookahead_downloads_skipped() -> u64 {
+    PRODUCER_LOOKAHEAD_DOWNLOADS_SKIPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn reset_producer_lookahead_downloads_skipped() {
+    PRODUCER_LOOKAHEAD_DOWNLOADS_SKIPPED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Calculate the selective hardware download stride for lookahead priming (Arm 2b).
+///
+/// On hardware decoders during active playback, downloading every single frame over
+/// PCIe on integrated GPUs (e.g. Intel HD 520) consumes 32–40 ms per frame, starving
+/// the GPU and bus. By decoding intermediate frames on the GPU without host transfer
+/// (`skip_hw_download: true`), the hardware DPB stays warm while host PCIe transfers
+/// drop by 50%–66%.
+///
+/// Returns 1 when hardware acceleration is disabled, when not playing, or when manually forced.
+pub fn calculate_download_stride(
+    frame_duration_secs: f64,
+    is_hw_accel: bool,
+    is_playback: bool,
+) -> usize {
+    if !is_hw_accel || !is_playback {
+        return 1;
+    }
+
+    if let Ok(val) = std::env::var("CLYPRA_PRODUCER_DOWNLOAD_STRIDE") {
+        if let Ok(stride) = val.trim().parse::<usize>() {
+            return stride.clamp(1, 6);
+        }
+    }
+
+    let stream_fps = if frame_duration_secs > 0.0 {
+        1.0 / frame_duration_secs
+    } else {
+        30.0
+    };
+
+    if stream_fps >= 48.0 {
+        3 // 50/60 fps -> download every 3rd frame (~16-20 fps presentation)
+    } else if stream_fps >= 23.0 {
+        2 // 24/25/30 fps -> download every 2nd frame (~12-15 fps presentation)
+    } else {
+        1 // low fps stream -> download every frame
+    }
 }
 
 impl DecodedActorFrame {
@@ -218,8 +285,14 @@ impl StreamDecoderActorHandle {
                 if pos != cache.len() - 1 {
                     let item = cache.remove(pos).unwrap();
                     cache.push_back(item);
+                } else {
+                    // Increment served_count on the item still in the cache
+                    if let Some(back) = cache.back_mut() {
+                        back.served_count += 1;
+                    }
                 }
                 hit.from_prime_cache = true;
+                hit.served_count = hit.served_count.saturating_add(1);
                 // These timings describe the frame's original decode. The
                 // presentation request consumed an already-ready frame, so
                 // reporting them here would falsely inflate live playback
@@ -253,8 +326,13 @@ impl StreamDecoderActorHandle {
                     if pos != cache.len() - 1 {
                         let item = cache.remove(pos).unwrap();
                         cache.push_back(item);
+                    } else {
+                        if let Some(back) = cache.back_mut() {
+                            back.served_count += 1;
+                        }
                     }
                     hit.from_prime_cache = true;
+                    hit.served_count = hit.served_count.saturating_add(1);
                     hit.decode_us = 0;
                     hit.decoder_seek_count = 0;
                     hit.decoder_frames_decoded = 0;
@@ -310,7 +388,12 @@ impl StreamDecoderActorHandle {
 
     /// Clear the prime cache (e.g. on seek boundary).
     pub async fn clear_prime_cache(&self) {
-        self.prime_cache.lock().await.clear();
+        let mut cache = self.prime_cache.lock().await;
+        for frame in cache.drain(..) {
+            if frame.served_count == 0 {
+                PRODUCER_DOWNLOADS_WASTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -457,7 +540,12 @@ impl StreamDecoderActor {
                     {
                         let mut cache = self.prime_cache.lock().await;
                         if cache.len() >= MAX_PRIME_CACHE_ENTRIES {
-                            cache.pop_front();
+                            if let Some(evicted) = cache.pop_front() {
+                                if evicted.served_count == 0 {
+                                    PRODUCER_DOWNLOADS_WASTED
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
                         }
                         cache.push_back(frame.clone());
                     }
@@ -490,7 +578,14 @@ impl StreamDecoderActor {
         let frame_duration = self.frame_duration_secs.max(0.001);
         let tolerance = (frame_duration * 0.95).max(0.001);
 
-        for step in 1..=2 {
+        let is_hw_accel = {
+            let guard = self.decoder.lock().await;
+            guard.is_hardware_accelerated()
+        };
+        let stride = calculate_download_stride(self.frame_duration_secs, is_hw_accel, options.is_playback);
+        let lookahead_steps = (2 * stride).min(6);
+
+        for step in 1..=lookahead_steps {
             // Check if a real job arrived
             match self.urgent_rx.try_recv() {
                 Ok(urgent_job) => return Some(urgent_job),
@@ -508,9 +603,10 @@ impl StreamDecoderActor {
             }
 
             let prime_time = base_time + step as f64 * frame_duration;
+            let is_target = step % stride == 0;
 
-            // Check if already in cache
-            {
+            // Check if already in cache (only target display frames enter prime_cache)
+            if is_target {
                 let cache = self.prime_cache.lock().await;
                 if cache.iter().any(|f| {
                     (f.time_secs - prime_time).abs() <= tolerance && f.quality == options.quality
@@ -519,14 +615,118 @@ impl StreamDecoderActor {
                 }
             }
 
+            let mut step_options = options;
+            step_options.skip_hw_download = !is_target && is_hw_accel;
+
             let current_gen = self.current_generation.load(Ordering::Acquire);
-            match self.decode_one(prime_time, options, current_gen).await {
+            match self.decode_one(prime_time, step_options, current_gen).await {
                 Ok(frame) => {
-                    let mut cache = self.prime_cache.lock().await;
-                    if cache.len() >= MAX_PRIME_CACHE_ENTRIES {
-                        cache.pop_front();
+                    // Only target display frames (or software frames) are placed
+                    // into prime_cache. Intermediate skipped frames have dummy planes
+                    // and serve only to advance the hardware DPB on the GPU.
+                    if is_target || !is_hw_accel {
+                        let mut cache = self.prime_cache.lock().await;
+                        if cache.len() >= MAX_PRIME_CACHE_ENTRIES {
+                            if let Some(evicted) = cache.pop_front() {
+                                if evicted.served_count == 0 {
+                                    PRODUCER_DOWNLOADS_WASTED
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        cache.push_back(frame.clone());
+                    } else {
+                        PRODUCER_LOOKAHEAD_DOWNLOADS_SKIPPED
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    cache.push_back(frame);
+
+                    if let Some(app) = crate::diagnostics::app_handle() {
+                        if let Some(service) = app.try_state::<tokio::sync::Mutex<crate::native_core::NativeFrameService>>() {
+                            if let Ok(mut service) = service.try_lock() {
+                                service.record_sample(crate::native_core::performance::PerformanceSample {
+                                    request_id: format!("prime:{:.3}", frame.time_secs),
+                                    frame_index: (frame.time_secs / frame_duration).round() as u64,
+                                    decode_time_us: frame.decode_us,
+                                    compose_time_us: 0,
+                                    readback_time_us: 0,
+                                    total_time_us: frame.decode_us,
+                                    bytes_transferred: 0,
+                                    cache_hit: false,
+                                    generation: Some(current_gen),
+                                    mode: Some(crate::native_core::performance::PreviewMode::PlaybackLookahead),
+                                    quality: Some(format!("{:?}", options.quality)),
+                                    strategy: Some(if step_options.skip_hw_download {
+                                        "PRODUCER_PRIME_SKIP_DL".to_string()
+                                    } else {
+                                        "PRODUCER_PRIME".to_string()
+                                    }),
+                                    transfer_path: Some(if step_options.skip_hw_download {
+                                        "gpu-dpb-only".to_string()
+                                    } else {
+                                        "prime-cache".to_string()
+                                    }),
+                                    cancelled: false,
+                                    stale: false,
+                                    dropped: false,
+                                    drop_reason: None,
+                                    seek_time_us: frame.decoder_seek_time_us,
+                                    conversion_time_us: 0,
+                                    upload_time_us: 0,
+                                    present_time_us: 0,
+                                    decode_us: Some(u64::from(frame.decode_us)),
+                                    conversion_upload_us: None,
+                                    compose_us: None,
+                                    readback_us: None,
+                                    map_wait_us: None,
+                                    timestamp_query_available: None,
+                                    present_us: None,
+                                    scheduler_wait_us: None,
+                                    lookahead_wait_us: None,
+                                    cold_start_init_us: None,
+                                    queue_residency_us: None,
+                                    ipc_wait_us: None,
+                                    decoder_mutex_wait_us: Some(frame.decoder_mutex_wait_us),
+                                    actor_wait_us: None,
+                                    gpu_queue_wait_us: None,
+                                    surface_acquire_us: None,
+                                    submit_present_us: None,
+                                    capability_policy: None,
+                                    capability_probe_us: None,
+                                    demux_wait_us: Some(u64::from(frame.demux_us)),
+                                    container_format: Some(frame.container_format.clone()),
+                                    is_hardware_accelerated: Some(frame.is_hardware_accelerated),
+                                    decoder_seek_count: Some(frame.decoder_seek_count),
+                                    decoder_frames_decoded: Some(frame.decoder_frames_decoded),
+                                    hardware_frame_download_us: if step_options.skip_hw_download {
+                                        None
+                                    } else {
+                                        frame.hardware_frame_download_us
+                                    },
+                                    scale_colorspace_us: Some(if step_options.skip_hw_download {
+                                        0
+                                    } else {
+                                        frame.scale_colorspace_us
+                                    }),
+                                    source_width: Some(frame.source_metadata.width),
+                                    source_height: Some(frame.source_metadata.height),
+                                    source_bits_per_raw_sample: Some(frame.source_metadata.bits_per_raw_sample),
+                                    source_frame_rate_milli: frame.source_metadata.average_frame_rate_milli(),
+                                    unaccounted_us: Some(0),
+                                    codec_name: Some(frame.source_metadata.codec_name.clone()),
+                                    hardware_frames_downloaded: Some(if step_options.skip_hw_download {
+                                        0
+                                    } else {
+                                        frame.hardware_frames_downloaded
+                                    }),
+                                    stage_overlap_us: Some(0),
+                                    served_from: Some(frame.served_from),
+                                    hw_device_type: frame.hw_device_type.clone(),
+                                    cache_lock_wait_us: None,
+                                    cache_insert_us: None,
+                                });
+                            }
+                        }
+                    }
                 }
                 Err(_) => {
                     // Stop priming on error or cancellation
@@ -586,7 +786,7 @@ impl StreamDecoderActor {
                         );
                         let is_approx = guard.is_last_frame_approximate();
                         let demux_us = guard.last_demux_us();
-                        let (seek_count, frames_decoded, download_us, scale_us, hw_downloaded_count, served_from) =
+                        let (seek_count, seek_time_us, frames_decoded, download_us, scale_us, hw_downloaded_count, served_from, hw_device_type) =
                             guard.last_decode_activity();
                         return Ok((
                             DecodedVideoPlanes::D3d11(Arc::new(shared)),
@@ -601,11 +801,13 @@ impl StreamDecoderActor {
                             is_hardware_accelerated,
                             source_rotation,
                             seek_count,
+                            seek_time_us,
                             frames_decoded,
                             download_us,
                             scale_us,
                             hw_downloaded_count,
                             served_from,
+                            hw_device_type,
                             source_metadata,
                         ));
                     }
@@ -632,7 +834,7 @@ impl StreamDecoderActor {
                 guard.decode_frame_raw_nv12_with_options(target_time, options, is_cancelled);
             let is_approx = guard.is_last_frame_approximate();
             let demux_us = guard.last_demux_us();
-            let (seek_count, frames_decoded, download_us, scale_us, hw_downloaded_count, served_from) =
+            let (seek_count, seek_time_us, frames_decoded, download_us, scale_us, hw_downloaded_count, served_from, hw_device_type) =
                 guard.last_decode_activity();
 
             let decode_us = decode_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
@@ -659,11 +861,13 @@ impl StreamDecoderActor {
                         is_hardware_accelerated,
                         source_rotation,
                         seek_count,
+                        seek_time_us,
                         frames_decoded,
                         download_us,
                         scale_us,
                         hw_downloaded_count,
                         served_from,
+                        hw_device_type,
                         source_metadata,
                     ))
                 }
@@ -686,11 +890,13 @@ impl StreamDecoderActor {
             is_hardware_accelerated,
             source_rotation,
             decoder_seek_count,
+            decoder_seek_time_us,
             decoder_frames_decoded,
             hardware_frame_download_us,
             scale_colorspace_us,
             hardware_frames_downloaded,
             served_from,
+            hw_device_type,
             source_metadata,
         ) = result?;
 
@@ -710,12 +916,15 @@ impl StreamDecoderActor {
             demux_us,
             container_format,
             is_hardware_accelerated,
+            decoder_seek_time_us,
             decoder_seek_count,
             decoder_frames_decoded,
             hardware_frame_download_us,
             scale_colorspace_us,
             hardware_frames_downloaded,
             served_from,
+            hw_device_type: hw_device_type.map(|s| s.to_string()),
+            served_count: 0,
             source_metadata,
         })
     }
@@ -802,6 +1011,7 @@ mod tests {
             demux_us: 10,
             container_format: "mp4".to_string(),
             is_hardware_accelerated: false,
+            decoder_seek_time_us: 0,
             decoder_seek_count: 0,
             decoder_frames_decoded: 0,
             hardware_frame_download_us: None,
@@ -809,6 +1019,8 @@ mod tests {
             hardware_frames_downloaded: 0,
             source_metadata: VideoStreamMetadata::default(),
             served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
+            hw_device_type: None,
+            served_count: 0,
         };
 
         prime_cache.lock().await.push_back(cached_frame);
@@ -827,6 +1039,8 @@ mod tests {
             allow_keyframe_approx: false,
             quality: QualityTier::Full,
             is_playback: false,
+            skip_hw_download: false,
+            target_dimensions: None,
         };
 
         // Exact match
@@ -864,6 +1078,7 @@ mod tests {
             demux_us: 10,
             container_format: "mp4".to_string(),
             is_hardware_accelerated: false,
+            decoder_seek_time_us: 0,
             decoder_seek_count: 0,
             decoder_frames_decoded: 0,
             hardware_frame_download_us: None,
@@ -871,6 +1086,8 @@ mod tests {
             hardware_frames_downloaded: 0,
             source_metadata: VideoStreamMetadata::default(),
             served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
+            hw_device_type: None,
+            served_count: 0,
         };
         prime_cache.lock().await.push_back(approx_frame);
 
@@ -879,6 +1096,8 @@ mod tests {
             allow_keyframe_approx: true,
             quality: QualityTier::Full,
             is_playback: false,
+            skip_hw_download: false,
+            target_dimensions: None,
         };
         let res_approx = handle
             .decode_frame(2.0, opts_approx, false, 0)
@@ -894,6 +1113,8 @@ mod tests {
             allow_keyframe_approx: false,
             quality: QualityTier::Full,
             is_playback: false,
+            skip_hw_download: false,
+            target_dimensions: None,
         };
         let err_exact = handle.decode_frame(2.0, opts_exact, false, 0).await;
         assert!(
@@ -905,6 +1126,8 @@ mod tests {
             allow_keyframe_approx: false,
             quality: QualityTier::Half,
             is_playback: false,
+            skip_hw_download: false,
+            target_dimensions: None,
         };
         // Channel is closed, so decode_frame fails immediately
         let err = handle.decode_frame(1.0, opts_half, false, 0).await;
@@ -959,6 +1182,7 @@ mod tests {
             demux_us: 0,
             container_format: "mp4".to_string(),
             is_hardware_accelerated: false,
+            decoder_seek_time_us: 0,
             decoder_seek_count: 1,
             decoder_frames_decoded: 99,
             hardware_frame_download_us: None,
@@ -966,6 +1190,8 @@ mod tests {
             hardware_frames_downloaded: 0,
             source_metadata: VideoStreamMetadata::default(),
             served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
+            hw_device_type: None,
+            served_count: 0,
         });
         let handle = StreamDecoderActorHandle {
             key: "playback-cache-test".to_string(),
@@ -986,6 +1212,8 @@ mod tests {
                     allow_keyframe_approx: false,
                     quality: QualityTier::Full,
                     is_playback: true,
+                    skip_hw_download: false,
+                    target_dimensions: None,
                 },
                 0,
             )
@@ -1015,6 +1243,8 @@ mod tests {
             allow_keyframe_approx: false,
             quality: QualityTier::Full,
             is_playback: false,
+            skip_hw_download: false,
+            target_dimensions: None,
         };
 
         // Frame 0 decode
@@ -1047,5 +1277,134 @@ mod tests {
         assert_eq!(f_seek.width, f0.width);
 
         release_preview_decoder_actor_for_stream(test_asset, "test-stream-1");
+    }
+
+    #[tokio::test]
+    async fn test_wasted_download_accounting_and_reset() {
+        reset_producer_downloads_wasted();
+        assert_eq!(producer_downloads_wasted(), 0);
+
+        let prime_cache = Arc::new(Mutex::new(VecDeque::new()));
+        let (urgent_tx, _) = mpsc::channel(1);
+        let (prefetch_tx, _) = mpsc::channel(1);
+        let handle = StreamDecoderActorHandle {
+            key: "test_wasted".to_string(),
+            urgent_tx,
+            prefetch_tx,
+            current_generation: Arc::new(AtomicU64::new(0)),
+            cancel_in_flight: Arc::new(AtomicBool::new(false)),
+            prime_cache: prime_cache.clone(),
+            frame_duration_secs: 0.04,
+        };
+
+        // Add 2 frames that were never served (served_count = 0)
+        {
+            let mut cache = prime_cache.lock().await;
+            cache.push_back(DecodedActorFrame {
+                time_secs: 0.0,
+                decode_us: 1000,
+                decoder_mutex_wait_us: 100,
+                actor_wait_us: 50,
+                demux_us: 200,
+                container_format: "mp4".to_string(),
+                is_hardware_accelerated: true,
+                decoder_seek_count: 0,
+                decoder_seek_time_us: 0,
+                decoder_frames_decoded: 1,
+                hardware_frame_download_us: Some(5000),
+                hardware_frames_downloaded: 1,
+                scale_colorspace_us: 100,
+                source_metadata: VideoStreamMetadata::default(),
+                planes: DecodedVideoPlanes::Cpu {
+                    y: Arc::from(vec![0u8; 16]),
+                    uv: Arc::from(vec![0u8; 8]),
+                },
+                width: 320,
+                height: 180,
+                color: VideoColorMetadata::default(),
+                source_rotation: 0,
+                served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
+                from_prime_cache: false,
+                quality: QualityTier::Full,
+                is_approximate: false,
+                hw_device_type: Some("d3d11va".to_string()),
+                served_count: 0,
+            });
+            cache.push_back(DecodedActorFrame {
+                time_secs: 0.04,
+                decode_us: 1000,
+                decoder_mutex_wait_us: 100,
+                actor_wait_us: 50,
+                demux_us: 200,
+                container_format: "mp4".to_string(),
+                is_hardware_accelerated: true,
+                decoder_seek_count: 0,
+                decoder_seek_time_us: 0,
+                decoder_frames_decoded: 1,
+                hardware_frame_download_us: Some(5000),
+                hardware_frames_downloaded: 1,
+                scale_colorspace_us: 100,
+                source_metadata: VideoStreamMetadata::default(),
+                planes: DecodedVideoPlanes::Cpu {
+                    y: Arc::from(vec![0u8; 16]),
+                    uv: Arc::from(vec![0u8; 8]),
+                },
+                width: 320,
+                height: 180,
+                color: VideoColorMetadata::default(),
+                source_rotation: 0,
+                served_from: crate::native_core::performance::ServedFrom::DecodedInRequest,
+                from_prime_cache: false,
+                quality: QualityTier::Full,
+                is_approximate: false,
+                hw_device_type: Some("d3d11va".to_string()),
+                served_count: 0,
+            });
+        }
+
+        // Clear cache should count both unserved frames as wasted downloads
+        handle.clear_prime_cache().await;
+        assert_eq!(producer_downloads_wasted(), 2);
+
+        // Reset must return count to zero
+        reset_producer_downloads_wasted();
+        assert_eq!(producer_downloads_wasted(), 0);
+    }
+
+    #[test]
+    fn test_calculate_download_stride_rules() {
+        // 1. Software decode always downloads every frame
+        assert_eq!(calculate_download_stride(1.0 / 25.0, false, true), 1);
+        assert_eq!(calculate_download_stride(1.0 / 60.0, false, true), 1);
+
+        // 2. Non-playback modes (seek, scrub, frame-step) always download every frame
+        assert_eq!(calculate_download_stride(1.0 / 25.0, true, false), 1);
+        assert_eq!(calculate_download_stride(1.0 / 60.0, true, false), 1);
+
+        // 3. Hardware-accelerated playback adapts based on stream frame rate
+        // Standard film / broadcast (24, 25, 30 fps) -> stride 2 (~12-15 fps presentation)
+        assert_eq!(calculate_download_stride(1.0 / 24.0, true, true), 2);
+        assert_eq!(calculate_download_stride(1.0 / 25.0, true, true), 2);
+        assert_eq!(calculate_download_stride(1.0 / 30.0, true, true), 2);
+
+        // High frame rate (50, 60 fps) -> stride 3 (~16-20 fps presentation)
+        assert_eq!(calculate_download_stride(1.0 / 50.0, true, true), 3);
+        assert_eq!(calculate_download_stride(1.0 / 60.0, true, true), 3);
+
+        // Low frame rate (<= 15 fps) -> stride 1
+        assert_eq!(calculate_download_stride(1.0 / 12.0, true, true), 1);
+        assert_eq!(calculate_download_stride(1.0 / 15.0, true, true), 1);
+    }
+
+    #[test]
+    fn test_producer_lookahead_downloads_skipped_accounting() {
+        reset_producer_lookahead_downloads_skipped();
+        assert_eq!(producer_lookahead_downloads_skipped(), 0);
+
+        PRODUCER_LOOKAHEAD_DOWNLOADS_SKIPPED.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(producer_lookahead_downloads_skipped(), 5);
+
+        reset_producer_lookahead_downloads_skipped();
+        assert_eq!(producer_lookahead_downloads_skipped(), 0);
     }
 }

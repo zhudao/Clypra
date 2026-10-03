@@ -126,6 +126,10 @@ export interface NativePreviewPerformanceReport {
   buildProfile: "debug" | "release" | string;
   operatingSystem: string;
   architecture: string;
+  /** Git commit SHA of the binary. Absent when built outside a git repo. */
+  gitCommit?: string;
+  /** True when the binary was built from a dirty working tree. */
+  gitDirty?: boolean;
   gpu: NativeGpuRuntimeStatus | null;
   preview: NativeFrameServiceStats | null;
   session: NativeSessionSnapshot;
@@ -243,7 +247,17 @@ export interface NativePerformanceSample {
   hardwareFramesDownloaded?: number;
   stageOverlapUs?: number;
   /** How this request was satisfied by the decoder. */
-  servedFrom?: "decoded-in-request" | "ready-cache" | "reused-current";
+  servedFrom?:
+    | "decoded-in-request"
+    | "ready-cache"
+    | "reused-current"
+    | "unchanged-skipped";
+  /** Hardware decode device type (e.g. "d3d11va", "videotoolbox", "vaapi", "software"). */
+  hwDeviceType?: string;
+  /** Time waiting to acquire the NativeFrameService cache lock (consumer path). */
+  cacheLockWaitUs?: number;
+  /** Time to insert the decoded frame into the NativeFrameService cache. */
+  cacheInsertUs?: number;
   dropReason?:
     | "stale"
     | "cancelled"
@@ -310,6 +324,22 @@ export interface NativeModeStats {
   sampleSpanMs: number | null;
   droppedCount: number;
   staleCount: number;
+  /** Consumer cache lock wait percentiles. */
+  cacheLockWait: NativeStagePercentiles;
+  /** Cache insert duration percentiles (consumer path). */
+  cacheInsert: NativeStagePercentiles;
+  /** Frames served directly from the decode path (no cache hit). */
+  servedFromDecodedCount: number;
+  /** Frames served from the ready (already-decoded) cache. */
+  servedFromReadyCacheCount: number;
+  /** Frames served by reusing the most recently presented frame. */
+  servedFromReusedCurrentCount: number;
+  /** Frames short-circuited via the 12-byte UNCH sentinel because the playback head has not advanced. */
+  skippedUnchangedCount: number;
+  /** Lookahead frames decoded on GPU without host CPU transfer (Arm 2b in production). */
+  lookaheadDownloadsSkippedCount: number;
+  /** Producer frames decoded+downloaded and then evicted before being presented. */
+  downloadsWastedCount: number;
 }
 
 export interface NativeFrameServiceStats {

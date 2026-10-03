@@ -47,6 +47,37 @@ export interface TimecodeJumpTelemetryPayload {
   error?: string;
 }
 
+export interface PreviewQualityBenchmarkPayload {
+  /** GPU tier classification: 'legacy-igpu', 'mid-tier', 'discrete', 'apple-silicon', 'software', 'unknown' */
+  gpuTier: string;
+  /** Hardware capability policy cap, e.g. 'proxy' | 'reduced' | 'full' */
+  capabilityPolicy: string;
+  /** Maximum preview dimension enforced by hardware policy (px), or null if unconstrained */
+  policyMaxDimension: number | null;
+  /** Project canvas width (px) */
+  canvasWidth: number;
+  /** Project canvas height (px) */
+  canvasHeight: number;
+  /** Detected resolution bucket e.g. '4K', '1440p', '1080p' */
+  resolutionBucket: string;
+  /** Whether the engine is hardware-limited for the current project+quality combination */
+  isHardwareLimited: boolean;
+  /** Currently active preview quality setting */
+  previewQuality: string;
+  /** GPU adapter name as reported by wgpu */
+  gpuModel: string | null;
+  /** Graphics backend (e.g. 'metal', 'd3d12') */
+  graphicsBackend: string | null;
+  /** Per-tier capability snapshot — what the engine can actually render per tier */
+  tiers: Array<{
+    value: string;
+    label: string;
+    resolutionLabel: string;
+    isHardwareLimited: boolean;
+    isRecommended: boolean;
+  }>;
+}
+
 export class EditorFeatureTelemetry {
   /**
    * Record transport shuttle transitions (1x, 2x, 4x, reverse, pause).
@@ -93,6 +124,43 @@ export class EditorFeatureTelemetry {
         sessionId,
         timestampEpochMs: Date.now(),
         payload,
+      });
+    } catch {
+      // Non-blocking telemetry
+    }
+  }
+
+  /**
+   * Records a one-time snapshot of preview quality capabilities and GPU tier
+   * so we can correlate hardware constraints with quality choices fleet-wide.
+   * Call once per session after GPU status is resolved.
+   */
+  static recordPreviewQualityBenchmark(payload: PreviewQualityBenchmarkPayload): void {
+    try {
+      const sessionId = perfLogService.getSessionId() ?? "unknown";
+      perfLogService.enqueue({
+        kind: "preview-quality-benchmark",
+        sessionId,
+        timestampEpochMs: Date.now(),
+        payload,
+      });
+    } catch {
+      // Non-blocking telemetry
+    }
+  }
+
+  /**
+   * Records a snapshot of the native preview performance & benchmark report
+   * (e.g. when copied from Diagnostics or during benchmark tests).
+   */
+  static recordPreviewBenchmarkReport(report: unknown): void {
+    try {
+      const sessionId = perfLogService.getSessionId() ?? "unknown";
+      perfLogService.enqueue({
+        kind: "preview-benchmark-report",
+        sessionId,
+        timestampEpochMs: Date.now(),
+        payload: report,
       });
     } catch {
       // Non-blocking telemetry
