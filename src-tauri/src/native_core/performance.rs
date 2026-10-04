@@ -304,13 +304,122 @@ pub struct NativeFrameServiceStats {
     pub window_cache_hit_rate: f64,
     #[serde(default)]
     pub mode_stats: Vec<ModeStats>,
-    /// Hits on the VRAM SDF text layer cache. Kept separate from `cache_hits`
-    /// (which measures frame-level render cache hits) to avoid skewing
-    /// decode/composition telemetry. A static text layer that is never
-    /// re-rendered should contribute here, not to `cache_hits`.
+    /// Lifetime hits on the VRAM SDF text layer cache since process start.
+    /// Kept separate from `cache_hits` (which measures frame-level render cache hits)
+    /// to avoid skewing decode/composition telemetry. Expected to be 0 for projects
+    /// that only use Canvas 2D / worker text rasterization.
     #[serde(default)]
     pub text_layer_cache_hits: u64,
+    /// Lifetime hits on the native SDF glyph cache since process start.
+    #[serde(default)]
+    pub glyph_cache_hits: u64,
+    /// Lifetime misses on the native SDF glyph cache since process start.
+    #[serde(default)]
+    pub glyph_cache_misses: u64,
+    /// Number of times schedule_lookahead_predecode was called (PR4 instrumentation).
+    #[serde(default)]
+    pub lookahead_trigger_count: u64,
+    /// Number of triggers dropped by the in-flight guard (demand-trigger diagnosis).
+    #[serde(default)]
+    pub lookahead_trigger_dropped: u64,
+    /// Total producer idle time in ms (gap between finishing one prime and starting next).
+    #[serde(default)]
+    pub producer_idle_total_ms: f64,
+    /// Most recent "ahead of audio clock" value in ms (positive = producer is ahead).
+    #[serde(default)]
+    pub producer_ahead_of_clock_ms: f64,
 }
+
+// ── PR4: Producer trigger instrumentation ──────────────────────────────────────
+// These atomics diagnose why the producer runs at ~1/3 capacity.
+// The hypothesis: schedule_lookahead_predecode triggers are frequently dropped
+// by the in-flight guard, so effective trigger rate << producer capacity.
+
+static LOOKAHEAD_TRIGGER_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static LOOKAHEAD_TRIGGER_DROPPED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static PRODUCER_IDLE_TOTAL_US: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static PRODUCER_AHEAD_OF_CLOCK_MS_MILLI: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+pub fn lookahead_trigger_count() -> u64 {
+    LOOKAHEAD_TRIGGER_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn lookahead_trigger_dropped() -> u64 {
+    LOOKAHEAD_TRIGGER_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn producer_idle_total_ms() -> f64 {
+    PRODUCER_IDLE_TOTAL_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000.0
+}
+pub fn producer_ahead_of_clock_ms() -> f64 {
+    PRODUCER_AHEAD_OF_CLOCK_MS_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000.0
+}
+pub fn record_lookahead_trigger() {
+    LOOKAHEAD_TRIGGER_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn record_lookahead_trigger_dropped() {
+    LOOKAHEAD_TRIGGER_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn record_producer_idle_us(us: u64) {
+    PRODUCER_IDLE_TOTAL_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn record_producer_ahead_of_clock_ms(ms: f64) {
+    PRODUCER_AHEAD_OF_CLOCK_MS_MILLI.store(
+        (ms * 1_000.0) as i64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+// ── Text & Glyph Cache Telemetry Instrumentation ──────────────────────────────
+static TEXT_LAYER_CACHE_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static TEXT_LAYER_CACHE_MISSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static GLYPH_CACHE_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static GLYPH_CACHE_MISSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn text_layer_cache_hits() -> u64 {
+    TEXT_LAYER_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn text_layer_cache_misses() -> u64 {
+    TEXT_LAYER_CACHE_MISSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn glyph_cache_hits() -> u64 {
+    GLYPH_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn glyph_cache_misses() -> u64 {
+    GLYPH_CACHE_MISSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn record_text_layer_cache_hit() {
+    TEXT_LAYER_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn record_text_layer_cache_miss() {
+    TEXT_LAYER_CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn record_glyph_cache_hit() {
+    GLYPH_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn record_glyph_cache_miss() {
+    GLYPH_CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 
 /// A cursor-bounded batch of native samples. The cursor belongs to the
 /// service, not to the UI, so polling this endpoint never records a new

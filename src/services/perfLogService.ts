@@ -34,9 +34,13 @@ import {
   uiPlayheadDrift,
   playheadPaintJitter,
   seekUserLatency,
+  audioPollRtt,
+  audioExtrapolationError,
+  getSyncMetricsSnapshot,
   startSyncMetricsFlushLoop,
 } from "@/lib/playback/syncMetrics";
 import { workerPerfCollector } from "@/core/monitoring/WorkerPerfCollector";
+import { getTextMetricsSnapshot } from "@/lib/playback/textMetrics";
 
 // ── Tauri runtime guard ───────────────────────────────────────────────────────
 // Evaluated lazily at call time, not at module-load time. The module-level
@@ -149,7 +153,7 @@ async function tauriListen(
 
 // ── PerfLogService ────────────────────────────────────────────────────────────
 
-class PerfLogService {
+export class PerfLogService {
   private sessionId: string | null = null;
   private filePath: string | null = null;
   /** Serializes startup so React remounts cannot create parallel launch logs. */
@@ -500,6 +504,8 @@ class PerfLogService {
             timestampEpochMs: Date.now(),
             payload: {
               ...nativeReport,
+              text: getTextMetricsSnapshot(),
+              sync: getSyncMetricsSnapshot(),
               frontend: frontendStats,
             },
           });
@@ -538,10 +544,14 @@ class PerfLogService {
     const finalUiDrift = uiPlayheadDrift.takeAndReset();
     const finalPaintJitter = playheadPaintJitter.takeAndReset();
     const finalSeekLatency = seekUserLatency.takeAndReset();
+    const finalAudioPollRtt = audioPollRtt.takeAndReset();
+    const finalExtrapError = audioExtrapolationError.takeAndReset();
     if (
       finalUiDrift.n > 0 ||
       finalPaintJitter.n > 0 ||
-      finalSeekLatency.n > 0
+      finalSeekLatency.n > 0 ||
+      finalAudioPollRtt.n > 0 ||
+      finalExtrapError.n > 0
     ) {
       this.queue.push({
         kind: "frontend-av-sync",
@@ -552,6 +562,9 @@ class PerfLogService {
           uiPlayheadDrift: finalUiDrift,
           playheadPaintJitter: finalPaintJitter,
           seekUserLatency: finalSeekLatency,
+          audioPollRtt: finalAudioPollRtt.n > 0 ? finalAudioPollRtt : undefined,
+          audioExtrapolationError:
+            finalExtrapError.n > 0 ? finalExtrapError : undefined,
         },
       });
     }
@@ -564,6 +577,23 @@ class PerfLogService {
         sessionId,
         timestampEpochMs: Date.now(),
         payload: finalWorkerRollup,
+      });
+    }
+
+    // Flush the final text performance metrics window.
+    const finalTextSummary = getTextMetricsSnapshot();
+    if (
+      finalTextSummary.uploads.totalRegistrations > 0 ||
+      finalTextSummary.cache.hits > 0 ||
+      finalTextSummary.cache.misses > 0 ||
+      Object.keys(finalTextSummary.rendererByKind).length > 0 ||
+      finalTextSummary.animation.samples > 0
+    ) {
+      this.queue.push({
+        kind: "text-rollup",
+        sessionId,
+        timestampEpochMs: Date.now(),
+        payload: finalTextSummary,
       });
     }
 
@@ -605,8 +635,8 @@ class PerfLogService {
 
     this.queue = [];
 
-    // Upload only if we got a valid path back.
-    if (closedPath) {
+    // Upload only if opt-in is enabled and not suppressed by env var.
+    if (closedPath && this.isTelemetryUploadEnabled()) {
       await this.uploadSessionFile(closedPath);
     }
   }
@@ -761,6 +791,7 @@ class PerfLogService {
       this.flushFilmstripSummary();
       this.flushFrontendSyncMetrics();
       this.flushWorkerSummary();
+      this.flushTextMetricsSummary();
     }, SYNC_POLL_INTERVAL_MS);
   }
 
@@ -899,7 +930,17 @@ class PerfLogService {
     const uiDrift = uiPlayheadDrift.takeAndReset();
     const paintJitter = playheadPaintJitter.takeAndReset();
     const seekLatency = seekUserLatency.takeAndReset();
-    if (uiDrift.n === 0 && paintJitter.n === 0 && seekLatency.n === 0) return;
+    const pollRtt = audioPollRtt.takeAndReset();
+    const extrapError = audioExtrapolationError.takeAndReset();
+    if (
+      uiDrift.n === 0 &&
+      paintJitter.n === 0 &&
+      seekLatency.n === 0 &&
+      pollRtt.n === 0 &&
+      extrapError.n === 0
+    ) {
+      return;
+    }
     this.enqueue({
       kind: "frontend-av-sync",
       sessionId: this.sessionId,
@@ -909,6 +950,8 @@ class PerfLogService {
         uiPlayheadDrift: uiDrift,
         playheadPaintJitter: paintJitter,
         seekUserLatency: seekLatency,
+        audioPollRtt: pollRtt.n > 0 ? pollRtt : undefined,
+        audioExtrapolationError: extrapError.n > 0 ? extrapError : undefined,
       },
     });
   }
@@ -924,6 +967,29 @@ class PerfLogService {
     if (!summary || summary.totalOperations === 0) return;
     this.enqueue({
       kind: "worker-rollup",
+      sessionId: this.sessionId,
+      timestampEpochMs: Date.now(),
+      payload: summary,
+    });
+  }
+
+  /**
+   * Drains zero-PII text performance metrics into a text-rollup entry.
+   */
+  private flushTextMetricsSummary(): void {
+    if (!this.sessionId) return;
+    const summary = getTextMetricsSnapshot();
+    if (
+      summary.uploads.totalRegistrations === 0 &&
+      summary.cache.hits === 0 &&
+      summary.cache.misses === 0 &&
+      Object.keys(summary.rendererByKind).length === 0 &&
+      summary.animation.samples === 0
+    ) {
+      return;
+    }
+    this.enqueue({
+      kind: "text-rollup",
       sessionId: this.sessionId,
       timestampEpochMs: Date.now(),
       payload: summary,
@@ -1051,6 +1117,47 @@ class PerfLogService {
     // Reads from the shared cache primed at startup by primeAppVersion().
     // Returns "unknown" only if called before the cache resolves (< a few ms).
     return getAppVersionSync() ?? "unknown";
+  }
+
+  /**
+   * Returns true only if the user has explicitly opted in to telemetry upload.
+   * Respects CLYPRA_DISABLE_TELEMETRY_UPLOAD env var for CI and contributors.
+   * Default is off for all installs including upgrades.
+   */
+  private isTelemetryUploadEnabled(): boolean {
+    // Env var takes precedence (contributors, CI)
+    const g = typeof globalThis !== "undefined" ? (globalThis as Record<string, unknown>) : {};
+    const proc = g.process as { env?: Record<string, string | undefined> } | undefined;
+    if (proc?.env?.CLYPRA_DISABLE_TELEMETRY_UPLOAD) {
+      return false;
+    }
+    if (typeof import.meta !== "undefined" && import.meta.env?.VITE_CLYPRA_DISABLE_TELEMETRY_UPLOAD === "1") {
+      return false;
+    }
+    // User opt-in — default false so consent is never inferred
+    try {
+      return localStorage.getItem("clypra.telemetryUploadEnabled") === "true";
+    } catch {
+      return false;
+    }
+  }
+
+  /** Enable or disable telemetry upload. Persists across sessions. */
+  static setTelemetryUploadEnabled(enabled: boolean): void {
+    try {
+      localStorage.setItem("clypra.telemetryUploadEnabled", String(enabled));
+    } catch {
+      // Private browsing mode — ignore
+    }
+  }
+
+  /** Returns the current opt-in state. */
+  static isTelemetryUploadEnabledStatic(): boolean {
+    try {
+      return localStorage.getItem("clypra.telemetryUploadEnabled") === "true";
+    } catch {
+      return false;
+    }
   }
 }
 

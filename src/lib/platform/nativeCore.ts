@@ -71,6 +71,22 @@ export interface NativeAudioStatus {
    * Undefined when fewer than 2 callbacks have fired.
    */
   medianCallbackIntervalUs?: number;
+  /**
+   * Linear 1 ms histogram of output latency (`playback − callback`) in microseconds,
+   * with 513 buckets (0..511 ms + overflow). Undefined when the host audio driver does
+   * not populate output timestamps.
+   */
+  outputLatencyUsHistogram?: number[];
+  /** Most recent output latency measurement in microseconds. */
+  outputLatencyLastUs?: number;
+  /** Minimum output latency measurement in microseconds. */
+  outputLatencyMinUs?: number;
+  /** Maximum output latency measurement in microseconds. */
+  outputLatencyMaxUs?: number;
+  /** Cumulative sum of output latency measurements in microseconds. */
+  outputLatencySumUs?: number;
+  /** Total count of output latency measurements. */
+  outputLatencyCount?: number;
 }
 
 export interface NativeAudioClipStatus {
@@ -131,6 +147,7 @@ export interface NativePreviewPerformanceReport {
   /** True when the binary was built from a dirty working tree. */
   gitDirty?: boolean;
   gpu: NativeGpuRuntimeStatus | null;
+  audio?: NativeAudioStatus | null;
   preview: NativeFrameServiceStats | null;
   session: NativeSessionSnapshot;
   stageDiagnoses: NativePreviewStageDiagnosis[];
@@ -363,6 +380,20 @@ export interface NativeFrameServiceStats {
   windowSeekP99Ms?: number;
   windowCacheHitRate?: number;
   modeStats?: NativeModeStats[];
+  /** PR4: total times schedule_lookahead_predecode was called. */
+  lookaheadTriggerCount?: number;
+  /** PR4: times a trigger was dropped by the in-flight guard. */
+  lookaheadTriggerDropped?: number;
+  /** PR4: cumulative producer idle time in ms between prime calls. */
+  producerIdleTotalMs?: number;
+  /** PR4: latest ahead-of-audio-clock measurement in ms (positive = ahead). */
+  producerAheadOfClockMs?: number;
+  /** Lifetime hits on the VRAM SDF text layer cache since process start. Expected 0 for Canvas 2D / worker paths. */
+  textLayerCacheHits?: number;
+  /** Lifetime hits on the native SDF glyph cache since process start. */
+  glyphCacheHits?: number;
+  /** Lifetime misses on the native SDF glyph cache since process start. */
+  glyphCacheMisses?: number;
 }
 
 export const NATIVE_PLAYBACK_POLICY = {
@@ -898,6 +929,8 @@ export interface NativePlaybackState {
   droppedFrames: number;
   buffering: boolean;
   clockStatus: NativePlaybackClockStatus;
+  /** Native monotonic timestamp in nanoseconds captured when audio position was sampled. */
+  sampledAtNs?: number;
 }
 
 export function secondsToNativeTime(

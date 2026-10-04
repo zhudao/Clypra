@@ -1,3 +1,4 @@
+use super::performance;
 use super::performance::{
     now_ms, optional_stage_percentiles, percentile_ms, ModeStats, PreviewMode, ServedFrom,
 };
@@ -514,7 +515,13 @@ impl NativeFrameService {
                 hits as f64 / cache_samples as f64
             },
             mode_stats,
-            text_layer_cache_hits: 0,
+            text_layer_cache_hits: performance::text_layer_cache_hits(),
+            glyph_cache_hits: performance::glyph_cache_hits(),
+            glyph_cache_misses: performance::glyph_cache_misses(),
+            lookahead_trigger_count: performance::lookahead_trigger_count(),
+            lookahead_trigger_dropped: performance::lookahead_trigger_dropped(),
+            producer_idle_total_ms: performance::producer_idle_total_ms(),
+            producer_ahead_of_clock_ms: performance::producer_ahead_of_clock_ms(),
         }
     }
 }
@@ -845,6 +852,33 @@ mod tests {
     }
 
     #[test]
+    fn test_commit_d_generation_bump_and_canvas_clear_force_full_frame() {
+        let mut service = NativeFrameService::new(1024).unwrap();
+        let mut req = request();
+        req.frame_time.frame_index = 42;
+        req.output_width = 1920;
+        req.output_height = 1080;
+        let key = req.cache_key().unwrap();
+
+        // 1. Deliver frame in generation 1
+        service.record_delivered_playback(1, &req, &key);
+        assert!(service.should_skip_unchanged(Some("playback"), Some(1), &req, &key));
+
+        // 2. Generation bump (gen 1 -> 2) MUST reject UNCH and deliver full frame
+        assert!(!service.should_skip_unchanged(Some("playback"), Some(2), &req, &key));
+
+        // 3. Canvas resize (1920x1080 -> 1280x720) MUST reject UNCH
+        let mut resized = req.clone();
+        resized.output_width = 1280;
+        resized.output_height = 720;
+        assert!(!service.should_skip_unchanged(Some("playback"), Some(1), &resized, &key));
+
+        // 4. Canvas clear / invalidate MUST reject UNCH
+        service.clear_delivered_playback();
+        assert!(!service.should_skip_unchanged(Some("playback"), Some(1), &req, &key));
+    }
+
+    #[test]
     fn unch_skipped_telemetry_aggregation() {
         let mut service = NativeFrameService::new(1024).unwrap();
 
@@ -881,5 +915,22 @@ mod tests {
 
         // Crucial: UnchangedSkipped must not pollute decode timing percentiles
         assert_eq!(playback.decode.sample_count, 2);
+    }
+
+    #[test]
+    fn test_text_cache_telemetry_is_not_literal() {
+        let service = NativeFrameService::new(1024).unwrap();
+        let initial_text_hits = performance::text_layer_cache_hits();
+        let initial_glyph_hits = performance::glyph_cache_hits();
+        let initial_glyph_misses = performance::glyph_cache_misses();
+
+        performance::record_text_layer_cache_hit();
+        performance::record_glyph_cache_hit();
+        performance::record_glyph_cache_miss();
+
+        let stats = service.stats();
+        assert_eq!(stats.text_layer_cache_hits, initial_text_hits + 1);
+        assert_eq!(stats.glyph_cache_hits, initial_glyph_hits + 1);
+        assert_eq!(stats.glyph_cache_misses, initial_glyph_misses + 1);
     }
 }
