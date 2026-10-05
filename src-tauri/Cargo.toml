@@ -1,9 +1,10 @@
 [package]
 name = "clypra"
-version = "1.5.8"
+version = "1.5.9"
 description = "A modern, open-source video editor with native performance and GPU-accelerated preview"
 authors = ["Clypra Contributors"]
 edition = "2021"
+autobins = false
 default-run = "clypra"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -19,13 +20,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "clypra"
 path = "src/main.rs"
 
-[[bin]]
+[[example]]
 name = "clypra-engine-benchmark"
-path = "src/bin/benchmark.rs"
+path = "examples/benchmark.rs"
 
-[[bin]]
+[[example]]
 name = "decode-throughput-bench"
-path = "src/bin/decode_throughput_bench.rs"
+path = "examples/decode_throughput_bench.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -114,10 +115,18 @@ regex = "1"
 #       → Compositor → Timeline → Encoder (VideoToolbox H.264/HEVC)
 crabcamera = { version = "0.9.2", features = ["tauri", "recording"] }
 
-# On-device AI inference via ONNX Runtime (MediaPipe face tracking, auto-reframe)
-ort = { version = "2.0.0-rc.13", features = ["copy-dylibs"] }
 ndarray = "0.17"
 sha2 = "0.10"
+
+# On-device AI inference via ONNX Runtime (MediaPipe face tracking, auto-reframe)
+# Note: Microsoft does not publish prebuilt binaries for Intel macOS (x86_64-apple-darwin).
+# On x86_64 macOS, we use `load-dynamic` (which enables `ort-sys/disable-linking`) so that
+# the build does not require prebuilt binaries at compile time and loads on-demand if present.
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "std", "ndarray", "tracing", "api-27"] }
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+ort = { version = "2.0.0-rc.13", features = ["copy-dylibs"] }
 
 [dev-dependencies]
 proptest = "1"

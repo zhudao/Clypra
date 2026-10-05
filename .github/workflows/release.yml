@@ -22,7 +22,7 @@ jobs:
             args: "--target aarch64-apple-darwin"
 
           # macOS Intel (.dmg)
-          - platform: "macos-13"
+          - platform: "macos-15-intel"
             target: "x86_64-apple-darwin"
             vcpkg_triplet: ""
             args: "--target x86_64-apple-darwin"
@@ -32,12 +32,6 @@ jobs:
             target: "x86_64-pc-windows-msvc"
             vcpkg_triplet: "x64-windows-static-md"
             args: ""
-
-          # Windows ARM64 (.exe)
-          - platform: "windows-latest"
-            target: "aarch64-pc-windows-msvc"
-            vcpkg_triplet: "arm64-windows-static-md"
-            args: "--target aarch64-pc-windows-msvc --bundles nsis"
 
           # Linux x64 (.deb, .AppImage, .tar.gz)
           - platform: "ubuntu-22.04"
@@ -119,6 +113,10 @@ jobs:
       # CMAKE_OSX_DEPLOYMENT_TARGET through CARGO_BUILD_TARGET_DIR cmake
       # passthrough. We use a .cargo/config.toml [env] block (committed) to
       # guarantee cmake sees the flag, and also set it here for safety.
+      - name: Install System Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake pkg-config nasm
+
       - name: Cache Static FFmpeg (macOS)
         if: runner.os == 'macOS'
         id: cache-ffmpeg-macos
@@ -130,7 +128,6 @@ jobs:
       - name: Build Static FFmpeg (macOS)
         if: runner.os == 'macOS' && steps.cache-ffmpeg-macos.outputs.cache-hit != 'true'
         run: |
-          brew install cmake pkg-config
           mkdir -p /tmp/ffmpeg-src
           curl -sL https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz | tar -xJ --strip-components=1 -C /tmp/ffmpeg-src
           cd /tmp/ffmpeg-src
