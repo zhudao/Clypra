@@ -112,8 +112,6 @@ fn record_frontend_launch_milestones(
     let win_foc = window_is_focused.or(actual_win_foc);
     let win_vis = window_is_visible.or(actual_win_vis);
 
-    eprintln!("[Rust] record_frontend_launch_milestones: nav={:?}, dom={:?}, shell={:?}, interactive={:?}, doc_focus={:?}, doc_vis={:?}, win_foc={:?}, win_vis={:?}",
-        navigation_start_ms, dom_content_loaded_ms, shell_painted_ms, interactive_us, document_has_focus, document_visibility_state, win_foc, win_vis);
     cold_start::record_frontend_launch_milestones(
         navigation_start_ms,
         dom_content_loaded_ms,
@@ -172,10 +170,7 @@ fn record_cold_start_span(
 
 #[tauri::command]
 fn get_bench_run_config() -> cold_start::BenchRunConfig {
-    let cfg = cold_start::get_bench_run_config();
-    eprintln!("[Rust] get_bench_run_config called: enabled={}, report={:?}, exit={}",
-        cfg.enabled, cfg.report_output_path, cfg.auto_exit);
-    cfg
+    cold_start::get_bench_run_config()
 }
 
 #[tauri::command]
@@ -192,19 +187,22 @@ fn write_bench_report(file_path: String, json_content: String) -> Result<(), Str
         .map_err(|e| format!("Failed to write tmp report to {tmp_path}: {e}"))?;
     std::fs::rename(&tmp_path, path)
         .map_err(|e| format!("Failed to atomically rename {tmp_path} to {file_path}: {e}"))?;
-    eprintln!("[Rust] write_bench_report atomically written to {}", file_path);
     Ok(())
 }
 
 #[tauri::command]
 fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     if let Some(menu) = app.menu() {
-        let labels: [&str; 6] = if language == "zh-TW" {
-            ["Clypra", "檔案", "編輯", "顯示方式", "視窗", "輔助說明"]
-        } else if language == "zh-CN" {
-            ["Clypra", "文件", "编辑", "显示", "窗口", "帮助"]
-        } else {
-            ["Clypra", "File", "Edit", "View", "Window", "Help"]
+        let labels: [&str; 6] = match language.as_str() {
+            "zh-TW" => ["Clypra", "檔案", "編輯", "顯示方式", "視窗", "輔助說明"],
+            "zh-CN" => ["Clypra", "文件", "编辑", "显示", "窗口", "帮助"],
+            "ru" => ["Clypra", "Файл", "Правка", "Вид", "Окно", "Справка"],
+            "es" => ["Clypra", "Archivo", "Edición", "Ver", "Ventana", "Ayuda"],
+            "ja" => ["Clypra", "ファイル", "編集", "表示", "ウィンドウ", "ヘルプ"],
+            "de" => ["Clypra", "Datei", "Bearbeiten", "Ansicht", "Fenster", "Hilfe"],
+            "fr" => ["Clypra", "Fichier", "Édition", "Affichage", "Fenêtre", "Aide"],
+            "ko" => ["Clypra", "파일", "편집", "보기", "윈도우", "도움말"],
+            _ => ["Clypra", "File", "Edit", "View", "Window", "Help"],
         };
 
         for (item, label) in menu
@@ -227,7 +225,6 @@ fn exit_app(app: tauri::AppHandle, code: Option<i32>) -> Result<(), String> {
         return Err("exit_app is only permitted when running in benchmark mode".to_string());
     }
     let exit_code = code.unwrap_or(0);
-    eprintln!("[Rust] exit_app called with code {}", exit_code);
     app.exit(exit_code);
     Ok(())
 }

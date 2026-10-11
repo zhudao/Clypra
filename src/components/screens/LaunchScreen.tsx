@@ -8,7 +8,7 @@ import {
   MoreHorizontal,
   Clock,
   ChevronRight,
-  Sparkles,
+  Sparkles as _Sparkles,
   Settings,
   Video,
   FolderOpen,
@@ -534,14 +534,6 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({
                 className="w-10 h-10 object-contain relative z-10 drop-shadow-[0_0_10px_var(--clypra-interaction-focus)]"
               />
             </div>
-            <div>
-              <h1 className="text-xl font-bold text-text-primary tracking-tight leading-tight">
-                Clypra
-              </h1>
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-accent/10 border border-accent/20 text-[10px] font-semibold text-accent tracking-wider">
-                VIDEO EDITOR
-              </span>
-            </div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -594,10 +586,6 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({
             />
 
             <div className="relative z-10">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent/10 border border-accent/20 text-accent text-[11px] font-semibold mb-4">
-                <Sparkles className="w-3 h-3" />
-                Create something amazing
-              </div>
               <h2 className="text-2xl md:text-3xl font-bold text-text-primary mb-2 tracking-tight">
                 Start a new project
               </h2>

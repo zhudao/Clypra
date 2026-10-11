@@ -201,6 +201,9 @@ pub async fn replace_native_audio_clips(
     app: AppHandle,
     clips: Vec<NativeAudioClipRequest>,
 ) -> Result<Vec<NativeAudioClipStatus>, String> {
+    // INVESTIGATION ONLY — remove before Phase 6
+    log::debug!("[TR5] replace_native_audio_clips: {} clips requested", clips.len());
+    
     let clock = audio_clock(&app)?;
     let (sample_rate, channels) = {
         let mut clock_guard = clock
@@ -382,6 +385,7 @@ pub async fn replace_native_audio_clips(
     );
 
     let statuses: Vec<NativeAudioClipStatus> = decoded.iter().map(NativePcmClip::status).collect();
+    
     log::debug!(
         "[NativeAudio] Installed {} audio clips: {:?}",
         decoded.len(),
