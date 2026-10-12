@@ -2762,8 +2762,7 @@ export const NativeProgramPreview: React.FC = () => {
           isInteracting && !isSettling,
         );
         const webViewTargetRequired =
-          qualificationState.path === "webview" ||
-          !nativeSurfaceCanOwnPlayback;
+          qualificationState.path === "webview" || !nativeSurfaceCanOwnPlayback;
         const renderTarget = webViewTargetRequired
           ? capWebViewRenderTarget(
               baseRenderTarget,
@@ -2820,14 +2819,22 @@ export const NativeProgramPreview: React.FC = () => {
               isScrubbing: latestSeekIntent.isScrubbing,
               allowKeyframeApprox: isSettling
                 ? false
-                : latestSeekIntent.allowKeyframeApprox,
+                : (latestSeekIntent.allowKeyframeApprox ??
+                  (isScrubbing || isCoarseSeek)),
             }
           : isPlaying
             ? {
                 mode: "playback" as const,
                 quality: effectiveRenderTarget.quality,
               }
-            : { quality: effectiveRenderTarget.quality };
+            : isInteracting
+              ? {
+                  mode: "seek" as const,
+                  quality: effectiveRenderTarget.quality,
+                  isScrubbing: true,
+                  allowKeyframeApprox: true,
+                }
+              : { quality: effectiveRenderTarget.quality };
 
         const timeChanged = frameIndex !== lastRenderedFrameIndex;
         const epochChanged = state.epoch !== lastRenderedEpoch;
@@ -3300,10 +3307,16 @@ export const NativeProgramPreview: React.FC = () => {
           isPlaying &&
           lastNativePlaybackRequestKey === nativePlaybackRequestKey &&
           nativeSurfaceUsable;
+        // The native GPU child-surface (Metal/D3D12 NSView) sits above all WebView
+        // DOM content at the OS level. It must only be active during active playback
+        // so that editor overlays (TransformOverlay, SafeOverlay, KaraokeCaptions)
+        // are visible on top of the paused frame. Paused frames are committed to the
+        // DOM canvas via the WebView readback path instead.
+        // See also: the comment below at "The child surface is playback-only on desktop."
         const nativeDirectSurfacePath =
           nativeSurfaceUsable &&
           Boolean(nativeRequest) &&
-          (nativePlaybackPath || nativePausedPath) &&
+          nativePlaybackPath &&
           !qualificationForcesWebView;
         const outputAdapter = nativeDirectSurfacePath
           ? NativeSurfaceOutput
@@ -4734,6 +4747,10 @@ export const NativeProgramPreview: React.FC = () => {
       }
       if (rafId !== null) cancelAnimationFrame(rafId);
       frameScheduled = false;
+      if (nativeSurfaceShown) {
+        nativeSurfaceShown = false;
+        void hideNativeSurfaceWhenIdle().catch(() => undefined);
+      }
       standaloneVideoCache.forEach((video) => {
         try {
           video.pause();

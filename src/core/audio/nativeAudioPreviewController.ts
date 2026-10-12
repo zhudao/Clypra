@@ -508,6 +508,9 @@ export class NativeAudioPreviewController {
 
       return true;
     } catch (error) {
+      // CLY-PERF-001: Signal that native audio is unavailable so video playback
+      // demand does not freeze waiting indefinitely for hardware audio samples.
+      this.clock.markNativeAudioUnavailable();
       this.reportError(error);
       await this.dispose();
       return false;
@@ -738,18 +741,11 @@ export class NativeAudioPreviewController {
         : this.beginInteraction(interactionName);
       this.enqueueTransport(async () => {
         const commandStartedAt = performance.now();
-        const stateBeforeSeek = this.clock.state;
-        if (
-          this.seekIntentRevision !== seekIntentRevision ||
-          (!isPlayingJump && stateBeforeSeek === "playing")
-        ) {
+        if (this.seekIntentRevision !== seekIntentRevision) {
           if (interaction) {
             this.finishInteraction(interaction, commandStartedAt, "superseded");
           } else if (activeScrubId) {
             telemetryCollector.recordScrubSuperseded(activeScrubId);
-          }
-          if (this.seekIntentRevision === seekIntentRevision) {
-            void this.resyncFromHardwareAudio();
           }
           return;
         }
@@ -762,11 +758,7 @@ export class NativeAudioPreviewController {
           if (activeScrubId) {
             telemetryCollector.recordScrubAudioSeek(activeScrubId, audioSeekUs);
           }
-          const stateAfterSeek = this.clock.state;
-          if (
-            this.seekIntentRevision !== seekIntentRevision ||
-            (!isPlayingJump && stateAfterSeek === "playing")
-          ) {
+          if (this.seekIntentRevision !== seekIntentRevision) {
             if (interaction) {
               interaction.telemetry.audioSeekUs = audioSeekUs;
               this.finishInteraction(
@@ -776,10 +768,6 @@ export class NativeAudioPreviewController {
               );
             } else if (activeScrubId) {
               telemetryCollector.recordScrubSuperseded(activeScrubId);
-            }
-            if (this.seekIntentRevision === seekIntentRevision) {
-              this.adoptNativePosition(secondsToTicks(targetTime));
-              void this.resyncFromHardwareAudio();
             }
             return;
           }
@@ -1147,6 +1135,11 @@ export class NativeAudioPreviewController {
     const probe = this.startupProbe;
     if (!probe) return;
     this.startupProbe = null;
+    if (outcome === "failed" || outcome === "silent-timeout") {
+      if (!this.clock.hasNativeClockPosition) {
+        this.clock.markNativeAudioUnavailable();
+      }
+    }
     telemetryCollector.recordAudioStartup({
       sessionId: getActiveSessionOrNull()?.sessionId ?? "audio-runtime",
       metrics: {
