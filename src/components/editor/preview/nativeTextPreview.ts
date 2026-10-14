@@ -26,6 +26,7 @@ import {
   recordBrowserTextRasterCacheMiss,
   recordDynamicImport,
 } from "@/lib/playback/textMetrics";
+import { getNativeAnimatedStickerRenderer } from "./nativeStickerPreview";
 
 // ─── Module-level worker client singleton ────────────────────────────────────
 //
@@ -155,7 +156,13 @@ export async function paintTextLayersToCanvas(
   );
   const mediaLayers = scene.visualLayers.filter(
     (layer): layer is EvaluatedMediaLayer =>
-      layer.layerType === "media" && layer.opacity > 0,
+      layer.layerType === "media" &&
+      layer.opacity > 0 &&
+      layer.mediaType !== "video" &&
+      (layer.mediaType === "image" ||
+        layer.clipKind === "sticker" ||
+        Boolean(layer.stickerFormat) ||
+        Boolean(layer.stickerSourceId)),
   );
 
   const activeLayerIds = new Set(textLayers.map((layer) => layer.layerId));
@@ -283,22 +290,12 @@ export async function paintTextLayersToCanvas(
               : (layer.blendMode as GlobalCompositeOperation);
       }
       const isAbsolute = asset.positionMode === "absolute";
-      const isTemplateOrEffect =
-        layer.clipKind === "text-template" ||
-        Boolean(layer.templateId) ||
-        Boolean(layer.styleId);
-      const posX =
-        isAbsolute
-          ? isTemplateOrEffect && typeof layer.x === "number"
-            ? layer.x + (asset.bleedX ?? 0)
-            : asset.x
-          : layer.x;
-      const posY =
-        isAbsolute
-          ? isTemplateOrEffect && typeof layer.y === "number"
-            ? layer.y + (asset.bleedY ?? 0)
-            : asset.y
-          : layer.y;
+      // When positionMode is "absolute", rasterizeTextLayerForNative has already
+      // baked the correct canvas coordinates (accounting for bleed and crop
+      // offsets) into asset.x / asset.y. Use them directly — do NOT re-apply
+      // bleedX/bleedY here, which would double-count the offset (CLY-BUG-006).
+      const posX = isAbsolute ? asset.x : layer.x;
+      const posY = isAbsolute ? asset.y : layer.y;
       const centerX = isAbsolute
         ? posX + asset.width / 2
         : layer.x + layer.width / 2;
@@ -320,16 +317,94 @@ export async function paintTextLayersToCanvas(
       }
     } else if (layer.layerType === "media") {
       const mediaLayer = layer as EvaluatedMediaLayer;
-      const src =
-        mediaLayer.sourcePath || (mediaLayer as any).stickerImagePath;
-      if (src && typeof Image !== "undefined") {
+      const isSticker =
+        mediaLayer.clipKind === "sticker" ||
+        mediaLayer.stickerFormat === "lottie" ||
+        Boolean(mediaLayer.stickerSourceId);
+
+      if (isSticker) {
+        try {
+          const renderer = getNativeAnimatedStickerRenderer();
+          await renderer.render(
+            mediaLayer,
+            phase === "visible-playback"
+              ? "visible-playback"
+              : "interactive-preview",
+          );
+          const stickerCanvas = renderer.getCanvas(mediaLayer.layerId);
+          if (
+            stickerCanvas &&
+            stickerCanvas.width > 0 &&
+            stickerCanvas.height > 0
+          ) {
+            ctx.save();
+            ctx.globalAlpha = mediaLayer.opacity;
+            if (mediaLayer.blendMode && mediaLayer.blendMode !== "normal") {
+              ctx.globalCompositeOperation =
+                mediaLayer.blendMode === "add"
+                  ? "lighter"
+                  : mediaLayer.blendMode === "subtract"
+                    ? "difference"
+                    : (mediaLayer.blendMode as GlobalCompositeOperation);
+            }
+            const centerX = mediaLayer.x + mediaLayer.width / 2;
+            const centerY = mediaLayer.y + mediaLayer.height / 2;
+            ctx.translate(centerX, centerY);
+            ctx.rotate((mediaLayer.rotation * Math.PI) / 180);
+            ctx.drawImage(
+              stickerCanvas,
+              -mediaLayer.width / 2,
+              -mediaLayer.height / 2,
+              mediaLayer.width,
+              mediaLayer.height,
+            );
+            ctx.restore();
+            continue;
+          }
+        } catch (err) {
+          console.warn("[browser-preview] sticker-render-failed", err);
+        }
+      }
+
+      const src = mediaLayer.sourcePath || (mediaLayer as any).stickerImagePath;
+      if (
+        src &&
+        typeof Image !== "undefined" &&
+        mediaLayer.mediaType !== "video"
+      ) {
         let img = browserImageCache.get(src);
         if (!img) {
           img = new Image();
+          img.onload = () => {
+            void import("./NativeProgramPreview")
+              .then((mod) => mod.forceRepaintNativeProgramPreview())
+              .catch(() => {});
+          };
           img.src = src;
           browserImageCache.set(src, img);
         }
-        if (img.complete && img.naturalWidth > 0) {
+        if (!img.complete) {
+          await new Promise<void>((resolve) => {
+            if (img!.complete) {
+              resolve();
+              return;
+            }
+            const onLoad = () => {
+              img!.removeEventListener("load", onLoad);
+              img!.removeEventListener("error", onError);
+              resolve();
+            };
+            const onError = () => {
+              img!.removeEventListener("load", onLoad);
+              img!.removeEventListener("error", onError);
+              resolve();
+            };
+            img!.addEventListener("load", onLoad);
+            img!.addEventListener("error", onError);
+            setTimeout(resolve, 50);
+          });
+        }
+        if (img.complete && (img.naturalWidth > 0 || img.width > 0)) {
           ctx.save();
           ctx.globalAlpha = mediaLayer.opacity;
           if (mediaLayer.blendMode && mediaLayer.blendMode !== "normal") {
@@ -377,6 +452,14 @@ export function _getBrowserTextRasterPromise(
   key: string,
 ): Promise<NativeTextRasterAsset> | undefined {
   return browserTextRasterCache.get(key);
+}
+
+/** Exported for testing only — seeds the raster cache with a pre-built asset. */
+export function _seedBrowserTextRasterCache(
+  key: string,
+  asset: NativeTextRasterAsset,
+): void {
+  browserTextRasterCache.set(key, Promise.resolve(asset));
 }
 const browserTextAssetByLayerId = new Map<string, NativeTextRasterAsset>();
 const browserTextAssetKeyByLayerId = new Map<string, string>();
@@ -709,6 +792,14 @@ export function _clearTemplateCropGeometryCache(): void {
   templateCropGeometryCache.clear();
 }
 
+/** Exported for testing only. */
+export function _setTemplateCropGeometry(
+  cacheKey: string,
+  geo: TemplateCropGeometry | null,
+): void {
+  templateCropGeometryCache.set(cacheKey, geo);
+}
+
 export function getTemplateCropCacheKey(
   layer: EvaluatedTextLayer,
 ): string | null {
@@ -961,8 +1052,7 @@ export async function rasterizeTextLayerForNative(
       // CLY-PERF-003: During active continuous playback, do not block the hot
       // render loop for 1000ms if a font is loading; use a bounded budget (25ms)
       // and fall back to browser font so playback continues smoothly at 60fps.
-      const fontWaitBudgetMs =
-        options.phase === "visible-playback" ? 25 : 750;
+      const fontWaitBudgetMs = options.phase === "visible-playback" ? 25 : 750;
       const fontsReadyBudgetMs =
         options.phase === "visible-playback" ? 15 : 250;
       try {
@@ -1011,7 +1101,10 @@ export async function rasterizeTextLayerForNative(
           options.phase ?? "visible-playback",
         );
       } catch (err) {
-        console.warn(`[nativeTextPreview] Worker template rasterize failed for ${layer.layerId}, falling back to main-thread:`, err);
+        console.warn(
+          `[nativeTextPreview] Worker template rasterize failed for ${layer.layerId}, falling back to main-thread:`,
+          err,
+        );
         traceTextRenderFallback("template-worker-raster-failed");
       }
     }
@@ -1077,7 +1170,10 @@ export async function rasterizeTextLayerForNative(
           options.phase ?? "visible-playback",
         );
       } catch (err) {
-        console.warn(`[nativeTextPreview] Worker effect rasterize failed for ${layer.layerId}, falling back to main-thread:`, err);
+        console.warn(
+          `[nativeTextPreview] Worker effect rasterize failed for ${layer.layerId}, falling back to main-thread:`,
+          err,
+        );
         traceTextRenderFallback("effect-worker-raster-failed");
       }
     }
@@ -1173,26 +1269,31 @@ export async function rasterizeTextLayerForNative(
   };
   if (!options.deferTelemetry) traceTextRenderTiming(timing);
 
+  const resolvedX = croppedTemplate
+    ? layer.x - bleedX + croppedTemplate.offsetX
+    : layer.x - bleedX;
+  const resolvedY = croppedTemplate
+    ? layer.y - bleedY + croppedTemplate.offsetY
+    : layer.y - bleedY;
+  const resolvedBleedX = resolvedX - layer.x;
+  const resolvedBleedY = resolvedY - layer.y;
+
   return {
     layerId: layer.layerId,
     assetId: `native-text:${layer.layerId}:${hashTextRasterKey(cacheKey)}`,
     rgba: croppedTemplate?.rgba ?? rgba,
     width: croppedTemplate?.width ?? width,
     height: croppedTemplate?.height ?? height,
-    x: croppedTemplate
-      ? layer.x - bleedX + croppedTemplate.offsetX
-      : layer.x - bleedX,
-    y: croppedTemplate
-      ? layer.y - bleedY + croppedTemplate.offsetY
-      : layer.y - bleedY,
+    x: resolvedX,
+    y: resolvedY,
     rotation: layer.rotation,
     opacity: layer.opacity,
     zIndex: layer.zIndex,
     blendMode: layer.blendMode,
     isText: true,
     ...(croppedTemplate ? { positionMode: "absolute" as const } : {}),
-    bleedX,
-    bleedY,
+    bleedX: resolvedBleedX,
+    bleedY: resolvedBleedY,
     timing,
   };
 }

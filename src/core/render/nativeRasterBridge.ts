@@ -60,6 +60,7 @@ type UploadableNativeRaster = NativeRasterLayerSnapshot & {
 export interface NativeRasterBridgeOptions {
   frameKey: number;
   phase?: TextRenderTracePhase;
+  stickerPhase?: TelemetryStickerPhase;
   /**
    * Playback is a real-time stream. Cold text assets must never make the
    * visible frame wait for font loading, Canvas rasterization, or readback.
@@ -272,7 +273,9 @@ export class NativeRasterBridge {
       hasVisualLayers
         ? this.rasterizeAnimatedStickers(
             scene,
-            (options.phase as TelemetryStickerPhase) ?? "visible-playback",
+            options.stickerPhase ??
+              (options.phase as unknown as TelemetryStickerPhase) ??
+              "visible-playback",
             options.nonBlockingStickers ?? options.nonBlockingText ?? false,
           )
         : Promise.resolve([]),
@@ -408,12 +411,18 @@ export class NativeRasterBridge {
       references.map(async (reference) => {
         const imageSource = this.imageSourcesById.get(reference.assetId);
         if (imageSource) {
-          await registerNativeImageAsset({
-            assetId: reference.assetId,
-            ...imageSource,
-          });
-          this.registeredAssetIds.add(reference.assetId);
-          return true;
+          const isDataOrSvg =
+            imageSource.sourcePath.startsWith("data:") ||
+            imageSource.sourcePath.startsWith("blob:") ||
+            imageSource.sourcePath.endsWith(".svg");
+          if (!isDataOrSvg) {
+            await registerNativeImageAsset({
+              assetId: reference.assetId,
+              ...imageSource,
+            });
+            this.registeredAssetIds.add(reference.assetId);
+            return true;
+          }
         }
 
         let asset =
@@ -1195,14 +1204,71 @@ export class NativeRasterBridge {
         });
         let registration = this.imageCache.get(assetId);
         if (!registration) {
-          registration = registerNativeImageAsset({
-            assetId,
-            sourcePath: layer.sourcePath,
-            width,
-            height,
-          }).then(() => {
-            this.registeredAssetIds.add(assetId);
-          });
+          const isDataOrSvg =
+            layer.sourcePath.startsWith("data:") ||
+            layer.sourcePath.startsWith("blob:") ||
+            layer.sourcePath.endsWith(".svg");
+
+          if (isDataOrSvg) {
+            registration = (async () => {
+              const canvas =
+                typeof OffscreenCanvas !== "undefined"
+                  ? new OffscreenCanvas(width, height)
+                  : document.createElement("canvas");
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext("2d") as
+                | OffscreenCanvasRenderingContext2D
+                | CanvasRenderingContext2D
+                | null;
+              if (!ctx) {
+                throw new Error(
+                  "Could not acquire 2D canvas context for image rasterization",
+                );
+              }
+              const img = new Image();
+              img.crossOrigin = "anonymous";
+              img.src = layer.sourcePath;
+              if (!img.complete) {
+                await new Promise<void>((resolve, reject) => {
+                  img.onload = () => resolve();
+                  img.onerror = (e) =>
+                    reject(
+                      new Error(
+                        `Failed to load image source ${layer.sourcePath}: ${e}`,
+                      ),
+                    );
+                });
+              }
+              ctx.clearRect(0, 0, width, height);
+              ctx.drawImage(img, 0, 0, width, height);
+              const rgba = ctx.getImageData(0, 0, width, height).data;
+              const asset: UploadableNativeRaster = {
+                assetId,
+                rgba,
+                width,
+                height,
+                x: layer.x,
+                y: layer.y,
+                rotation: layer.rotation,
+                opacity: layer.opacity,
+                zIndex: layer.zIndex,
+                blendMode: layer.blendMode,
+                isText: false,
+              };
+              await this.register(asset);
+              this.registeredAssetIds.add(assetId);
+            })();
+          } else {
+            registration = registerNativeImageAsset({
+              assetId,
+              sourcePath: layer.sourcePath,
+              width,
+              height,
+            }).then(() => {
+              this.registeredAssetIds.add(assetId);
+            });
+          }
           this.imageCache.set(assetId, registration);
           void registration.catch(() => {
             if (this.imageCache.get(assetId) === registration)
@@ -1317,15 +1383,17 @@ export class NativeRasterBridge {
         this.registeredAssetIds.delete(oldestId);
       }
     } else {
-      this.assetsById.delete(asset.assetId);
-      this.assetsById.set(asset.assetId, asset);
-      while (this.assetsById.size > MAX_REGISTERED_ASSETS) {
-        const oldestId = this.assetsById.keys().next().value as
-          | string
-          | undefined;
-        if (!oldestId) break;
-        this.assetsById.delete(oldestId);
-        this.registeredAssetIds.delete(oldestId);
+      if (asset.rgba && asset.rgba.length > 0) {
+        this.assetsById.delete(asset.assetId);
+        this.assetsById.set(asset.assetId, asset);
+        while (this.assetsById.size > MAX_REGISTERED_ASSETS) {
+          const oldestId = this.assetsById.keys().next().value as
+            | string
+            | undefined;
+          if (!oldestId) break;
+          this.assetsById.delete(oldestId);
+          this.registeredAssetIds.delete(oldestId);
+        }
       }
     }
 
