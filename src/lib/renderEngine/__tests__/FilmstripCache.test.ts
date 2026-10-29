@@ -117,7 +117,7 @@ describe("FilmstripCache RAF Batching", () => {
     expect(onUpdate).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ timestampMs: 1000 }), expect.objectContaining({ timestampMs: 2000 }), expect.objectContaining({ timestampMs: 3000 })]));
   });
 
-  it("does not restart media extraction when a zoom frame keeps the same tile coverage", () => {
+  it("does not restart media extraction when a layout request keeps the same tile coverage", () => {
     const onUpdate = vi.fn();
     mockRequestNativeFilmstripArtifacts.mockImplementation(() => vi.fn());
 
@@ -139,10 +139,171 @@ describe("FilmstripCache RAF Batching", () => {
       });
 
     request(50);
-    filmstripTelemetry.beginZoomGesture();
-    request(50.01); // a spring animation frame; still covers the whole clip
+    request(50); // Identical settled viewport signature.
 
     expect(mockRequestNativeFilmstripArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not autonomously restart viewport extraction after native preview interrupts a batch", async () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+    let interrupted: (() => void) | undefined;
+    mockRequestNativeFilmstripArtifacts.mockImplementation((opts: any) => {
+      interrupted = opts.onInterrupted;
+      return vi.fn();
+    });
+
+    const request = {
+      clipId: "clip-interrupted",
+      videoPath: "/test.mp4",
+      trimIn: 0,
+      trimOut: 10,
+      duration: 10,
+      clipStartTime: 0,
+      clipWidthPx: 300,
+      spatialTier: SpatialTier.L1,
+      epochId: eid("epoch-interrupted"),
+      viewportScrollLeft: 0,
+      viewportWidth: 1920,
+      pixelsPerSecond: 30,
+      onUpdate,
+    };
+
+    cache.requestFilmstrip(request);
+    expect(mockRequestNativeFilmstripArtifacts).toHaveBeenCalledTimes(1);
+
+    interrupted?.();
+    await vi.advanceTimersByTimeAsync(80);
+
+    // A P0 preview seek owns decoder recovery. Retrying here bypasses the
+    // latest-only demand controller and creates a retry/preempt loop while
+    // the user continues scrubbing. The next settled viewport demand resumes
+    // missing tiles while cached/fallback pixels remain visible.
+    expect(mockRequestNativeFilmstripArtifacts).toHaveBeenCalledTimes(1);
+    expect(filmstripTelemetry.getSummary().cancelledRequests).toBe(1);
+
+    // A later externally settled demand may resume missing tiles even when
+    // its geometry remains unchanged.
+    cache.requestFilmstrip(request);
+    expect(mockRequestNativeFilmstripArtifacts).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("promotes fallback tiles after a settled zoom demand", () => {
+    let capturedOnArtifact: ((artifact: any) => void) | null = null;
+    const onUpdate = vi.fn();
+    mockRequestNativeFilmstripArtifacts.mockImplementation((opts: any) => {
+      capturedOnArtifact = opts.onArtifact;
+      return vi.fn();
+    });
+
+    cache.requestFilmstrip({
+      clipId: "clip-settled-zoom",
+      videoPath: "/test.mp4",
+      trimIn: 0,
+      trimOut: 10,
+      duration: 10,
+      clipStartTime: 0,
+      clipWidthPx: 300,
+      spatialTier: SpatialTier.L0,
+      epochId: eid("epoch-l0"),
+      viewportScrollLeft: 0,
+      viewportWidth: 1920,
+      pixelsPerSecond: 30,
+      onUpdate,
+    });
+
+    const l0Request = mockRequestNativeFilmstripArtifacts.mock.calls[0][0];
+    for (const timestampMs of l0Request.timestampsMs) {
+      emitArtifact(capturedOnArtifact, makeArtifact(timestampMs, SpatialTier.L0));
+    }
+    flushRaf();
+    mockRequestNativeFilmstripArtifacts.mockClear();
+
+    cache.requestFilmstrip({
+      clipId: "clip-settled-zoom",
+      videoPath: "/test.mp4",
+      trimIn: 0,
+      trimOut: 10,
+      duration: 10,
+      clipStartTime: 0,
+      clipWidthPx: 600,
+      spatialTier: SpatialTier.L1,
+      epochId: eid("epoch-l1"),
+      viewportScrollLeft: 0,
+      viewportWidth: 1920,
+      pixelsPerSecond: 60,
+      requestCause: "zoom",
+      onUpdate,
+    });
+
+    expect(mockRequestNativeFilmstripArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains nearby artifacts and avoids blanking during active zoom gesture", () => {
+    let capturedOnArtifact: ((artifact: any) => void) | null = null;
+    const onUpdate = vi.fn();
+
+    mockRequestNativeFilmstripArtifacts.mockImplementation((opts: any) => {
+      capturedOnArtifact = opts.onArtifact;
+      return vi.fn();
+    });
+
+    cache.setNativePreviewReady(true);
+
+    // Initial request at 30 pps (epoch-1)
+    cache.requestFilmstrip({
+      clipId: "clip-zoom-retain",
+      videoPath: "/test.mp4",
+      trimIn: 0,
+      trimOut: 10,
+      duration: 10,
+      clipStartTime: 0,
+      clipWidthPx: 300,
+      spatialTier: SpatialTier.L1,
+      epochId: eid("epoch-1"),
+      viewportScrollLeft: 0,
+      viewportWidth: 1920,
+      pixelsPerSecond: 30,
+      onUpdate,
+    });
+
+    // Deliver artifact at 1667ms (which matches tile address at 1.667s)
+    const artifact1 = makeArtifact(1667, SpatialTier.L1);
+    capturedOnArtifact!(artifact1);
+    flushRaf();
+
+    expect(onUpdate).toHaveBeenLastCalledWith(expect.arrayContaining([artifact1]));
+
+    // Start zoom gesture (wheel/pinch spring)
+    filmstripTelemetry.beginZoomGesture();
+
+    // Zoom into epoch-2 where tile address shifts slightly
+    mockRequestNativeFilmstripArtifacts.mockClear();
+    cache.requestFilmstrip({
+      clipId: "clip-zoom-retain",
+      videoPath: "/test.mp4",
+      trimIn: 0,
+      trimOut: 10,
+      duration: 10,
+      clipStartTime: 0,
+      clipWidthPx: 450,
+      spatialTier: SpatialTier.L1,
+      epochId: eid("epoch-2"),
+      viewportScrollLeft: 0,
+      viewportWidth: 1920,
+      pixelsPerSecond: 45,
+      requestCause: "zoom",
+      onUpdate,
+    });
+
+    // Artifact from epoch-1 within 2500ms tolerance must be retained in keptArtifacts
+    // so the filmstrip does not blank out while zooming
+    const lastCalls = onUpdate.mock.calls;
+    const lastUpdateArgs = lastCalls[lastCalls.length - 1]?.[0];
+    expect(lastUpdateArgs).toContain(artifact1);
+
+    filmstripTelemetry.endZoomGesture();
   });
 
   it("holds cold tile decoding until Program Preview has presented its first frame", async () => {

@@ -45,6 +45,7 @@ export class FilmstripTileCache {
    * the same timestamp share the bitmap via this index without a second decode.
    */
   private contentHashIndex = new Map<string, TileCacheEntry>();
+  private artifactSet = new Set<TransportArtifact>();
 
   private isArtifactActive?: (art: TransportArtifact) => boolean;
 
@@ -82,6 +83,7 @@ export class FilmstripTileCache {
       if (existing.artifact.contentHash) {
         this.contentHashIndex.delete(existing.artifact.contentHash);
       }
+      this.artifactSet.delete(existing.artifact);
       this._safeClose(existing.artifact);
       this.currentMemoryBytes -= existing.sizeBytes;
     }
@@ -101,6 +103,7 @@ export class FilmstripTileCache {
     };
 
     this.tiles.set(key, entry);
+    this.artifactSet.add(artifact);
     this.currentMemoryBytes += sizeBytes;
 
     // Register in contentHash secondary index for cross-clip sharing
@@ -142,12 +145,9 @@ export class FilmstripTileCache {
     let nearestDelta = Infinity;
 
     for (const entry of this.tiles.values()) {
-      const matchPath = videoPath || entry.address.videoPath;
-      if (matchPath) {
-        if (entry.address.videoPath !== matchPath) continue;
-      } else {
-        if (entry.address.clipId !== clipId) continue;
-      }
+      const matchesClip = entry.address.clipId === clipId;
+      const matchesVideo = Boolean(videoPath && entry.address.videoPath && entry.address.videoPath === videoPath);
+      if (!matchesClip && !matchesVideo) continue;
       if (entry.address.zoomTier !== zoomTier) continue;
 
       const delta = Math.abs(entry.address.timestamp - targetTimestamp);
@@ -186,6 +186,25 @@ export class FilmstripTileCache {
     toleranceSeconds: number = 6.0,
     effectGraphVersion?: number
   ): TileCacheEntry | null {
+    // Check same tier first with tight zoom-step tolerance (max 0.75s)
+    // so that slightly shifted tiles during zoom animations are reused without
+    // picking up distant same-tier tiles from several seconds away.
+    const sameTierTolerance = Math.min(toleranceSeconds, 0.75);
+    const sameTierMatch = this.findNearestTile(
+      clipId,
+      targetTier,
+      targetTimestamp,
+      sameTierTolerance,
+      videoPath,
+    );
+    if (sameTierMatch && sameTierMatch.artifact.bitmap && sameTierMatch.artifact.bitmap.width > 0) {
+      const matchVersion = sameTierMatch.address.effectGraphVersion ?? 1;
+      if (effectGraphVersion === undefined || matchVersion === effectGraphVersion) {
+        sameTierMatch.lastUsed = Date.now();
+        return sameTierMatch;
+      }
+    }
+
     // Build a list of candidate tiers ordered by |tier - targetTier|, ties
     // broken in favour of the lower (coarser) tier.
     const allTiers = [SpatialTier.L0, SpatialTier.L1, SpatialTier.L2, SpatialTier.L3];
@@ -198,36 +217,79 @@ export class FilmstripTileCache {
         return a - b; // on tie, prefer lower (coarser) tier
       });
 
-    for (const tier of candidates) {
-      let nearest: TileCacheEntry | null = null;
-      let nearestDelta = Infinity;
+    if (Number.isFinite(toleranceSeconds)) {
+      for (const tier of candidates) {
+        let nearest: TileCacheEntry | null = null;
+        let nearestDelta = Infinity;
 
-      for (const entry of this.tiles.values()) {
-        const matchPath = videoPath || entry.address.videoPath;
-        if (matchPath) {
-          if (entry.address.videoPath !== matchPath) continue;
-        } else {
-          if (entry.address.clipId !== clipId) continue;
-        }
-        if (entry.address.zoomTier !== tier) continue;
-        const entryVersion = entry.address.effectGraphVersion ?? 1;
-        if (
-          effectGraphVersion !== undefined &&
-          entryVersion !== effectGraphVersion
-        ) {
-          continue;
+        for (const entry of this.tiles.values()) {
+          const matchesClip = entry.address.clipId === clipId;
+          const matchesVideo = Boolean(videoPath && entry.address.videoPath && entry.address.videoPath === videoPath);
+          if (!matchesClip && !matchesVideo) continue;
+          if (entry.address.zoomTier !== tier) continue;
+          const entryVersion = entry.address.effectGraphVersion ?? 1;
+          if (
+            effectGraphVersion !== undefined &&
+            entryVersion !== effectGraphVersion
+          ) {
+            continue;
+          }
+
+          const delta = Math.abs(entry.address.timestamp - targetTimestamp);
+          if (delta <= toleranceSeconds && delta < nearestDelta) {
+            nearest = entry;
+            nearestDelta = delta;
+          }
         }
 
-        const delta = Math.abs(entry.address.timestamp - targetTimestamp);
-        if (delta <= toleranceSeconds && delta < nearestDelta) {
-          nearest = entry;
-          nearestDelta = delta;
+        if (nearest && nearest.artifact.bitmap && nearest.artifact.bitmap.width > 0) {
+          nearest.lastUsed = Date.now();
+          return nearest;
         }
       }
+    }
 
-      if (nearest && nearest.artifact.bitmap && nearest.artifact.bitmap.width > 0) {
-        nearest.lastUsed = Date.now();
-        return nearest;
+    // Presentation continuity has a different contract from decode reuse. A
+    // settled or active zoom may introduce a grid whose timestamps are much
+    // farther apart than the previous grid. When the caller explicitly opts
+    // into an unbounded tolerance, retain the nearest frame from the same
+    // tier as a visual parent rather than leaving the slot blank. The exact
+    // address still misses in getTile(), so this can never suppress the
+    // replacement decode for that cell.
+    if (!Number.isFinite(toleranceSeconds)) {
+      const presentationTiers = [targetTier, ...candidates];
+      for (const tier of presentationTiers) {
+        let nearest: TileCacheEntry | null = null;
+        let nearestDelta = Infinity;
+
+        for (const entry of this.tiles.values()) {
+          const matchesClip = entry.address.clipId === clipId;
+          const matchesVideo = Boolean(
+            videoPath &&
+              entry.address.videoPath &&
+              entry.address.videoPath === videoPath,
+          );
+          if (!matchesClip && !matchesVideo) continue;
+          if (entry.address.zoomTier !== tier) continue;
+          const entryVersion = entry.address.effectGraphVersion ?? 1;
+          if (
+            effectGraphVersion !== undefined &&
+            entryVersion !== effectGraphVersion
+          ) {
+            continue;
+          }
+
+          const delta = Math.abs(entry.address.timestamp - targetTimestamp);
+          if (delta < nearestDelta) {
+            nearest = entry;
+            nearestDelta = delta;
+          }
+        }
+
+        if (nearest && nearest.artifact.bitmap && nearest.artifact.bitmap.width > 0) {
+          nearest.lastUsed = Date.now();
+          return nearest;
+        }
       }
     }
 
@@ -242,15 +304,10 @@ export class FilmstripTileCache {
   }
 
   /**
-   * Check if a specific artifact is currently stored in the tile cache.
+   * Check if a specific artifact is currently stored in the tile cache (O(1)).
    */
   isArtifactCached(artifact: TransportArtifact): boolean {
-    for (const entry of this.tiles.values()) {
-      if (entry.artifact === artifact) {
-        return true;
-      }
-    }
-    return false;
+    return this.artifactSet.has(artifact);
   }
 
   /**
@@ -317,6 +374,7 @@ export class FilmstripTileCache {
       this._safeClose(entry.artifact);
     }
     this.tiles.clear();
+    this.artifactSet.clear();
     this.contentHashIndex.clear();
     this.currentMemoryBytes = 0;
   }
@@ -368,6 +426,7 @@ export class FilmstripTileCache {
       if (entry.artifact.contentHash) {
         this.contentHashIndex.delete(entry.artifact.contentHash);
       }
+      this.artifactSet.delete(entry.artifact);
       this._safeClose(entry.artifact);
       this.currentMemoryBytes -= entry.sizeBytes;
       this.tiles.delete(oldestKey);

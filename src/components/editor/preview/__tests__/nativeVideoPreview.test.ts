@@ -1130,6 +1130,24 @@ describe("buildNativeFrameRequest", () => {
     expect(text?.runs?.find((run) => run.highlighted)?.text).toBe("world");
   });
 
+  it("keeps a text background on the compatible raster path until its pixels are ready", () => {
+    const textLayer = {
+      ...makeVideoLayer(),
+      layerId: "background-title",
+      clipId: "background-title",
+      layerType: "text",
+      text: "Panel title",
+      fontFamily: "Inter",
+      fontSize: 48,
+      color: "#ffffff",
+      background: { color: "#007aff", padding: 8, width: 24, height: 12 },
+    } as never;
+
+    expect(getNativePreviewBlockers(makeScene([textLayer]))).toContain(
+      "Text background on layer background-title is waiting for its native raster frame.",
+    );
+  });
+
   it("keeps synthesized subject-cutout layer in videoLayers with opacity 0 when its segmentation mask is in-flight", () => {
     const baseVideo = makeVideoLayer({ layerId: "video-1", zIndex: 0 });
     const textLayer = {
@@ -1289,5 +1307,21 @@ describe("buildNativeFrameRequest", () => {
       expect(isRenderableNativePreviewFrame(buffer, 1920, 1080)).toBe(false);
     });
   });
+
+  it("serializes crop margins onto video layers for native compositor dispatch (CLY-BUG-010)", () => {
+    const crop = { left: 0.1, top: 0.2, right: 0.15, bottom: 0.25 };
+    const layer = makeVideoLayer({
+      crop,
+    } as any);
+    const scene = makeScene([layer]);
+    const projectRequest = buildNativeVideoProjectRequest(scene);
+    expect(projectRequest).not.toBeNull();
+    expect((projectRequest!.layers[0] as any).crop).toEqual(crop);
+
+    const frameRequest = buildNativeFrameRequest(scene, "project-1:7", 0, 30, 1920, 1080);
+    expect(frameRequest).not.toBeNull();
+    expect((frameRequest!.project.videoLayers[0] as any).crop).toEqual(crop);
+  });
 });
+
 

@@ -115,6 +115,12 @@ export const setHashedInstallConsent = setAnonymousInstallConsent;
 
 /**
  * Resets the pseudonymous installation identifier (generates a new one).
+ *
+ * IMPORTANT — UI copy must say: "stops linking future sessions to past ones".
+ * Deleting the local ID does NOT delete server-side rows already stored.
+ * Those rows contain a server-side HMAC of the old ID, not the raw value,
+ * so they cannot be correlated with new sessions even by a server operator.
+ *
  * Complies with privacy/GDPR requirements allowing users to unlink their install history.
  */
 export function resetAnonymousInstallId(): string | undefined {
@@ -485,7 +491,7 @@ export interface TelemetryStickerRenderInput {
   outputPixels?: number;
 }
 
-export type TelemetryTextKind = "plain" | "effect" | "template";
+export type TelemetryTextKind = "plain" | "bubble" | "effect" | "template";
 export type TelemetryTextRendererPath =
   | "native-raster"
   | "webview-canvas"
@@ -518,6 +524,7 @@ export type TelemetryTextProperty =
   | "lineHeight"
   | "letterSpacing"
   | "alignment"
+  | "bubble"
   | "effect"
   | "template"
   | "transform"
@@ -568,6 +575,18 @@ export interface TelemetryTextMetrics {
   lineCount?: number;
   layoutWidth?: number;
   layoutHeight?: number;
+  authoredLayoutWidth?: number;
+  authoredLayoutHeight?: number;
+  rasterWidth?: number;
+  rasterHeight?: number;
+  overflowRenderCount?: number;
+  maxOverflowX?: number;
+  maxOverflowY?: number;
+  maxAuthoredLayoutWidth?: number;
+  maxAuthoredLayoutHeight?: number;
+  maxRasterWidth?: number;
+  maxRasterHeight?: number;
+  underlineRenderCount?: number;
 }
 
 export type TelemetryAudioBackend = "native-cpal" | "web-audio";
@@ -908,6 +927,16 @@ export interface TelemetryTextRenderInput {
   lineCount?: number;
   layoutWidth?: number;
   layoutHeight?: number;
+  /** Authored box before any compatibility expansion for glyph ink. */
+  authoredLayoutWidth?: number;
+  authoredLayoutHeight?: number;
+  /** Actual bitmap allocation, including effect bleed. */
+  rasterWidth?: number;
+  rasterHeight?: number;
+  /** Positive values mean a legacy/stale point-text box was expanded. */
+  overflowX?: number;
+  overflowY?: number;
+  textDecoration?: "underline" | "none";
 }
 
 export interface TelemetryTextInteractionInput {
@@ -1013,6 +1042,20 @@ export interface TelemetryTransportStatus {
 }
 
 /**
+/** Returns the key with the highest count, or undefined if the map is empty. */
+function dominantKey(counts: Map<string, number>): string | undefined {
+  let best: string | undefined;
+  let bestCount = 0;
+  for (const [key, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count;
+      best = key;
+    }
+  }
+  return best;
+}
+
+/**
  * Continuous Session Rollup Accumulator.
  * Accumulates fine-grained frame metrics without spamming the network.
  */
@@ -1057,12 +1100,17 @@ class SessionRollupAccumulator {
   private readbackCadenceFps?: number;
   private playbackSpeed?: number;
   private readbackSourceFrameStride?: number;
-  private transferPath?: string;
+  // Last-seen sticky values (single-value tracking — replaced by per-window
+  // counts below for presenter and transferPath).
   private hwDecodeActive?: boolean;
   private decoderName?: string;
   private dxgiLatchedOff?: boolean | null;
   private dxgiLatchReason?: string;
-  private presenter?: "native-surface" | "bridge" | string;
+  // Per-window frame counts for presenter and transferPath.
+  // A window often contains a mix (e.g. native + bridge after pause handover),
+  // so we track counts and report the dominant value + a breakdown.
+  private presenterCounts: Map<string, number> = new Map();
+  private transferPathCounts: Map<string, number> = new Map();
 
   public recordThrottledAnomaly(): void {
     this.throttledAnomaliesCount++;
@@ -1208,12 +1256,23 @@ class SessionRollupAccumulator {
     if (playbackSpeed !== undefined) this.playbackSpeed = playbackSpeed;
     if (readbackSourceFrameStride !== undefined)
       this.readbackSourceFrameStride = readbackSourceFrameStride;
-    if (transferPath !== undefined) this.transferPath = transferPath;
+    // Accumulate per-frame counts for presenter and transferPath.
+    // These are per-window distributions, not single "last seen" values.
+    if (transferPath !== undefined && transferPath !== null) {
+      const key = transferPath;
+      this.transferPathCounts.set(
+        key,
+        (this.transferPathCounts.get(key) ?? 0) + 1,
+      );
+    }
     if (hwDecodeActive !== undefined) this.hwDecodeActive = hwDecodeActive;
     if (decoderName !== undefined) this.decoderName = decoderName;
     if (dxgiLatchedOff !== undefined) this.dxgiLatchedOff = dxgiLatchedOff;
     if (dxgiLatchReason !== undefined) this.dxgiLatchReason = dxgiLatchReason;
-    if (presenter !== undefined) this.presenter = presenter;
+    if (presenter !== undefined && presenter !== null) {
+      const key = presenter;
+      this.presenterCounts.set(key, (this.presenterCounts.get(key) ?? 0) + 1);
+    }
   }
 
   public recordSeek(seekLatencyMs: number): void {
@@ -1257,6 +1316,10 @@ class SessionRollupAccumulator {
     dxgiLatchedOff?: boolean | null;
     dxgiLatchReason?: string;
     presenter?: "native-surface" | "bridge" | string;
+    /** Per-window frame counts by presenter path. */
+    presenterCounts?: Record<string, number>;
+    /** Per-window frame counts by transfer path. */
+    transferPathCounts?: Record<string, number>;
   } | null {
     if (this.totalFrames === 0) {
       this.windowStartMs = Date.now();
@@ -1366,12 +1429,16 @@ class SessionRollupAccumulator {
       readbackCadenceFps: this.readbackCadenceFps,
       playbackSpeed: this.playbackSpeed,
       readbackSourceFrameStride: this.readbackSourceFrameStride,
-      transferPath: this.transferPath,
+      // Report the dominant transfer path and presenter (highest frame count),
+      // plus the full per-window counts so the analysis layer can see the split.
+      transferPath: dominantKey(this.transferPathCounts),
       hwDecodeActive: this.hwDecodeActive,
       decoderName: this.decoderName,
       dxgiLatchedOff: this.dxgiLatchedOff,
       dxgiLatchReason: this.dxgiLatchReason,
-      presenter: this.presenter,
+      presenter: dominantKey(this.presenterCounts),
+      presenterCounts: Object.fromEntries(this.presenterCounts),
+      transferPathCounts: Object.fromEntries(this.transferPathCounts),
     };
 
     this.windowStartMs = Date.now();
@@ -1412,12 +1479,12 @@ class SessionRollupAccumulator {
     this.readbackCadenceFps = undefined;
     this.playbackSpeed = undefined;
     this.readbackSourceFrameStride = undefined;
-    this.transferPath = undefined;
     this.hwDecodeActive = undefined;
     this.decoderName = undefined;
     this.dxgiLatchedOff = undefined;
     this.dxgiLatchReason = undefined;
-    this.presenter = undefined;
+    this.presenterCounts = new Map();
+    this.transferPathCounts = new Map();
 
     return result;
   }
@@ -1457,12 +1524,12 @@ class SessionRollupAccumulator {
     this.firstFrameVisibleMs = undefined;
     this.capabilityPolicy = undefined;
     this.capabilityProbeUs = undefined;
-    this.transferPath = undefined;
     this.hwDecodeActive = undefined;
     this.decoderName = undefined;
     this.dxgiLatchedOff = undefined;
     this.dxgiLatchReason = undefined;
-    this.presenter = undefined;
+    this.presenterCounts = new Map();
+    this.transferPathCounts = new Map();
   }
 }
 
@@ -1475,6 +1542,14 @@ class TextWindowAccumulator {
   private cacheMisses = 0;
   private layerCount = 0;
   private outputPixels = 0;
+  private overflowRenderCount = 0;
+  private maxOverflowX = 0;
+  private maxOverflowY = 0;
+  private maxAuthoredLayoutWidth = 0;
+  private maxAuthoredLayoutHeight = 0;
+  private maxRasterWidth = 0;
+  private maxRasterHeight = 0;
+  private underlineRenderCount = 0;
 
   record(input: TelemetryTextRenderInput): void {
     this.renderCount += 1;
@@ -1482,6 +1557,28 @@ class TextWindowAccumulator {
     else this.cacheMisses += 1;
     this.layerCount += Math.max(0, input.layerCount ?? 1);
     this.outputPixels += Math.max(0, input.outputPixels ?? 0);
+    const overflowX = Math.max(0, input.overflowX ?? 0);
+    const overflowY = Math.max(0, input.overflowY ?? 0);
+    if (overflowX > 0 || overflowY > 0) this.overflowRenderCount += 1;
+    this.maxOverflowX = Math.max(this.maxOverflowX, overflowX);
+    this.maxOverflowY = Math.max(this.maxOverflowY, overflowY);
+    this.maxAuthoredLayoutWidth = Math.max(
+      this.maxAuthoredLayoutWidth,
+      Math.max(0, input.authoredLayoutWidth ?? 0),
+    );
+    this.maxAuthoredLayoutHeight = Math.max(
+      this.maxAuthoredLayoutHeight,
+      Math.max(0, input.authoredLayoutHeight ?? 0),
+    );
+    this.maxRasterWidth = Math.max(
+      this.maxRasterWidth,
+      Math.max(0, input.rasterWidth ?? 0),
+    );
+    this.maxRasterHeight = Math.max(
+      this.maxRasterHeight,
+      Math.max(0, input.rasterHeight ?? 0),
+    );
+    if (input.textDecoration === "underline") this.underlineRenderCount += 1;
     this.totalTimeUs.push(Math.max(0, input.totalTimeUs));
     for (const [key, value] of Object.entries({
       fontWaitUs: input.fontWaitUs,
@@ -1553,6 +1650,14 @@ class TextWindowAccumulator {
       ),
       layerCount: this.layerCount,
       outputPixels: this.outputPixels,
+      overflowRenderCount: this.overflowRenderCount,
+      maxOverflowX: this.maxOverflowX,
+      maxOverflowY: this.maxOverflowY,
+      maxAuthoredLayoutWidth: this.maxAuthoredLayoutWidth,
+      maxAuthoredLayoutHeight: this.maxAuthoredLayoutHeight,
+      maxRasterWidth: this.maxRasterWidth,
+      maxRasterHeight: this.maxRasterHeight,
+      underlineRenderCount: this.underlineRenderCount,
       renderPercentiles: percentile(this.totalTimeUs),
       stagePercentiles,
     };
@@ -1564,6 +1669,14 @@ class TextWindowAccumulator {
     this.cacheMisses = 0;
     this.layerCount = 0;
     this.outputPixels = 0;
+    this.overflowRenderCount = 0;
+    this.maxOverflowX = 0;
+    this.maxOverflowY = 0;
+    this.maxAuthoredLayoutWidth = 0;
+    this.maxAuthoredLayoutHeight = 0;
+    this.maxRasterWidth = 0;
+    this.maxRasterHeight = 0;
+    this.underlineRenderCount = 0;
     return result;
   }
 }
@@ -2856,6 +2969,14 @@ class TelemetryCollector {
           outputPixels: summary.outputPixels,
           renderPercentiles: summary.renderPercentiles,
           stagePercentiles: summary.stagePercentiles,
+          overflowRenderCount: summary.overflowRenderCount,
+          maxOverflowX: summary.maxOverflowX,
+          maxOverflowY: summary.maxOverflowY,
+          maxAuthoredLayoutWidth: summary.maxAuthoredLayoutWidth,
+          maxAuthoredLayoutHeight: summary.maxAuthoredLayoutHeight,
+          maxRasterWidth: summary.maxRasterWidth,
+          maxRasterHeight: summary.maxRasterHeight,
+          underlineRenderCount: summary.underlineRenderCount,
         },
         timestampMs: Date.now(),
       });

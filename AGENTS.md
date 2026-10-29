@@ -29,7 +29,7 @@ Clypra is a high-performance native desktop video editor (`v1.6.0`) targeting ma
 11. **Cross-Platform Contract Discipline**: Core editing and project semantics must remain identical across macOS, Windows, and Linux. Zero OS branching in timeline math. Isolate platform differences in localized native adapters. Never assume success on one OS proves readiness on another. Consult [`docs/engineering/platform-compatibility.md`](docs/engineering/platform-compatibility.md).
 12. **Zero Hardcoded User-Facing Text**: All UI labels, tooltips, dialogs, and menu items must use canonical semantic keys in `src/i18n/catalogs/en.json` and maintain 100% parity across all 9 supported locales (`npm run i18n:check`).
 13. **Active Presenter Verification**: The native GPU preview is the default, with canvas/DOM readback as fallback. Never infer the active preview path solely from environment variables; verify the runtime presenter and fallback state directly.
-14. **Diagnostic Logging & Privacy Invariant**: Local editor sessions accumulate append-only NDJSON logs in `perf_logs/`. Redact personal paths, machine IDs, and credentials. Never treat unaligned remote clocks as synchronized.
+14. **Diagnostic Logging & Privacy Invariant**: Local editor sessions accumulate append-only NDJSON logs in the host OS application data directory (`perf_logs/` in the OS root, e.g. `~/Library/Application Support/com.deenminder.clypra/perf_logs/` on macOS; never search inside the repository). Redact personal paths, machine IDs, and credentials. Never treat unaligned remote clocks as synchronized.
 15. **Investigation-Only Audit Default**: Defect hunts and performance investigations operate in non-destructive read-only mode by default. Validate hypotheses with tests or empirical evidence before declaring confirmed defects.
 16. **Native UI Thread Safety**: All native window, view, and OS-level UI hierarchy operations across macOS (AppKit/`NSWindow`), Windows (Win32/`HWND`), and Linux (GTK/`GtkWidget`) must execute exclusively on the main UI thread via `window.run_on_main_thread()` or `app.run_on_main_thread()`. Background tasks (Tokio workers, render loops, audio threads) must never call restricted platform APIs directly. Violation on macOS 26+ causes an immediate `EXC_BREAKPOINT (SIGTRAP)` crash. See [`.agents/skills/tauri-native-thread-safety/SKILL.md`](.agents/skills/tauri-native-thread-safety/SKILL.md).
 
@@ -137,6 +137,16 @@ Before reporting any task complete, every agent must verify:
    - `npm run docs:check` passed if documentation links changed.
 6. **Clean Working Tree**: No untracked scratch files left in source directories.
 7. **Explicit Reporting**: Document what was verified, commands executed, and any environment-dependent checks that could not run.
+8. **Subsystem Contract Suites**: When changing files in `src/core/playback/`, `src/core/audio/`, `src/components/editor/preview/`, or `src/features/text-effects/`, ALL four behavioral contract suites must pass:
+   ```bash
+   npx vitest run src/core/playback/__tests__/replayBehavioralContract.test.ts
+   npx vitest run src/core/audio/__tests__/audioPreviewSyncContract.test.ts
+   npx vitest run src/components/editor/preview/__tests__/previewStateResetContract.test.ts
+   npx vitest run src/features/text-effects/__tests__/textEditPreviewCycle.test.ts
+   ```
+9. **Negative Control (Bug Fixes)**: Every bug fix must demonstrate that the new regression test FAILS on the base commit. Apply only the test file to the pre-fix codebase and confirm failure.
+10. **Evidence Bundle**: Changes to preview, playback, audio, text, or sticker code must include raw command output in the PR description. Use the PR template at `.github/pull_request_template.md`.
+11. **Mutation Canary**: Run `npm run verify:canary-mutations` to confirm known-bad patches turn contract tests red.
 
 ---
 
@@ -213,6 +223,7 @@ Never claim cross-platform thread safety solely because one operating system pas
 - **`behavior-coverage`** ([`.agents/skills/behavior-coverage/SKILL.md`](.agents/skills/behavior-coverage/SKILL.md)): Systematic user behavior discovery, 10 scenario categories, traceability matrix, and Playwright UI / native desktop test automation.
 - **`i18n-localization-engineering`** ([`.agents/skills/i18n-localization-engineering/SKILL.md`](.agents/skills/i18n-localization-engineering/SKILL.md)): Canonical semantic keys, catalog parity checks (`npm run i18n:check`), 9 first-party supported locales, locale-aware formatting, and native menu synchronization.
 - **`architecture-design-review`** ([`.agents/skills/architecture-design-review/SKILL.md`](.agents/skills/architecture-design-review/SKILL.md)): Architecture assessment, boundary analysis, trade-off evaluation, and ADR creation in [`docs/architecture/adr/`](docs/architecture/adr/README.md).
+- **clypra-codebase-optimization-research** ([.agents/skills/clypra-codebase-optimization-research/SKILL.md](.agents/skills/clypra-codebase-optimization-research/SKILL.md)): Scoped code-path investigation, logic and architecture review, optimization trade-offs, and source-backed validation of current engineering approaches.
 - **`nle-domain-engineering`** ([`.agents/skills/nle-domain-engineering/SKILL.md`](.agents/skills/nle-domain-engineering/SKILL.md)): NLE domain knowledge, timecode math, track composition, media lifecycle, and synchronization invariants. Companion specification: [`docs/engineering/nle-architecture-and-semantics.md`](docs/engineering/nle-architecture-and-semantics.md).
 - **`senior-engineer-decision-making`** ([`.agents/skills/senior-engineer-decision-making/SKILL.md`](.agents/skills/senior-engineer-decision-making/SKILL.md)): Problem framing, technical trade-offs, scope discipline, and challenging unsound requests.
 - **`performance-reliability-engineering`** ([`.agents/skills/performance-reliability-engineering/SKILL.md`](.agents/skills/performance-reliability-engineering/SKILL.md)): Measurement-driven optimization, memory leak prevention, queue back-pressure, and resource lifecycles.

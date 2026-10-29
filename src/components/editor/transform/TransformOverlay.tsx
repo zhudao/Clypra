@@ -36,6 +36,7 @@ import {
   type ViewportTransform,
 } from "@/lib/utils/coordinateSystem";
 import {
+  calculateTextClipAuthoredSize,
   hasTextClipContentTransformDrift,
   resolveTextClipContentTransform,
 } from "@/lib/text/textClip";
@@ -50,10 +51,22 @@ import type {
 import { ContextMenu } from "@/components/ui/ContextMenu";
 import { hideNativeSurfaceWhenIdle } from "@/core/runtime/nativeSurfaceLifecycle";
 import { forceRepaintNativeProgramPreview } from "@/components/editor/preview/NativeProgramPreview";
+import {
+  getActiveProgramPreviewPresenter,
+  subscribeToActiveProgramPreviewPresenter,
+  type ProgramPreviewPresenter,
+} from "@/components/editor/preview/programPreviewPresenterState";
+import {
+  getBrowserTextVisualSnapshot,
+  subscribeToBrowserTextVisualSnapshot,
+} from "@/components/editor/preview/nativeTextPreview";
 import { useProjectStore } from "@/store/projectStore";
 import { Maximize2, Minimize2, RotateCcw } from "lucide-react";
 import { resolveConform, resolveTextTemplateArtifact } from "@clypra-studio/engine";
-import { getActiveSessionOrNull } from "@/core/runtime/ProjectSession";
+import {
+  getActiveSessionOrNull,
+  subscribeToSessionChanges,
+} from "@/core/runtime/ProjectSession";
 import { compareCompositorClips } from "@/core/compositor/ordering";
 import { calculateOptimalTemplateLayout } from "@/core/render/templateScale";
 import { toCompositorClip } from "@/core/timeline/adapter";
@@ -62,6 +75,35 @@ import type { CompositorClip } from "@/core/compositor/types";
 
 export function shouldScaleTextFontForHandle(handle: TransformHandle): boolean {
   return handle !== "move" && handle !== "rotate";
+}
+
+/**
+ * Choose resize affordances that cannot overlap on a compact selection.
+ *
+ * The selection border remains the move target at every size. Keeping all
+ * eight handles on a tiny text box makes their hit regions compete, causing a
+ * pointer near one handle to unpredictably begin another transform. Clypra
+ * uses corner handles as its sole resize affordance; side/midpoint handles
+ * are intentionally omitted so compact text never falls back to ambiguous
+ * axis-only controls.
+ */
+export function getVisibleTransformHandles(
+  _width: number,
+  _height: number,
+): readonly TransformHandle[] {
+  return ["nw", "ne", "sw", "se"];
+}
+
+/** Keep corner hit targets distinct without changing selected geometry. */
+export function getCompactCornerOutset(
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  const minimumCornerSeparation = 28;
+  return {
+    x: Math.max(0, (minimumCornerSeparation - width) / 2),
+    y: Math.max(0, (minimumCornerSeparation - height) / 2),
+  };
 }
 
 export function calculateTextResizeFontSize(
@@ -255,22 +297,72 @@ function mouseToCanvas(
  * for the already-mounted selection box. The box keeps its React-rendered
  * starting bounds; only this CSS custom property changes during a drag.
  */
+export interface CanvasVisualBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /**
+   * Optional canvas-space pivot supplied by a raster presenter. A tight text
+   * box can be offset within its texture, so rotating around its own centre
+   * would visibly diverge from the compositor.
+   */
+  pivotX?: number;
+  pivotY?: number;
+  /** Diagnostic-only origin; emitted once when a text transform begins. */
+  source?: "browser-tight" | "native-tight" | "authored-fallback" | "layout-box";
+}
+
+/**
+ * Maps the authored geometry that is sent to the preview renderer to the
+ * larger visual bounds used by the selection overlay. Plain point text can
+ * have raster bleed outside its authored box; that bleed is presentation
+ * metadata, never a transform to commit back to the clip.
+ */
+export function resolveVisualDragGeometry(
+  geometry: DragGeometry,
+  startTransform: TransformState["startTransform"],
+  visualStart?: CanvasVisualBounds,
+): CanvasVisualBounds {
+  if (!visualStart) {
+    return geometry;
+  }
+
+  const scaleX = geometry.width / Math.max(1, startTransform.width);
+  const scaleY = geometry.height / Math.max(1, startTransform.height);
+  return {
+    x:
+      geometry.visualX ??
+      geometry.x + (visualStart.x - startTransform.x) * scaleX,
+    y:
+      geometry.visualY ??
+      geometry.y + (visualStart.y - startTransform.y) * scaleY,
+    width: visualStart.width * scaleX,
+    height: visualStart.height * scaleY,
+  };
+}
+
 function getDragPreviewTransform(
   geometry: DragGeometry,
   startTransform: TransformState["startTransform"],
   scale: number,
   zoom: number,
+  visualStart?: CanvasVisualBounds,
 ): string {
-  const startCenterX = startTransform.x + startTransform.width / 2;
-  const startCenterY = startTransform.y + startTransform.height / 2;
-  const targetX = geometry.x;
-  const targetY = geometry.y;
-  const nextCenterX = targetX + geometry.width / 2;
-  const nextCenterY = targetY + geometry.height / 2;
+  const startVisual = visualStart ?? startTransform;
+  const nextVisual = resolveVisualDragGeometry(
+    geometry,
+    startTransform,
+    visualStart,
+  );
+  const startCenterX = startVisual.x + startVisual.width / 2;
+  const startCenterY = startVisual.y + startVisual.height / 2;
+  const nextCenterX = nextVisual.x + nextVisual.width / 2;
+  const nextCenterY = nextVisual.y + nextVisual.height / 2;
   const translateX = (nextCenterX - startCenterX) * scale * zoom;
   const translateY = (nextCenterY - startCenterY) * scale * zoom;
-  const scaleX = geometry.width / Math.max(1, startTransform.width);
-  const scaleY = geometry.height / Math.max(1, startTransform.height);
+  const scaleX = nextVisual.width / Math.max(1, startVisual.width);
+  const scaleY = nextVisual.height / Math.max(1, startVisual.height);
 
   return `translate3d(${translateX}px, ${translateY}px, 0) rotate(${geometry.rotation}deg) scale(${scaleX}, ${scaleY})`;
 }
@@ -286,7 +378,8 @@ export function resolveClipVisualBounds(
   clip: Clip,
   canvasWidth?: number,
   canvasHeight?: number,
-): { x: number; y: number; width: number; height: number } {
+  presenter: ProgramPreviewPresenter | null = null,
+): CanvasVisualBounds {
   let x = clip.x;
   let y = clip.y;
   let width = clip.width;
@@ -405,7 +498,42 @@ export function resolveClipVisualBounds(
     }
   }
 
+  // Text selection is the editor layout object, never a cropped raster's ink
+  // bounds. Underline, italic overhang, and presenter switches may change the
+  // uploaded pixels, but must not change resize handles or the rotation pivot.
+  if (clip.kind === "text") {
+    return {
+      x,
+      y,
+      width,
+      height,
+      pivotX: x + width / 2,
+      pivotY: y + height / 2,
+      source: "layout-box",
+    };
+  }
+
   return { x, y, width, height };
+}
+
+/**
+ * During an active transform the native raster snapshot legitimately changes
+ * every pointer frame. The selection box already receives the same movement
+ * as an imperative CSS transform, so rebasing its React layout onto that live
+ * snapshot would apply the delta twice and make the handles jump. Freeze the
+ * visual base captured on pointer-down until the controller ends the gesture.
+ */
+export function resolveOverlayBaseVisualBounds(
+  clip: Clip,
+  canvasWidth: number,
+  canvasHeight: number,
+  activeDragVisualBounds?: CanvasVisualBounds | null,
+  presenter: ProgramPreviewPresenter | null = null,
+): CanvasVisualBounds {
+  return (
+    activeDragVisualBounds ??
+    resolveClipVisualBounds(clip, canvasWidth, canvasHeight, presenter)
+  );
 }
 
 /**
@@ -589,6 +717,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
   const activeTransform = transformController.getActiveTransform();
 
   const [isDragging, setIsDragging] = useState(false);
+  const [dragRotation, setDragRotation] = useState<number | null>(null);
   const [snappedX, setSnappedX] = useState(false);
   const [snappedY, setSnappedY] = useState(false);
   const [snappedLeft, setSnappedLeft] = useState(false);
@@ -602,6 +731,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
     x: number;
     y: number;
   } | null>(null);
+  const [, setTextVisualSnapshotRevision] = useState(0);
 
   useEffect(() => {
     if (contextMenu) {
@@ -637,6 +767,12 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
     index: -1,
   });
   const dragCursorRef = useRef<string | null>(null);
+  // Native text rasters may intentionally extend beyond their authored box.
+  // Keep that visual start box local to the overlay; the controller and native
+  // preview must receive authored geometry only.
+  const dragVisualBoundsRef = useRef<CanvasVisualBounds | null>(null);
+  /** Frozen compositor pivot for the active rotation gesture. */
+  const rotationPivotRef = useRef<{ x: number; y: number } | null>(null);
   /** Start angle (radians) for rotation drag — prevents initial snap */
   const startAngleRef = useRef<number | undefined>(undefined);
   /** Start font size for text clips — supports proportional dynamic scaling */
@@ -656,6 +792,48 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
   const isPlaybackInteraction = interactionMode === "playing";
   const overlayInteractive = visible || isPlaybackInteraction;
 
+  // Raster geometry is session-owned and can complete after an inspector
+  // property edit has already rendered the overlay. Subscribe only to the
+  // selected layer so a completed native text raster refreshes its selection
+  // shape without putting frame-rate state into Zustand or React props.
+  useEffect(() => {
+    if (!selectedClip || selectedClip.kind !== "text") return;
+
+    let unsubscribeSnapshot: (() => void) | undefined;
+    const unsubscribeBrowserSnapshot = subscribeToBrowserTextVisualSnapshot(
+      selectedClip.id,
+      () => setTextVisualSnapshotRevision((revision) => revision + 1),
+    );
+    const attachToActiveBridge = () => {
+      unsubscribeSnapshot?.();
+      unsubscribeSnapshot = getActiveSessionOrNull()
+        ?.nativeRasterBridge?.subscribeToTextVisualSnapshot?.(
+          selectedClip.id,
+          () => setTextVisualSnapshotRevision((revision) => revision + 1),
+        );
+      setTextVisualSnapshotRevision((revision) => revision + 1);
+    };
+
+    attachToActiveBridge();
+    const unsubscribeSession = subscribeToSessionChanges(attachToActiveBridge);
+    return () => {
+      unsubscribeSnapshot?.();
+      unsubscribeBrowserSnapshot();
+      unsubscribeSession();
+    };
+  }, [selectedClip?.id, selectedClip?.kind]);
+
+  // Presenter handoffs do not change timeline state. Subscribe to the
+  // monitor's explicit decision so a paused canvas handoff cannot retain
+  // native selection geometry until some unrelated React update happens.
+  useEffect(
+    () =>
+      subscribeToActiveProgramPreviewPresenter(() => {
+        setTextVisualSnapshotRevision((revision) => revision + 1);
+      }),
+    [],
+  );
+
   // The selection box is a signal-plane consumer. Its position and scale are
   // updated directly by the controller so pointer feedback does not require a
   // React render. React only owns the committed/base geometry.
@@ -671,6 +849,9 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
       (geometry) => {
         const active = transformController.getActiveTransform();
         if (!active || active.clipId !== selectedClip?.id) return;
+        if (active.handle === "rotate") {
+          setDragRotation(geometry.rotation);
+        }
 
         container.style.setProperty(
           "--transform-overlay-drag-transform",
@@ -679,11 +860,17 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
             active.startTransform,
             scale,
             viewport.zoom,
+            dragVisualBoundsRef.current ?? undefined,
           ),
         );
       },
     );
-    const unsubscribeEnd = transformController.onDragEnd(clearPreviewTransform);
+    const unsubscribeEnd = transformController.onDragEnd(() => {
+      dragVisualBoundsRef.current = null;
+      rotationPivotRef.current = null;
+      setDragRotation(null);
+      clearPreviewTransform();
+    });
 
     return () => {
       unsubscribeGeometry();
@@ -725,6 +912,76 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
     updateClip,
   ]);
 
+  // Bounds belong to the editing model, while font loading belongs to the
+  // browser. A project font can finish loading after a text clip was created
+  // or selected; in that interval a fallback face has different advances and
+  // can leave the renderer's final glyph outside the persisted selection.
+  // Reconcile once the document font set is ready. This stays in the editing
+  // owner (never the preview render loop), is cancelled on selection changes,
+  // and is a no-op when the stored transform already matches the loaded font.
+  useEffect(() => {
+    if (
+      !selectedClip ||
+      isDragging ||
+      !isClipActiveAtTime(selectedClip, currentTime) ||
+      !("text" in selectedClip) ||
+      typeof document === "undefined" ||
+      !document.fonts
+    ) {
+      return;
+    }
+
+    const textClip = selectedClip as TextClip;
+    if (textClip.templateId) {
+      return;
+    }
+
+    let disposed = false;
+    void document.fonts.ready.then(() => {
+      if (disposed || isDragging) return;
+
+      // Resolve the latest instance rather than using the captured clip so a
+      // property edit completed while the font was loading is never replaced
+      // by stale selection geometry.
+      const latestClip = useTimelineStore
+        .getState()
+        .clips.find((clip) => clip.id === textClip.id);
+      if (!latestClip || !("text" in latestClip)) return;
+      const latestTextClip = latestClip as TextClip;
+      if (
+        latestTextClip.templateId ||
+        !hasTextClipContentTransformDrift(
+          latestTextClip,
+          canvasWidth,
+          canvasHeight,
+        )
+      ) {
+        return;
+      }
+
+      updateClip(
+        latestTextClip.id,
+        resolveTextClipContentTransform(
+          latestTextClip,
+          canvasWidth,
+          canvasHeight,
+          "font-ready-selection-normalize",
+        ),
+      );
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }, [
+    selectedClip,
+    isDragging,
+    currentTime,
+    canvasWidth,
+    canvasHeight,
+    updateClip,
+  ]);
+
   // Handle canvas mousedown to select/deselect clips.
   // Using mousedown (instead of click) avoids click-tail races after drag.
   const handleCanvasMouseDown = useCallback(
@@ -734,7 +991,9 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
       // Don't handle if clicking on a handle or during drag
       if (
         isDragging ||
-        (e.target as HTMLElement).closest("[data-transform-handle]")
+        (e.target as HTMLElement).closest(
+          "[data-transform-handle], [data-spatial-motion-path], [data-motion-path-handle]",
+        )
       ) {
         return;
       }
@@ -850,6 +1109,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
         };
       }
       setIsDragging(true);
+      setDragRotation(handle === "rotate" ? selectedClip.rotation ?? 0 : null);
       setSnappedX(false);
       setSnappedY(false);
       setSnappedLeft(false);
@@ -879,6 +1139,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
 
       const rect = overlayRef.current?.getBoundingClientRect();
       if (!rect) {
+        setIsDragging(false);
         if (previewInteractionRef.current) {
           previewInteractionCoordinator.cancel(previewInteractionRef.current);
           previewInteractionRef.current = null;
@@ -902,22 +1163,51 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
         selectedClip,
         canvasWidth,
         canvasHeight,
+        getActiveProgramPreviewPresenter(),
       );
       const actualWidth = visualBounds.width;
       const actualHeight = visualBounds.height;
       const actualX = visualBounds.x;
       const actualY = visualBounds.y;
+      dragVisualBoundsRef.current = {
+        x: actualX,
+        y: actualY,
+        width: actualWidth,
+        height: actualHeight,
+      };
+
+      if (selectedClip.kind === "text") {
+        tracePlayback("text-selection-geometry", {
+          source: visualBounds.source ?? "authored",
+          width: Number(actualWidth.toFixed(2)),
+          height: Number(actualHeight.toFixed(2)),
+          pivotOffsetX: Number(
+            ((visualBounds.pivotX ?? actualX + actualWidth / 2) - actualX).toFixed(2),
+          ),
+          pivotOffsetY: Number(
+            ((visualBounds.pivotY ?? actualY + actualHeight / 2) - actualY).toFixed(2),
+          ),
+          handle,
+        });
+      }
 
       // Capture start angle for rotation handle
       if (handle === "rotate") {
+        // The compositor rotates the full raster texture. Preserve that pivot
+        // for the whole gesture so the tight overlay and rendered text cannot
+        // diverge when alpha bounds are offset by italic overhang or bleed.
         const centerX = actualX + actualWidth / 2;
         const centerY = actualY + actualHeight / 2;
+        const pivotX = visualBounds.pivotX ?? centerX;
+        const pivotY = visualBounds.pivotY ?? centerY;
+        rotationPivotRef.current = { x: pivotX, y: pivotY };
         startAngleRef.current = Math.atan2(
-          canvasCoords.y - centerY,
-          canvasCoords.x - centerX,
+          canvasCoords.y - pivotY,
+          canvasCoords.x - pivotX,
         );
       } else {
         startAngleRef.current = undefined;
+        rotationPivotRef.current = null;
       }
 
       // Capture starting font size for text clips so we can scale text dynamically
@@ -951,10 +1241,10 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
         clipId: selectedClip.id,
         handle,
         startTransform: {
-          x: actualX,
-          y: actualY,
-          width: actualWidth,
-          height: actualHeight,
+          x: selectedClip.x,
+          y: selectedClip.y,
+          width: selectedClip.width,
+          height: selectedClip.height,
           rotation: selectedClip.rotation,
           conform: selectedClip.conform
             ? { ...selectedClip.conform }
@@ -964,15 +1254,17 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
         aspectRatioLocked: selectedClip.aspectRatioLocked ?? true,
         sourceAspectRatio:
           selectedClip.sourceAspectRatio ??
-          actualWidth / Math.max(1, actualHeight),
+          selectedClip.width / Math.max(1, selectedClip.height),
       });
 
       transformController.updateDragGeometry({
-        x: actualX,
-        y: actualY,
-        width: actualWidth,
-        height: actualHeight,
+        x: selectedClip.x,
+        y: selectedClip.y,
+        width: selectedClip.width,
+        height: selectedClip.height,
         rotation: selectedClip.rotation ?? 0,
+        visualX: actualX,
+        visualY: actualY,
         ...(startFontSizeRef.current !== undefined
           ? { fontSize: startFontSizeRef.current }
           : {}),
@@ -1089,6 +1381,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
         canvasCoords,
         constraints,
         startAngleRef.current,
+        rotationPivotRef.current ?? undefined,
       );
 
       // Resize handles scale text size with the edited axis so the rendered text
@@ -1531,23 +1824,49 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
       // Publish only to the imperative signal plane. The preview renderer and
       // selection box consume this without replacing the timeline array or
       // notifying every Zustand subscriber on every pointer frame.
+      const nextX = newTransform.x ?? startClip.x;
+      const nextY = newTransform.y ?? startClip.y;
+      const nextWidth = newTransform.width ?? startClip.width;
+      const nextHeight = newTransform.height ?? startClip.height;
+      const visualStart = dragVisualBoundsRef.current;
+      const visualScaleX =
+        nextWidth / Math.max(1, currentTransform.startTransform.width);
+      const visualScaleY =
+        nextHeight / Math.max(1, currentTransform.startTransform.height);
       transformController.updateDragGeometry({
-        x: newTransform.x ?? startClip.x,
-        y: newTransform.y ?? startClip.y,
-        width: newTransform.width ?? startClip.width,
-        height: newTransform.height ?? startClip.height,
+        x: nextX,
+        y: nextY,
+        width: nextWidth,
+        height: nextHeight,
         rotation: newTransform.rotation ?? startClip.rotation ?? 0,
+        ...(visualStart
+          ? {
+              visualX:
+                nextX +
+                (visualStart.x - currentTransform.startTransform.x) *
+                  visualScaleX,
+              visualY:
+                nextY +
+                (visualStart.y - currentTransform.startTransform.y) *
+                  visualScaleY,
+            }
+          : {}),
         ...((newTransform as Partial<TextClip>).fontSize !== undefined
-          ? { fontSize: (newTransform as Partial<TextClip>).fontSize }
+          ? {
+              fontSize: (newTransform as Partial<TextClip>).fontSize,
+              // These are the dimensions that will be committed at mouse-up.
+              // The preview signal deliberately retains the drag-start text
+              // raster/base while this gesture is active, so panel, glyphs,
+              // and selection geometry stay in the same coordinate space.
+              baseWidth: nextWidth,
+              baseHeight: nextHeight,
+            }
           : startFontSizeRef.current !== undefined
             ? { fontSize: startFontSizeRef.current }
             : {}),
         ...(newTransform.conform
           ? {
-              conform: newTransform.conform as unknown as Record<
-                string,
-                unknown
-              >,
+              conform: newTransform.conform,
             }
           : {}),
       });
@@ -1650,7 +1969,27 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
         finalGeometry.fontSize ?? startFontSizeRef.current;
     }
 
+    const selectedTextClip =
+      selectedClip && "text" in selectedClip
+        ? (selectedClip as TextClip)
+        : null;
     if (
+      selectedTextClip &&
+      startFontSizeRef.current !== undefined &&
+      (oldTransform.width !== newTransform.width ||
+        oldTransform.height !== newTransform.height)
+    ) {
+      const authoredSize = calculateTextClipAuthoredSize(
+        selectedTextClip,
+        canvasWidth,
+        { fontSize: newTransform.fontSize },
+      );
+      oldTransform.baseWidth = selectedTextClip.baseWidth ?? oldTransform.width;
+      oldTransform.baseHeight = selectedTextClip.baseHeight ?? oldTransform.height;
+      newTransform.baseWidth = authoredSize.width;
+      newTransform.baseHeight = authoredSize.height;
+    } else if (
+      (selectedClip as any).kind === "text" ||
       (selectedClip as any).kind === "text-template" ||
       (selectedClip as any).templateId ||
       (selectedClip as any).styleId ||
@@ -1696,15 +2035,29 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
     const commitDurationMs = Math.max(0, performance.now() - commitStartedAt);
     const textTrace = textTransformTraceRef.current;
     if (textTrace) {
+      const browserSnapshot = getBrowserTextVisualSnapshot(textTrace.clipId);
+      const nativeSnapshot = getActiveSessionOrNull()?.nativeRasterBridge?.getTextSnapshot(
+        textTrace.clipId,
+      );
       traceTextInteraction({
         kind: (selectedClip as any)?.kind === "text-template" ? "template" : (selectedClip as any)?.styleId ? "effect" : "plain",
-        rendererPath: "studio-preview",
+        // The completed gesture is attributed to the presenter that supplied
+        // its visual geometry, so perf sessions can distinguish a DOM-canvas
+        // transform from a retained native-surface handoff.
+        rendererPath: browserSnapshot
+          ? "webview-canvas"
+          : nativeSnapshot
+            ? "native-raster"
+            : "studio-preview",
         operation: textTrace.operation,
         property: textTrace.operation,
         // durationMs measures the commit execution latency, ensuring honest SLA evaluation
         // rather than contaminating the 100ms interaction SLA with human gesture hold duration.
         durationMs: commitDurationMs,
         interactionId: `text-${textTrace.operation}:${textTrace.clipId}:${textTrace.startedAtMs}`,
+        // Persisted clip geometry is deliberately authored. The raster's
+        // visual bounds remain presentation-only and are published through
+        // the renderer snapshot contract above.
         layoutWidth: finalGeometry.width,
         layoutHeight: finalGeometry.height,
         stageCoverage: "unattributed",
@@ -2026,10 +2379,12 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
   // Resolve actual rendered dimensions (accounting for conform or text template if present)
   // For clips with conform (e.g., 16:9 video fitted into 9:16 canvas) or text templates,
   // the transform overlay should match the actual rendered bounds, not the clip's full logical bounds
-  const visualBounds = resolveClipVisualBounds(
+  const visualBounds = resolveOverlayBaseVisualBounds(
     selectedClip,
     canvasWidth,
     canvasHeight,
+    isDragging ? dragVisualBoundsRef.current : null,
+    getActiveProgramPreviewPresenter(),
   );
   const actualWidth = visualBounds.width;
   const actualHeight = visualBounds.height;
@@ -2051,6 +2406,15 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
   // Calculate screen-space dimensions (accounting for scale and zoom)
   const handleDisplayWidth = actualWidth * scale * viewport.zoom;
   const handleDisplayHeight = actualHeight * scale * viewport.zoom;
+
+  const overlayPivotX =
+    ((visualBounds.pivotX ?? actualX + actualWidth / 2) - actualX) *
+    scale *
+    viewport.zoom;
+  const overlayPivotY =
+    ((visualBounds.pivotY ?? actualY + actualHeight / 2) - actualY) *
+    scale *
+    viewport.zoom;
 
   // Position transform box centered at the clip center, rotation applied via CSS transform
   const handleDisplayX = clipCenterScreen.x - handleDisplayWidth / 2;
@@ -2095,6 +2459,14 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
   const showRightGuide = isDragging && snappedRight;
   const showTopGuide = isDragging && snappedTop;
   const showBottomGuide = isDragging && snappedBottom;
+  const visibleTransformHandles = getVisibleTransformHandles(
+    handleDisplayWidth,
+    handleDisplayHeight,
+  );
+  const compactCornerOutset = getCompactCornerOutset(
+    handleDisplayWidth,
+    handleDisplayHeight,
+  );
 
   return (
     <div
@@ -2135,7 +2507,9 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
           width: handleDisplayWidth,
           height: handleDisplayHeight,
           transform: `var(--transform-overlay-drag-transform, rotate(${rotation}deg))`,
-          transformOrigin: "center",
+          // May intentionally sit outside the tight alpha rectangle. This is
+          // the same full-texture centre used by native and canvas painters.
+          transformOrigin: `${overlayPivotX}px ${overlayPivotY}px`,
           zIndex: 10,
           // While playing, only the full-overlay capture plane is active.
           // Handles and the move surface cannot begin an edit until the
@@ -2164,81 +2538,21 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
           onMouseDown={handleMoveSurfaceMouseDown}
         />
 
-        {/* Corner handles (centered exactly on the box vertices) */}
-        <Handle
-          position="nw"
-          onMouseDown={(e) => handleMouseDown(e, "nw")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-        <Handle
-          position="ne"
-          onMouseDown={(e) => handleMouseDown(e, "ne")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-        <Handle
-          position="sw"
-          onMouseDown={(e) => handleMouseDown(e, "sw")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-        <Handle
-          position="se"
-          onMouseDown={(e) => handleMouseDown(e, "se")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-
-        {/* Side handles (horizontal & vertical pills) */}
-        <Handle
-          position="n"
-          onMouseDown={(e) => handleMouseDown(e, "n")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-        <Handle
-          position="s"
-          onMouseDown={(e) => handleMouseDown(e, "s")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-        <Handle
-          position="w"
-          onMouseDown={(e) => handleMouseDown(e, "w")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
-        <Handle
-          position="e"
-          onMouseDown={(e) => handleMouseDown(e, "e")}
-          left={0}
-          top={0}
-          width={handleDisplayWidth}
-          height={handleDisplayHeight}
-          rotation={rotation}
-        />
+        {/* Corner-only resizing keeps compact selections unambiguous. See
+            getVisibleTransformHandles(). */}
+        {visibleTransformHandles.map((position) => (
+          <Handle
+            key={position}
+            position={position}
+            onMouseDown={(e) => handleMouseDown(e, position)}
+            left={0}
+            top={0}
+            width={handleDisplayWidth}
+            height={handleDisplayHeight}
+            rotation={rotation}
+            cornerOutset={compactCornerOutset}
+          />
+        ))}
 
         {/* Rotation handle - floating centered below the bottom edge with scale compensation */}
         <Handle
@@ -2359,7 +2673,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
             className="w-11 h-6 flex justify-center items-center rounded-sm text-sm font-semibold bg-accent/60 text-text-primary"
             style={{ backdropFilter: "blur(8px)" }}
           >
-            {Math.round(rotation)}°
+            {Math.round(dragRotation ?? rotation)}°
           </div>
         </div>
       )}
@@ -2417,6 +2731,7 @@ interface HandleProps {
   width: number;
   height: number;
   rotation: number;
+  cornerOutset?: { x: number; y: number };
 }
 
 const Handle: React.FC<HandleProps> = ({
@@ -2428,6 +2743,7 @@ const Handle: React.FC<HandleProps> = ({
   width,
   height,
   rotation,
+  cornerOutset = { x: 0, y: 0 },
 }) => {
   const getHandleStyle = (): React.CSSProperties => {
     const handleSize = 10;
@@ -2460,13 +2776,29 @@ const Handle: React.FC<HandleProps> = ({
 
     switch (position) {
       case "nw":
-        return { ...baseStyle, left: left, top: top };
+        return {
+          ...baseStyle,
+          left: left - cornerOutset.x,
+          top: top - cornerOutset.y,
+        };
       case "ne":
-        return { ...baseStyle, left: left + width, top: top };
+        return {
+          ...baseStyle,
+          left: left + width + cornerOutset.x,
+          top: top - cornerOutset.y,
+        };
       case "sw":
-        return { ...baseStyle, left: left, top: top + height };
+        return {
+          ...baseStyle,
+          left: left - cornerOutset.x,
+          top: top + height + cornerOutset.y,
+        };
       case "se":
-        return { ...baseStyle, left: left + width, top: top + height };
+        return {
+          ...baseStyle,
+          left: left + width + cornerOutset.x,
+          top: top + height + cornerOutset.y,
+        };
       case "w":
         return {
           ...baseStyle,

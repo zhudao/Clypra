@@ -19,6 +19,18 @@ vi.mock("@/core/render/textRasterizer", () => ({
 
 vi.mock("@/lib/text/textClip", () => ({
   effectBleed: vi.fn().mockReturnValue({ x: 0, y: 0 }),
+  measureTextEffectContentBounds: vi.fn().mockReturnValue({
+    contentWidth: 640,
+    contentHeight: 120,
+    bleedLeft: 0,
+    bleedRight: 0,
+    bleedTop: 0,
+    bleedBottom: 0,
+    measuredTextWidth: 640,
+    measuredTextHeight: 120,
+    source: "plain",
+    selectionInset: 0,
+  }),
   resolveTextEffectDefinition: vi.fn().mockReturnValue(undefined),
 }));
 
@@ -46,6 +58,12 @@ const mockCtx = {
   save: vi.fn(),
   restore: vi.fn(),
   translate: vi.fn(),
+  rotate: vi.fn(),
+  drawImage: vi.fn(),
+  putImageData: vi.fn(),
+  createImageData: vi.fn((w: number, h: number) => ({
+    data: new Uint8ClampedArray(w * h * 4),
+  })),
   getImageData: vi.fn().mockReturnValue({ data: new Uint8ClampedArray(4) }),
 };
 vi.stubGlobal(
@@ -150,4 +168,55 @@ describe("rasterizeTextLayerForNative — fontWaitMs fast paths", () => {
     expect(loader.isLoaded({ family: "Impact", weight: 700, style: "normal" })).toBe(true);
     expect(loader.isLoaded({ family: "Georgia", weight: 400, style: "normal" })).toBe(true);
   });
+
+  it("CLY-BUG-001: flags fallback font on timeout and evicts from raster cache once font completes", async () => {
+    let resolveFont!: () => void;
+    const fontLoadPromise = new Promise<any>((res) => {
+      resolveFont = () => res({ font: { family: "CustomFont" }, loaded: true, loadTimeMs: 50 });
+    });
+
+    const loader = getFontLoader();
+    vi.spyOn(loader, "isLoaded").mockReturnValue(false);
+    vi.spyOn(loader, "ensureFont").mockReturnValue(fontLoadPromise);
+
+    const {
+      rasterizeTextLayerForNative,
+      paintTextLayersToCanvas,
+      buildNativeTextRasterKey,
+      _getBrowserTextRasterPromise,
+      _clearBrowserTextRasterCache,
+    } = await import("../nativeTextPreview");
+
+    _clearBrowserTextRasterCache();
+
+    const layer = makeLayer({ fontFamily: "CustomFont", fontWeight: 400 });
+    const rasterKey = buildNativeTextRasterKey(layer);
+
+    // 1. Initial render during visible-playback times out after 25ms budget
+    const initialAsset = await rasterizeTextLayerForNative(layer, { phase: "visible-playback" });
+    expect(initialAsset.isFallbackFont).toBe(true);
+
+    const mockCanvas = {
+      getContext: vi.fn().mockReturnValue(mockCtx),
+      width: 1920,
+      height: 1080,
+    } as unknown as HTMLCanvasElement;
+
+    // Trigger paintTextLayersToCanvas to populate browserTextRasterCache
+    await paintTextLayersToCanvas(
+      mockCanvas,
+      { visualLayers: [layer], metadata: {} } as any,
+      "visible-playback",
+    );
+    expect(_getBrowserTextRasterPromise(rasterKey)).toBeDefined();
+
+    // 2. Resolve font in background
+    resolveFont();
+    await fontLoadPromise;
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 3. Fallback entry must be evicted from cache
+    expect(_getBrowserTextRasterPromise(rasterKey)).toBeUndefined();
+  });
 });
+

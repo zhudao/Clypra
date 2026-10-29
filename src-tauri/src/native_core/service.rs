@@ -566,6 +566,7 @@ mod tests {
                     blend_mode: "normal".to_string(),
                     color_grade: None,
                     body_effect: None,
+                    crop: None,
                 }],
                 raster_layers: vec![],
                 text_layers: vec![],
@@ -647,6 +648,7 @@ mod tests {
             hw_device_type: None,
             dxgi_latched_off: None,
             dxgi_latch_reason: None,
+            dxgi_latch_context: None,
         }
     }
 
@@ -923,12 +925,14 @@ mod tests {
         assert_eq!(playback.decode.sample_count, 2);
     }
 
-    /// stats() returns last_sample without latch state injection; that happens
-    /// in the Tauri command layer (get_native_frame_service_stats) which has
-    /// access to wgpu_compositor.  This test just confirms the raw fields are
-    /// None until set explicitly (they aren't touched inside the service).
+    /// In debug builds get_dxgi_latch_state() returns real values on all
+    /// platforms, so the full chain (Rust → IPC → TS → Worker → Neon) can be
+    /// verified on macOS without a Windows CI job.
     #[test]
     fn stats_last_sample_dxgi_fields_are_none_by_default() {
+        // No latch mutex needed here — this test only reads raw PerformanceSample
+        // fields that are set to None in the sample() helper; it does not
+        // read or write the global latch atomics.
         let mut service = NativeFrameService::new(1024).unwrap();
         service.record_sample(sample(1));
         let stats = service.stats();

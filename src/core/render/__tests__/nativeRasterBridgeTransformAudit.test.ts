@@ -161,6 +161,40 @@ describe("NativeRasterBridge — Fix 2 transform field audit", () => {
     bridge.dispose();
   });
 
+  it("CLY-TEXT-024: rotates a cropped text texture around the evaluated layout box", async () => {
+    mocks.rasterizeText.mockResolvedValue({
+      ...BASE_ASSET,
+      width: 340,
+      height: 70,
+      x: 120,
+      y: 215,
+      positionMode: "absolute",
+      bleedX: 20,
+      bleedY: 15,
+      selectionBoundsTight: true,
+    });
+    const bridge = new NativeRasterBridge();
+
+    const [result] = await bridge.rasterize(
+      makeScene({
+        rotation: 90,
+        width: 400,
+        height: 100,
+        baseWidth: 400,
+        baseHeight: 100,
+      }),
+      { frameKey: 0, nonBlockingText: false },
+    );
+
+    // The texture's unrotated centre is (290, 250); a texture-centred native
+    // transform would leave it there. The shared presentation contract orbits
+    // that offset around the text layout centre (300, 250) instead.
+    expect(result.x).toBe(130);
+    expect(result.y).toBe(205);
+    expect(result.rotation).toBe(90);
+    bridge.dispose();
+  });
+
   // ── Path 2: Non-blocking fast path (cache hit) ──────────────────────────────
 
   it("non-blocking path (scale=1): propagates all live transform fields from the current frame", async () => {
@@ -328,6 +362,88 @@ describe("NativeRasterBridge — Fix 2 transform field audit", () => {
     expect(snapshot?.x).toBe(350);
     expect(snapshot?.y).toBe(500);
 
+    bridge.dispose();
+  });
+
+  it("expanded point text: strict interactive renders move a cached raster with the authored layer", async () => {
+    mocks.rasterizeText.mockResolvedValue({
+      ...BASE_ASSET,
+      // The texture is wider than the authored point-text box, so its origin
+      // is offset from that box. The cached asset coordinates intentionally
+      // describe only its first placement, not subsequent drags.
+      width: 980,
+      height: 90,
+      x: 185,
+      y: 192,
+      bleedX: -15,
+      bleedY: -8,
+      positionMode: "absolute" as const,
+      expandedPointText: true,
+    });
+
+    const bridge = new NativeRasterBridge();
+
+    const [initial] = await bridge.rasterize(
+      makeScene({ x: 200, y: 200, width: 754, height: 65 }),
+      { frameKey: 0, nonBlockingText: false, phase: "interactive-preview" },
+    );
+    expect(initial.x).toBe(185);
+    expect(initial.y).toBe(192);
+
+    // This is the strict path used by interactive preview. The raster cache
+    // remains valid because the content did not change, but the placement
+    // must use the current transform rather than the first cached x/y.
+    const [moved] = await bridge.rasterize(
+      makeScene({ x: 420, y: 315, width: 754, height: 65 }),
+      { frameKey: 0, nonBlockingText: false, phase: "interactive-preview" },
+    );
+    expect(moved.x).toBe(405);
+    expect(moved.y).toBe(307);
+    expect(mocks.rasterizeText).toHaveBeenCalledTimes(1);
+    expect(bridge.getTextSnapshot("audit-layer")).toMatchObject({ x: 405, y: 307 });
+
+    bridge.dispose();
+  });
+
+  it("publishes tight visual geometry when a cached text texture contains transparent safety padding", async () => {
+    mocks.rasterizeText.mockResolvedValue({
+      ...BASE_ASSET,
+      width: 800,
+      height: 120,
+      x: 120,
+      y: 180,
+      visualBounds: { x: 48, y: 32, width: 704, height: 58 },
+    });
+    const bridge = new NativeRasterBridge();
+    const changes = vi.fn();
+    const unsubscribe = bridge.subscribeToTextVisualSnapshot("audit-layer", changes);
+
+    await bridge.rasterize(
+      makeScene({
+        x: 120,
+        y: 180,
+        width: 800,
+        height: 120,
+        baseWidth: 800,
+        baseHeight: 120,
+      }),
+      { frameKey: 0, nonBlockingText: false, phase: "interactive-preview" },
+    );
+
+    expect(bridge.getTextVisualSnapshot("audit-layer")).toEqual({
+      x: 168,
+      y: 212,
+      displayWidth: 704,
+      displayHeight: 58,
+      // The tight selectable box must retain the full raster's pivot. Without
+      // it, a rotated overlay spins around the glyph bounds while the native
+      // compositor spins around the 800×120 texture.
+      pivotX: 520,
+      pivotY: 240,
+      selectionBoundsTight: true,
+    });
+    expect(changes).toHaveBeenCalledTimes(1);
+    unsubscribe();
     bridge.dispose();
   });
 

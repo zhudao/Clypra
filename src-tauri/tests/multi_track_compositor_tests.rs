@@ -40,8 +40,31 @@ impl HeadlessGpuContext {
         {
             a
         } else {
-            instance
-                .enumerate_adapters(wgpu::Backends::all())
+            let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
+            adapters.sort_by_key(|a| {
+                let info = a.get_info();
+                let mut score = match info.device_type {
+                    wgpu::DeviceType::DiscreteGpu => 1000,
+                    wgpu::DeviceType::IntegratedGpu => 200,
+                    wgpu::DeviceType::VirtualGpu => 50,
+                    wgpu::DeviceType::Cpu => 10,
+                    wgpu::DeviceType::Other => 0,
+                };
+                #[cfg(target_os = "linux")]
+                if info.backend == wgpu::Backend::Vulkan {
+                    score += 500;
+                }
+                #[cfg(target_os = "windows")]
+                if info.backend == wgpu::Backend::Dx12 {
+                    score += 500;
+                }
+                #[cfg(target_os = "macos")]
+                if info.backend == wgpu::Backend::Metal {
+                    score += 500;
+                }
+                std::cmp::Reverse(score)
+            });
+            adapters
                 .into_iter()
                 .next()
                 .expect("Failed to find suitable GPU adapter")
@@ -657,6 +680,7 @@ async fn test_affine_transform_pip_placement() {
                 scale_x: 0.5,
                 scale_y: 0.5,
                 rotation_rad: 0.0,
+                canvas_aspect_ratio: 1.0,
             },
             crop: CropMargins::default(),
             color_grade: ColorGradeUniforms::default(),
@@ -1253,6 +1277,7 @@ async fn test_burned_in_caption_preview_vs_export_pixel_parity() {
         scale_x: 0.5,
         scale_y: 0.2,
         rotation_rad: 0.0,
+        canvas_aspect_ratio: 1.0,
     };
 
     let layers = vec![
@@ -1338,10 +1363,8 @@ async fn test_burned_in_caption_preview_vs_export_pixel_parity() {
             }
 
             // In the caption text area: x in [200, 440], y in [250, 290]
-            if x >= 200 && x < 440 && y >= 250 && y < 290 {
-                if p_export != [20, 35, 45, 255] {
-                    caption_pixels_detected += 1;
-                }
+            if (200..440).contains(&x) && (250..290).contains(&y) && p_export != [20, 35, 45, 255] {
+                caption_pixels_detected += 1;
             }
         }
     }

@@ -1144,6 +1144,7 @@ export function buildNativeVideoProjectRequest(
     const bodyEffect = getNativeBodyEffect(layer, rasterLayers);
     const isCutout = layer.layerId.endsWith(":subject-cutout");
     const isMaskReady = !isCutout || bodyEffect !== null;
+    const crop = layer.crop ?? layer.layout?.crop;
     return {
       layerId: layer.layerId,
       videoPath: layer.sourcePath,
@@ -1156,6 +1157,7 @@ export function buildNativeVideoProjectRequest(
       opacity: isMaskReady ? layer.opacity : 0,
       zIndex: Math.round(layer.zIndex),
       blendMode: layer.blendMode,
+      ...(crop ? { crop } : {}),
       ...(colorGrade ? { colorGrade } : {}),
       ...(bodyEffect ? { bodyEffect } : {}),
     };
@@ -1279,6 +1281,15 @@ export function getNativePreviewBlockers(
 
   const textLayers = scene.visualLayers.filter((layer) => layer.layerType === "text");
   for (const layer of textLayers) {
+    // Background panels are authored by the shared browser rasterizer. The
+    // native SDF fallback intentionally has no panel primitive, so submitting
+    // it would silently drop the user's background until the raster arrives.
+    if (
+      layer.background &&
+      !hasNativeTextRasterAsset(layer, rasterLayers)
+    ) {
+      add(`Text background on layer ${layer.layerId} is waiting for its native raster frame.`);
+    }
     if (layer.templateId) {
       add(`Text template ${layer.templateId} requires native template primitives.`);
     }
@@ -1420,6 +1431,7 @@ export function buildNativeFrameRequest(
       const bodyEffect = getNativeBodyEffect(layer, rasterLayers);
       const isCutout = layer.layerId.endsWith(":subject-cutout");
       const isMaskReady = !isCutout || bodyEffect !== null;
+      const crop = layer.crop ?? layer.layout?.crop;
       return {
         assetId: layer.mediaId,
         layerId: layer.layerId,
@@ -1433,6 +1445,7 @@ export function buildNativeFrameRequest(
         opacity: isMaskReady ? layer.opacity : 0,
         zIndex: Math.round(layer.zIndex),
         blendMode: layer.blendMode,
+        ...(crop ? { crop } : {}),
         ...(colorGrade ? { colorGrade } : {}),
         ...(bodyEffect ? { bodyEffect } : {}),
       };

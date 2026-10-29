@@ -50,6 +50,10 @@ pub struct LayerTransform {
     pub scale_y: f32,
     /// Rotation angle in radians
     pub rotation_rad: f32,
+    /// Ratio of canvas width to canvas height. Rotation is authored in canvas
+    /// pixels, not normalized-device coordinates, so this converts the
+    /// otherwise non-uniform NDC axes back to a square coordinate space.
+    pub canvas_aspect_ratio: f32,
 }
 
 impl Default for LayerTransform {
@@ -60,6 +64,7 @@ impl Default for LayerTransform {
             scale_x: 1.0,
             scale_y: 1.0,
             rotation_rad: 0.0,
+            canvas_aspect_ratio: 1.0,
         }
     }
 }
@@ -72,11 +77,24 @@ impl LayerTransform {
 
         let sx = self.scale_x;
         let sy = self.scale_y;
+        let aspect = if self.canvas_aspect_ratio.is_finite() && self.canvas_aspect_ratio > 0.0 {
+            self.canvas_aspect_ratio
+        } else {
+            1.0
+        };
 
-        // Combined 2D Scale * Rotation * Translation
+        // The quad starts in normalized-device coordinates, whose X and Y
+        // units have different physical lengths on a non-square canvas. A
+        // conventional NDC rotation therefore changes the apparent screen
+        // angle (for example, -45° becomes about -29° on a 16:9 canvas).
+        //
+        // Convert the off-diagonal terms through the canvas aspect ratio so
+        // rotation happens in canvas-pixel space before the result is mapped
+        // back to NDC. This preserves the authored angle for both raster and
+        // video layers on every output aspect ratio.
         [
-            [sx * cos_r, sx * sin_r, 0.0, 0.0],
-            [-sy * sin_r, sy * cos_r, 0.0, 0.0],
+            [sx * cos_r, sx * aspect * sin_r, 0.0, 0.0],
+            [-(sy / aspect) * sin_r, sy * cos_r, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
             [self.translate_x, self.translate_y, 0.0, 1.0],
         ]
@@ -380,6 +398,7 @@ pub struct MultiTrackCompositor {
     pipeline_additive: OnceLock<wgpu::RenderPipeline>,
     pipeline_multiply: OnceLock<wgpu::RenderPipeline>,
     pipeline_screen: OnceLock<wgpu::RenderPipeline>,
+    pipeline_difference: OnceLock<wgpu::RenderPipeline>,
     pipeline_transition: OnceLock<wgpu::RenderPipeline>,
     layer_shader: wgpu::ShaderModule,
     transition_shader: wgpu::ShaderModule,
@@ -504,6 +523,27 @@ impl MultiTrackCompositor {
                         },
                     },
                     "Compositor Screen Render Pipeline",
+                )
+            }),
+            BlendMode::Difference => self.pipeline_difference.get_or_init(|| {
+                Self::create_layer_pipeline(
+                    device,
+                    &self.layer_shader,
+                    &self.pipeline_layout,
+                    self.target_format,
+                    wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::ReverseSubtract,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    },
+                    "Compositor Difference Render Pipeline",
                 )
             }),
             _ => &self.pipeline_normal,
@@ -1070,6 +1110,7 @@ impl MultiTrackCompositor {
             pipeline_additive: OnceLock::new(),
             pipeline_multiply: OnceLock::new(),
             pipeline_screen: OnceLock::new(),
+            pipeline_difference: OnceLock::new(),
             pipeline_transition: OnceLock::new(),
             layer_shader: shader,
             transition_shader,

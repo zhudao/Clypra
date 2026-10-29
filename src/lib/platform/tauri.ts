@@ -319,6 +319,7 @@ export interface NativeProjectVideoLayer {
   opacity?: number;
   zIndex?: number;
   blendMode?: string;
+  crop?: import("@/core/media/cropMath").NormalizedCrop;
   colorGrade?: import("./nativeCore").NativeColorGradeSnapshot;
   bodyEffect?: import("./nativeCore").NativeBodyEffectSnapshot;
 }
@@ -645,6 +646,20 @@ export async function submitNativePlaybackDemand(
 ): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("submit_native_playback_demand", { demand });
+}
+
+/**
+ * Fired by the Rust-owned latest-only render session after an explicit demand
+ * has actually reached the retained surface. Unlike the demand command's
+ * acknowledgement, this event is emitted after decode and presentation.
+ */
+export function listenForNativePlaybackDemandPresented(
+  onPresented: (presentation: NativeSurfacePresentation) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeSurfacePresentation>(
+    "clypra://native-playback-demand-presented",
+    (event) => onPresented(event.payload),
+  );
 }
 
 export interface NativePlaybackStatsPayload {
@@ -1410,6 +1425,38 @@ export async function updateNativeAudioClipParameters(options: {
   return invoke<NativeAudioClipStatus>(
     "update_native_audio_clip_parameters",
     options,
+  );
+}
+
+/**
+ * Applies parameter-only updates for multiple clips in a single Tauri IPC invocation
+ * and a single mixer lock acquisition, fixing the N-way parallel IPC anti-pattern
+ * (CLY-BUG-023, Architecture Invariant 5).
+ */
+export async function updateNativeAudioClipParametersBatch(
+  updates: Array<{
+    clipId: string;
+    gain: number;
+    pan: number;
+    fadeInTicks: number;
+    fadeOutTicks: number;
+    fadeInCurve: AudioFadeCurve;
+    fadeOutCurve: AudioFadeCurve;
+    volumeKeyframes: Array<{
+      id: string;
+      time: number;
+      gain: number;
+      easing?: "linear" | "exponential" | "bezier";
+    }>;
+  }>,
+): Promise<NativeAudioClipStatus[]> {
+  if (!isTauriRuntime())
+    throw new Error(
+      "updateNativeAudioClipParametersBatch requires the Tauri runtime",
+    );
+  return invoke<NativeAudioClipStatus[]>(
+    "update_native_audio_clip_parameters_batch",
+    { updates },
   );
 }
 

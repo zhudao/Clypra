@@ -4,7 +4,11 @@ import type {
   EvaluatedMediaLayer,
 } from "@/core/evaluation/types";
 import { resolveTextTemplateArtifact } from "@clypra-studio/engine";
-import { effectBleed, resolveTextEffectDefinition } from "@/lib/text/textClip";
+import {
+  effectBleed,
+  measureTextEffectContentBounds,
+  resolveTextEffectDefinition,
+} from "@/lib/text/textClip";
 import {
   getTextRenderMetrics,
   normalizeFontSize,
@@ -27,6 +31,7 @@ import {
   recordDynamicImport,
 } from "@/lib/playback/textMetrics";
 import { getNativeAnimatedStickerRenderer } from "./nativeStickerPreview";
+import { resolveTextPresentationGeometry } from "@/core/render/textPresentationGeometry";
 
 // ─── Module-level worker client singleton ────────────────────────────────────
 //
@@ -96,11 +101,29 @@ export interface NativeTextRasterAsset {
   zIndex: number;
   blendMode: string;
   isText: true;
+  /** Whether rasterization timed out waiting for the font and used system fallback. */
+  isFallbackFont?: boolean;
   /** Cropped template textures use absolute project-space placement. */
   positionMode?: "centered" | "absolute";
+  /**
+   * Point text whose transient raster exceeds a stale authored box. This is
+   * distinct from template cropping, which also uses absolute placement.
+   */
+  expandedPointText?: boolean;
   /** Internal geometry metadata; not part of the native wire snapshot. */
   bleedX?: number;
   bleedY?: number;
+  /**
+   * Tight non-transparent content bounds in texture coordinates. Raster
+   * safety padding remains part of the texture, but is not selectable.
+   */
+  visualBounds?: { x: number; y: number; width: number; height: number };
+  /**
+   * True when the raster itself has been cropped to its selectable content.
+   * A full-texture alpha rectangle is not a trustworthy selection box for a
+   * plain title because it may still include layout slack from point text.
+   */
+  selectionBoundsTight?: boolean;
   /** Internal timing carried to the WebView painter; never sent to Native. */
   timing?: {
     phase: TextRenderTracePhase;
@@ -120,6 +143,54 @@ export interface NativeTextRasterAsset {
   };
 }
 
+export function measureVisibleAlphaBounds(
+  rgba: Uint8ClampedArray | number[],
+  width: number,
+  height: number,
+): { x: number; y: number; width: number; height: number } {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (rgba[(y * width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  // Preserve a valid selectable target for intentionally transparent or
+  // not-yet-populated rasters rather than creating a zero-sized overlay.
+  if (maxX < minX || maxY < minY) return { x: 0, y: 0, width, height };
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+}
+
+/**
+ * Presentation geometry shared with selection/hit-testing consumers. Unlike a
+ * clip transform, these bounds describe the exact quad painted by a renderer
+ * after point-text expansion, raster bleed, and display scaling.
+ */
+export interface TextVisualSnapshot {
+  x: number;
+  y: number;
+  displayWidth: number;
+  displayHeight: number;
+  /** Canvas-space pivot used by the canvas renderer for this texture. */
+  pivotX: number;
+  pivotY: number;
+  /** Whether this geometry is known to exclude point-text layout slack. */
+  selectionBoundsTight: boolean;
+}
+
 /**
  * Browser program-preview bridge for text layers. Desktop uses the native
  * compositor, while localhost/browser preview still needs a real paint path.
@@ -127,6 +198,66 @@ export interface NativeTextRasterAsset {
  * semantics remain package-owned and only final bitmap placement lives here.
  */
 const browserImageCache = new Map<string, HTMLImageElement>();
+const browserTextVisualSnapshotsByLayerId = new Map<
+  string,
+  TextVisualSnapshot
+>();
+const browserTextVisualSnapshotListenersByLayerId = new Map<
+  string,
+  Set<() => void>
+>();
+
+function setBrowserTextVisualSnapshot(
+  layerId: string,
+  snapshot: TextVisualSnapshot,
+): void {
+  const previous = browserTextVisualSnapshotsByLayerId.get(layerId);
+  browserTextVisualSnapshotsByLayerId.set(layerId, snapshot);
+  if (
+    previous?.x === snapshot.x &&
+    previous.y === snapshot.y &&
+    previous.displayWidth === snapshot.displayWidth &&
+    previous.displayHeight === snapshot.displayHeight &&
+    previous.pivotX === snapshot.pivotX &&
+    previous.pivotY === snapshot.pivotY &&
+    previous.selectionBoundsTight === snapshot.selectionBoundsTight
+  ) {
+    return;
+  }
+  browserTextVisualSnapshotListenersByLayerId
+    .get(layerId)
+    ?.forEach((listener) => listener());
+}
+
+/**
+ * Returns the most recent visual bounds painted by the DOM/canvas presenter.
+ * The native presenter exposes the equivalent snapshot through
+ * NativeRasterBridge; callers must treat either source as optional.
+ */
+export function getBrowserTextVisualSnapshot(
+  layerId: string,
+): TextVisualSnapshot | undefined {
+  return browserTextVisualSnapshotsByLayerId.get(layerId);
+}
+
+/** Subscribe to one browser-painted layer's visual-geometry changes. */
+export function subscribeToBrowserTextVisualSnapshot(
+  layerId: string,
+  listener: () => void,
+): () => void {
+  let listeners = browserTextVisualSnapshotListenersByLayerId.get(layerId);
+  if (!listeners) {
+    listeners = new Set();
+    browserTextVisualSnapshotListenersByLayerId.set(layerId, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners?.delete(listener);
+    if (listeners?.size === 0) {
+      browserTextVisualSnapshotListenersByLayerId.delete(layerId);
+    }
+  };
+}
 
 /** Exported for testing only. */
 export function _clearBrowserImageCache(): void {
@@ -171,6 +302,11 @@ export async function paintTextLayersToCanvas(
       browserTextAssetByLayerId.delete(layerId);
       browserTextAssetKeyByLayerId.delete(layerId);
       browserTextLayoutKeyByLayerId.delete(layerId);
+      if (browserTextVisualSnapshotsByLayerId.delete(layerId)) {
+        browserTextVisualSnapshotListenersByLayerId
+          .get(layerId)
+          ?.forEach((listener) => listener());
+      }
     }
   }
 
@@ -217,6 +353,31 @@ export async function paintTextLayersToCanvas(
         void rasterPromise.catch(() => {
           if (browserTextRasterCache.get(rasterKey) === rasterPromise)
             browserTextRasterCache.delete(rasterKey);
+        });
+        void rasterPromise.then((asset) => {
+          if (asset.isFallbackFont) {
+            if (layer.fontFamily) {
+              const fontDesc = {
+                family: layer.fontFamily,
+                weight: layer.fontWeight,
+                style: layer.fontStyle,
+              };
+              void getFontLoader()
+                .ensureFont(fontDesc)
+                .finally(() => {
+                  if (browserTextRasterCache.get(rasterKey) === rasterPromise) {
+                    browserTextRasterCache.delete(rasterKey);
+                  }
+                  browserTextAssetByLayerId.delete(layer.layerId);
+                  browserTextAssetKeyByLayerId.delete(layer.layerId);
+                  browserTextLayoutKeyByLayerId.delete(layer.layerId);
+                });
+            } else {
+              if (browserTextRasterCache.get(rasterKey) === rasterPromise) {
+                browserTextRasterCache.delete(rasterKey);
+              }
+            }
+          }
         });
       } else {
         recordBrowserTextRasterCacheHit();
@@ -302,9 +463,53 @@ export async function paintTextLayersToCanvas(
       const centerY = isAbsolute
         ? posY + asset.height / 2
         : layer.y + layer.height / 2;
-      ctx.translate(centerX, centerY);
+      const isTemplate =
+        layer.clipKind === "text-template" || Boolean((layer as any).templateId);
+      const isContentBoundedTemplate =
+        isTemplate && !asset.bleedX && !asset.bleedY;
+      const baseW = isContentBoundedTemplate
+        ? (layer as { baseWidth?: number }).baseWidth || asset.width
+        : (layer as { baseWidth?: number }).baseWidth ?? layer.width;
+      const baseH = isContentBoundedTemplate
+        ? (layer as { baseHeight?: number }).baseHeight || asset.height
+        : (layer as { baseHeight?: number }).baseHeight ?? layer.height;
+      const scaleX = baseW > 0 ? layer.width / baseW : 1;
+      const scaleY = baseH > 0 ? layer.height / baseH : 1;
+      const assetX = centerX - (asset.width * scaleX) / 2;
+      const assetY = centerY - (asset.height * scaleY) / 2;
+      const presentation = resolveTextPresentationGeometry(
+        {
+          x: layer.x,
+          y: layer.y,
+          width: layer.width,
+          height: layer.height,
+          rotation: layer.rotation,
+        },
+        {
+          x: assetX,
+          y: assetY,
+          width: asset.width * scaleX,
+          height: asset.height * scaleY,
+        },
+      );
+      ctx.translate(presentation.pivotX, presentation.pivotY);
       ctx.rotate((layer.rotation * Math.PI) / 180);
-      ctx.drawImage(bitmap.source, -asset.width / 2, -asset.height / 2);
+      setBrowserTextVisualSnapshot(layer.layerId, {
+        x: presentation.layout.x,
+        y: presentation.layout.y,
+        displayWidth: presentation.layout.width,
+        displayHeight: presentation.layout.height,
+        pivotX: presentation.pivotX,
+        pivotY: presentation.pivotY,
+        selectionBoundsTight: false,
+      });
+      ctx.drawImage(
+        bitmap.source,
+        presentation.drawX - presentation.pivotX,
+        presentation.drawY - presentation.pivotY,
+        presentation.drawWidth,
+        presentation.drawHeight,
+      );
       ctx.restore();
       const paintMs = performance.now() - paintStartedAt;
       if (asset.timing) {
@@ -445,6 +650,8 @@ export function _clearBrowserTextRasterCache(): void {
   browserTextAssetByLayerId.clear();
   browserTextAssetKeyByLayerId.clear();
   browserTextLayoutKeyByLayerId.clear();
+  browserTextVisualSnapshotsByLayerId.clear();
+  browserTextVisualSnapshotListenersByLayerId.clear();
 }
 
 /** Exported for testing only. */
@@ -655,6 +862,7 @@ function buildNativeTextKeyObject(
     fontSize: layer.fontSize,
     fontWeight: layer.fontWeight,
     fontStyle: layer.fontStyle,
+    textDecoration: layer.textDecoration,
     color: includeColor ? layer.color : undefined,
     textAlign: layer.textAlign,
     verticalAlign: layer.verticalAlign,
@@ -921,13 +1129,16 @@ export function cropTemplateAsset(
   };
 }
 
-// Legacy function kept for non-template callers (currently unused — templates
-// now use cropTemplateAsset). Retained so any future call sites compile.
-function cropTransparentBounds(
+// Crop a plain-text raster after it has been measured. Point text routinely
+// carries invisible layout slack (especially after font fallback/overflow
+// expansion); keeping that slack in the texture makes a selection box much
+// larger than the glyphs. The crop is deliberately padding-free so the
+// transform target represents the rendered content, not safety pixels.
+export function cropTransparentBounds(
   rgba: Uint8ClampedArray,
   width: number,
   height: number,
-  padding = 8,
+  padding = 0,
 ): {
   rgba: Uint8ClampedArray;
   width: number;
@@ -960,6 +1171,10 @@ function cropTransparentBounds(
 interface TextLayoutMetrics {
   bleedX: number;
   bleedY: number;
+  baseWidth: number;
+  baseHeight: number;
+  originOffsetX: number;
+  originOffsetY: number;
   rasterWidth: number;
   rasterHeight: number;
   effectDefinition: ReturnType<typeof resolveNativeTextEffectDefinition>;
@@ -993,14 +1208,63 @@ export function getCachedLayoutMetrics(
   });
   const bleedX = Math.max(metrics.paddingX, bleed.x);
   const bleedY = Math.max(metrics.paddingY, bleed.y);
-  const baseWidth = layer.baseWidth ?? layer.width;
-  const baseHeight = layer.baseHeight ?? layer.height;
+  const authoredWidth = layer.baseWidth ?? layer.width;
+  const authoredHeight = layer.baseHeight ?? layer.height;
+  const isUnconstrainedPointText =
+    layer.textRole !== "caption" &&
+    !(typeof layer.maxWidth === "number" && layer.maxWidth > 0);
+  const contentBounds = isUnconstrainedPointText
+    ? measureTextEffectContentBounds({
+        text: layer.text,
+        fontFamily: layer.fontFamily,
+        fontSize: normalizedFontSize,
+        fontWeight: layer.fontWeight,
+        fontStyle: layer.fontStyle,
+        letterSpacing: layer.letterSpacing,
+        lineHeight: layer.lineHeight,
+        styleId: layer.styleId,
+        effectDefinition,
+        stroke: layer.stroke,
+        shadow: layer.shadow,
+        background: layer.background,
+        // Titles are point text; do not let a stale, narrow layer box become
+        // an implicit wrap/crop constraint while recovering its raster.
+        canvasWidth: Math.max(1920, authoredWidth),
+        textRole: layer.textRole,
+      })
+    : undefined;
+  // Never allow a stale persisted panel to crop the raster. Text bounds and
+  // Studio's renderer now measure through the same canvas implementation, so
+  // this expansion is the exact content-layout contract rather than a
+  // selection-only safety margin. The transform reconciler persists the same
+  // geometry for a selected clip; this rendering guard keeps unselected and
+  // legacy clips visible until that reconciliation completes.
+  const baseWidth = Math.max(authoredWidth, contentBounds?.contentWidth ?? 0);
+  const baseHeight = Math.max(authoredHeight, contentBounds?.contentHeight ?? 0);
+  const widthDelta = baseWidth - authoredWidth;
+  const heightDelta = baseHeight - authoredHeight;
+  const originOffsetX =
+    layer.textAlign === "left"
+      ? 0
+      : layer.textAlign === "right"
+        ? -widthDelta
+        : -widthDelta / 2;
+  const originOffsetY =
+    layer.verticalAlign === "top"
+      ? 0
+      : layer.verticalAlign === "bottom"
+        ? -heightDelta
+        : -heightDelta / 2;
   const rasterWidth = Math.max(1, Math.ceil(baseWidth + bleedX * 2));
   const rasterHeight = Math.max(1, Math.ceil(baseHeight + bleedY * 2));
 
   const result: TextLayoutMetrics = {
     bleedX,
     bleedY,
+    baseWidth,
+    baseHeight,
+    originOffsetX,
+    originOffsetY,
     rasterWidth,
     rasterHeight,
     effectDefinition,
@@ -1037,6 +1301,7 @@ export async function rasterizeTextLayerForNative(
 ): Promise<NativeTextRasterAsset> {
   const totalStartedAt = performance.now();
   let fontWaitMs = 0;
+  let isFallbackFont = false;
   // The raster must use the same font variant as Studio/source preview before
   // any glyph metrics or effect bounds are computed.
   if (layer.fontFamily) {
@@ -1056,7 +1321,7 @@ export async function rasterizeTextLayerForNative(
       const fontsReadyBudgetMs =
         options.phase === "visible-playback" ? 15 : 250;
       try {
-        await boundedPreviewWait(
+        const loadResult = await boundedPreviewWait(
           getFontLoader().ensureFont(fontDescriptor),
           fontWaitBudgetMs,
           `font "${layer.fontFamily}"`,
@@ -1068,7 +1333,11 @@ export async function rasterizeTextLayerForNative(
             "document.fonts.ready",
           );
         }
+        if (!loadResult?.loaded && !getFontLoader().isLoaded(fontDescriptor)) {
+          isFallbackFont = true;
+        }
       } catch {
+        isFallbackFont = true;
         // The rasterizer continues with the browser fallback font. The failure
         // is intentionally represented by telemetry rather than console noise.
       }
@@ -1080,6 +1349,10 @@ export async function rasterizeTextLayerForNative(
   const {
     bleedX,
     bleedY,
+    baseWidth,
+    baseHeight,
+    originOffsetX,
+    originOffsetY,
     rasterWidth: width,
     rasterHeight: height,
     effectDefinition,
@@ -1114,7 +1387,11 @@ export async function rasterizeTextLayerForNative(
   // ── Canonical effect fast-path: delegate to OffscreenCanvas Worker ─────────
   // Only the canonical scene path (effectDef.scene.effectLayers) is routed
   // off-thread. Legacy _buildConfig effects are CPU-light and stay on main thread.
-  if (layer.styleId && (layer.styleDefinition as any)?.scene?.effectLayers) {
+  if (
+    layer.styleId &&
+    layer.textDecoration !== "underline" &&
+    (layer.styleDefinition as any)?.scene?.effectLayers
+  ) {
     const rasterKey = buildNativeTextRasterKey(layer);
     const workerClient = getTemplateWorkerClient();
     if (workerClient) {
@@ -1133,8 +1410,6 @@ export async function rasterizeTextLayerForNative(
           Math.ceil(Number(canvas?.height) || 200),
         );
         const unscaledFontSize = normalizeFontSize(layer.fontSize);
-        const baseWidth = layer.baseWidth ?? layer.width;
-        const baseHeight = layer.baseHeight ?? layer.height;
         const evalWidth = Math.max(authoredWidth, Math.ceil(baseWidth + 400));
         const evalHeight = Math.max(
           authoredHeight,
@@ -1216,12 +1491,14 @@ export async function rasterizeTextLayerForNative(
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  const baseWidth = layer.baseWidth ?? layer.width;
-  const baseHeight = layer.baseHeight ?? layer.height;
+  const rasterLayer =
+    baseWidth === layer.width && baseHeight === layer.height
+      ? layer
+      : { ...layer, width: baseWidth, height: baseHeight, baseWidth, baseHeight };
   ctx.save();
   ctx.translate(baseWidth / 2 + bleedX, baseHeight / 2 + bleedY);
   const rasterStartedAt = performance.now();
-  await rasterizeTextLayer(ctx, layer, baseWidth, baseHeight, 1, 1);
+  await rasterizeTextLayer(ctx, rasterLayer, baseWidth, baseHeight, 1, 1);
   const rasterMs = performance.now() - rasterStartedAt;
   ctx.restore();
 
@@ -1241,6 +1518,14 @@ export async function rasterizeTextLayerForNative(
   const croppedTemplate = effectiveCropKey
     ? cropTemplateAsset(rgba, width, height, effectiveCropKey)
     : null;
+  const croppedPlainText =
+    !croppedTemplate &&
+    getTextRenderKind(layer) === "plain" &&
+    !layer.background &&
+    !(layer as { backgroundColor?: string }).backgroundColor
+      ? cropTransparentBounds(rgba, width, height)
+      : null;
+  const croppedAsset = croppedTemplate ?? croppedPlainText;
   const cacheKey = buildNativeTextRasterKey(layer);
   const timing = {
     phase: options.phase ?? "visible-playback",
@@ -1266,24 +1551,37 @@ export async function rasterizeTextLayerForNative(
     lineCount: Math.max(1, layer.text.split("\n").length),
     layoutWidth: baseWidth,
     layoutHeight: baseHeight,
+    authoredLayoutWidth: layer.baseWidth ?? layer.width,
+    authoredLayoutHeight: layer.baseHeight ?? layer.height,
+    rasterWidth: width,
+    rasterHeight: height,
+    overflowX: Math.max(0, baseWidth - (layer.baseWidth ?? layer.width)),
+    overflowY: Math.max(0, baseHeight - (layer.baseHeight ?? layer.height)),
+    textDecoration: layer.textDecoration ?? "none",
   };
   if (!options.deferTelemetry) traceTextRenderTiming(timing);
 
-  const resolvedX = croppedTemplate
-    ? layer.x - bleedX + croppedTemplate.offsetX
-    : layer.x - bleedX;
-  const resolvedY = croppedTemplate
-    ? layer.y - bleedY + croppedTemplate.offsetY
-    : layer.y - bleedY;
+  const resolvedX = croppedAsset
+    ? layer.x + originOffsetX - bleedX + croppedAsset.offsetX
+    : layer.x + originOffsetX - bleedX;
+  const resolvedY = croppedAsset
+    ? layer.y + originOffsetY - bleedY + croppedAsset.offsetY
+    : layer.y + originOffsetY - bleedY;
   const resolvedBleedX = resolvedX - layer.x;
   const resolvedBleedY = resolvedY - layer.y;
+  const expandedLayout =
+    baseWidth > (layer.baseWidth ?? layer.width) ||
+    baseHeight > (layer.baseHeight ?? layer.height);
+  const outputRgba = croppedAsset?.rgba ?? rgba;
+  const outputWidth = croppedAsset?.width ?? width;
+  const outputHeight = croppedAsset?.height ?? height;
 
   return {
     layerId: layer.layerId,
     assetId: `native-text:${layer.layerId}:${hashTextRasterKey(cacheKey)}`,
-    rgba: croppedTemplate?.rgba ?? rgba,
-    width: croppedTemplate?.width ?? width,
-    height: croppedTemplate?.height ?? height,
+    rgba: outputRgba,
+    width: outputWidth,
+    height: outputHeight,
     x: resolvedX,
     y: resolvedY,
     rotation: layer.rotation,
@@ -1291,9 +1589,17 @@ export async function rasterizeTextLayerForNative(
     zIndex: layer.zIndex,
     blendMode: layer.blendMode,
     isText: true,
-    ...(croppedTemplate ? { positionMode: "absolute" as const } : {}),
+    ...(isFallbackFont ? { isFallbackFont: true } : {}),
+    ...(croppedAsset || expandedLayout
+      ? { positionMode: "absolute" as const }
+      : {}),
+    ...(expandedLayout
+      ? { expandedPointText: true }
+      : {}),
     bleedX: resolvedBleedX,
     bleedY: resolvedBleedY,
+    visualBounds: measureVisibleAlphaBounds(outputRgba, outputWidth, outputHeight),
+    selectionBoundsTight: Boolean(croppedAsset),
     timing,
   };
 }
@@ -1301,5 +1607,7 @@ export async function rasterizeTextLayerForNative(
 function getTextRenderKind(layer: EvaluatedTextLayer): TextRenderKind {
   if (layer.templateId || layer.clipKind === "text-template") return "template";
   if (layer.styleId) return "effect";
+  if (layer.background?.bubblePresetId || (layer as any).bubblePresetId)
+    return "bubble";
   return "plain";
 }

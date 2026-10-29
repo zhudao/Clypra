@@ -6,29 +6,39 @@ import {
   resolveTextClipContentTransform,
 } from "@/lib/text/textClip";
 import { resolveCanonicalFamily } from "@/core/fonts/fontRegistry";
-import { buildClipPropertyTransform } from "../PropertiesPanel";
+import { buildClipPropertyTransform } from "../properties/core/PropertiesPanel";
 import type { TextClip } from "@/types";
 
 describe("Text Bounds Recalculation & Font Stack Resolution", () => {
   describe("resolveCanonicalFamily CSS Font Stacks", () => {
     it("resolves default fallback font stack 'Inter, system-ui, sans-serif' to 'Inter Variable'", () => {
-      expect(resolveCanonicalFamily("Inter, system-ui, sans-serif")).toBe("Inter Variable");
+      expect(resolveCanonicalFamily("Inter, system-ui, sans-serif")).toBe(
+        "Inter Variable",
+      );
     });
 
     it("resolves quoted variable font stack \"'Inter Variable', sans-serif\" to 'Inter Variable'", () => {
-      expect(resolveCanonicalFamily("'Inter Variable', sans-serif")).toBe("Inter Variable");
+      expect(resolveCanonicalFamily("'Inter Variable', sans-serif")).toBe(
+        "Inter Variable",
+      );
     });
 
     it("resolves Roboto fallback stack to 'Roboto Variable'", () => {
-      expect(resolveCanonicalFamily("Roboto, Arial, sans-serif")).toBe("Roboto Variable");
+      expect(resolveCanonicalFamily("Roboto, Arial, sans-serif")).toBe(
+        "Roboto Variable",
+      );
     });
 
     it("resolves Roboto Condensed stack to 'Roboto Condensed Variable'", () => {
-      expect(resolveCanonicalFamily("'Roboto Condensed', sans-serif")).toBe("Roboto Condensed Variable");
+      expect(resolveCanonicalFamily("'Roboto Condensed', sans-serif")).toBe(
+        "Roboto Condensed Variable",
+      );
     });
 
     it("preserves system fonts with generic fallbacks", () => {
-      expect(resolveCanonicalFamily("Times New Roman, serif")).toBe("Times New Roman");
+      expect(resolveCanonicalFamily("Times New Roman, serif")).toBe(
+        "Times New Roman",
+      );
       expect(resolveCanonicalFamily("Arial, sans-serif")).toBe("Arial");
     });
   });
@@ -93,6 +103,51 @@ describe("Text Bounds Recalculation & Font Stack Resolution", () => {
       ) as Partial<TextClip>;
 
       expect(updated.width!).toBeGreaterThan(shortClip.width * 3);
+    });
+
+    it("CLY-TEXT-034: refreshes transformed base bounds when a multiline background changes", () => {
+      const clip = {
+        ...createTextClip({
+          trackId: "track-1",
+          startTime: 0,
+          text: "HEY GUYS,\nABDULKABIR",
+          fontSize: 96,
+          canvasWidth: 1920,
+          canvasHeight: 1080,
+        }),
+        // These are persisted after a transform drag and are used by the
+        // native preview as the unscaled geometry contract.
+        baseWidth: 320,
+        baseHeight: 120,
+      } as TextClip;
+      const transformedClip: TextClip = {
+        ...clip,
+        width: clip.baseWidth! * 3.88,
+        height: clip.baseHeight! * 3.88,
+      };
+
+      const updated = resolveTextClipStyleUpdate(
+        transformedClip,
+        {
+          background: {
+            color: "#007aff",
+            padding: 8,
+            borderRadius: 0,
+            width: 18,
+            height: 12,
+            style: "split",
+          },
+        },
+        1920,
+        1080,
+      ) as Partial<TextClip>;
+
+      expect(updated.baseWidth).toBeDefined();
+      expect(updated.baseHeight).toBeDefined();
+      expect(updated.width! / updated.baseWidth!).toBeCloseTo(3.88, 5);
+      expect(updated.height! / updated.baseHeight!).toBeCloseTo(3.88, 5);
+      expect(updated.width).toBeGreaterThan(updated.baseWidth!);
+      expect(updated.height).toBeGreaterThan(updated.baseHeight!);
     });
 
     it("skips bounds recalculation when _skipTextBoundsRecalculation is set during live preview drag", () => {
@@ -173,7 +228,9 @@ describe("Text Bounds Recalculation & Font Stack Resolution", () => {
         fontSize: 400,
       };
 
-      expect(hasTextClipContentTransformDrift(staleClip, 1920, 1080)).toBe(true);
+      expect(hasTextClipContentTransformDrift(staleClip, 1920, 1080)).toBe(
+        true,
+      );
 
       const normalized = resolveTextClipContentTransform(
         staleClip,
@@ -190,7 +247,9 @@ describe("Text Bounds Recalculation & Font Stack Resolution", () => {
         ...normalized,
       };
 
-      expect(hasTextClipContentTransformDrift(reconciledClip, 1920, 1080)).toBe(false);
+      expect(hasTextClipContentTransformDrift(reconciledClip, 1920, 1080)).toBe(
+        false,
+      );
     });
   });
 });

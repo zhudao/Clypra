@@ -1,13 +1,14 @@
 /**
  * Motion Behavior & Kinetic Preset Contracts.
  *
- * Defines one-click animation presets across In (Build-In), Out (Build-Out),
+ * Defines one-click animation presets across In, Out,
  * and Loop (Continuous Emphasis) categories.
  */
 
 import type { KeyframeEasing, KeyframeSpringConfig } from "./keyframes";
 
 export type MotionBehaviorCategory = "in" | "out" | "loop";
+export type MotionSubCategory = "Basic" | "Motion" | "3D" | "Glitch";
 
 export interface ClipMotionConfig {
   inPreset?: string;
@@ -31,6 +32,8 @@ export interface MotionPresetMeta {
   id: string;
   name: string;
   category: MotionBehaviorCategory;
+  subCategory?: MotionSubCategory;
+  tags?: string[];
   description: string;
   defaultDuration?: number;
   defaultEasing?: KeyframeEasing;

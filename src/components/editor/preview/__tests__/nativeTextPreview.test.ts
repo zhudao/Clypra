@@ -9,7 +9,12 @@ import {
   resolveNativeTextEffectDefinition,
   _clearBrowserTextRasterCache,
   _getBrowserTextRasterPromise,
+  getBrowserTextVisualSnapshot,
+  measureVisibleAlphaBounds,
   _seedBrowserTextRasterCache,
+  cropTransparentBounds,
+  getCachedLayoutMetrics,
+  subscribeToBrowserTextVisualSnapshot,
 } from "../nativeTextPreview";
 
 function makeTextLayer(
@@ -56,6 +61,32 @@ function scene_for_layer(layer: ReturnType<typeof makeTextLayer>) {
 describe("native text raster compatibility", () => {
   beforeEach(() => {
     useEffectsStore.setState({ definitions: {} });
+  });
+
+  it("CLY-BUG-022: excludes transparent raster safety padding from selection geometry", () => {
+    // A 7×5 texture with a 3×2 visible glyph area starting at (2, 1).
+    const rgba = new Uint8ClampedArray(7 * 5 * 4);
+    for (let y = 1; y <= 2; y += 1) {
+      for (let x = 2; x <= 4; x += 1) {
+        rgba[(y * 7 + x) * 4 + 3] = 255;
+      }
+    }
+
+    expect(measureVisibleAlphaBounds(rgba, 7, 5)).toEqual({
+      x: 2,
+      y: 1,
+      width: 3,
+      height: 2,
+    });
+
+    // CLY-TEXT-022: plain text is now physically cropped before it reaches
+    // either presenter, so a stale texture cannot recreate invisible handles.
+    expect(cropTransparentBounds(rgba, 7, 5)).toMatchObject({
+      width: 3,
+      height: 2,
+      offsetX: 2,
+      offsetY: 1,
+    });
   });
 
   it("keeps identical Clypra Studio inputs cache-stable", () => {
@@ -187,6 +218,33 @@ describe("text layout metrics cache", () => {
     const a = makeTextLayer({ width: 640, height: 120 });
     const b = makeTextLayer({ width: 800, height: 200 });
     expect(buildNativeTextLayoutKey(a)).not.toBe(buildNativeTextLayoutKey(b));
+  });
+
+  it("CLY-TEXT-040: expands a stale multiline panel layout before the renderer can crop its trailing glyphs", () => {
+    const layer = makeTextLayer({
+      text: "HEY GUYS,\nABDULKABIR",
+      width: 320,
+      height: 240,
+      baseWidth: 320,
+      baseHeight: 240,
+      stroke: { color: "#000", width: 20 },
+      background: {
+        color: "#007aff",
+        padding: 8,
+        borderRadius: 0,
+        width: 18,
+        height: 12,
+        style: "split",
+      },
+    });
+    const metrics = getCachedLayoutMetrics(layer, buildNativeTextLayoutKey(layer));
+
+    expect(metrics.baseWidth).toBeGreaterThan(320);
+    expect(metrics.baseHeight).toBeGreaterThanOrEqual(240);
+    // Centered text preserves its visual center while the renderer widens a
+    // legacy/stale authored box to the content requirement.
+    expect(metrics.originOffsetX).toBeLessThan(0);
+    expect(metrics.originOffsetY).toBeCloseTo(0);
   });
 
   it("cache cleared between tests — _clearTextLayoutMetricsCache works", () => {
@@ -521,10 +579,19 @@ describe("browser preview blend mode painting", () => {
       positionMode: "absolute" as const,
       bleedX: assetX - layer.x, // = -5
       bleedY: assetY - layer.y, // = -10
+      // The selection snapshot must exclude this transparent safety margin.
+      visualBounds: { x: 15, y: 10, width: 170, height: 30 },
     } as any;
 
     const rasterKey = buildNativeTextRasterKey(layer);
     _seedBrowserTextRasterCache(rasterKey, prebuiltAsset);
+    let visualSnapshotChanges = 0;
+    const unsubscribeVisualSnapshot = subscribeToBrowserTextVisualSnapshot(
+      layer.layerId,
+      () => {
+        visualSnapshotChanges += 1;
+      },
+    );
 
     // Also make createImageData / putImageData available (jsdom provides these)
     await paintTextLayersToCanvas(
@@ -533,11 +600,22 @@ describe("browser preview blend mode painting", () => {
       "interactive-preview",
     );
 
-    // posX = asset.x = 95, centerX = 95 + 200/2 = 195
-    // posY = asset.y = 190, centerY = 190 + 50/2 = 215
+    // The draw texture is offset, but the text object itself rotates around
+    // the evaluated layout-box center.
     expect(ctx.translate).toHaveBeenCalled();
-    expect(translatedX).toBe(195);
-    expect(translatedY).toBe(215);
+    expect(translatedX).toBe(300);
+    expect(translatedY).toBe(250);
+    expect(getBrowserTextVisualSnapshot(layer.layerId)).toEqual({
+      x: layer.x,
+      y: layer.y,
+      displayWidth: layer.width,
+      displayHeight: layer.height,
+      pivotX: layer.x + layer.width / 2,
+      pivotY: layer.y + layer.height / 2,
+      selectionBoundsTight: false,
+    });
+    expect(visualSnapshotChanges).toBe(1);
+    unsubscribeVisualSnapshot();
   });
 
   it("CLY-BUG-006 (regression): non-absolute layers still use layer.x/y for center calculation", async () => {
@@ -597,5 +675,69 @@ describe("browser preview blend mode painting", () => {
     //               centerY = layer.y + layer.height/2 = 80 + 30 = 110
     expect(translatedX).toBe(200);
     expect(translatedY).toBe(110);
+  });
+
+  it("CLY-BUG-005: applies text scale animation transforms in canvas preview", async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1920;
+    canvas.height = 1080;
+    const ctx = canvas.getContext("2d")!;
+    let scaledX = 1;
+    let scaledY = 1;
+    ctx.scale = vi.fn().mockImplementation((sx: number, sy: number) => {
+      scaledX = sx;
+      scaledY = sy;
+    });
+    ctx.translate = vi.fn();
+    ctx.rotate = vi.fn();
+    ctx.save = vi.fn();
+    ctx.restore = vi.fn();
+    ctx.drawImage = vi.fn();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as any);
+
+    const layer = makeTextLayer({
+      layerId: "scale-animated-text",
+      x: 100,
+      y: 100,
+      baseWidth: 200,
+      baseHeight: 50,
+      width: 400,
+      height: 100,
+    });
+
+    const prebuiltAsset = {
+      layerId: layer.layerId,
+      assetId: `native-text:${layer.layerId}:seeded`,
+      rgba: new Uint8ClampedArray(200 * 50 * 4).fill(255),
+      width: 200,
+      height: 50,
+      x: 100,
+      y: 100,
+      rotation: 0,
+      opacity: 1,
+      zIndex: layer.zIndex,
+      blendMode: layer.blendMode,
+      isText: true,
+    } as any;
+
+    const rasterKey = buildNativeTextRasterKey(layer);
+    _seedBrowserTextRasterCache(rasterKey, prebuiltAsset);
+
+    await paintTextLayersToCanvas(
+      canvas,
+      scene_for_layer(layer),
+      "interactive-preview",
+    );
+
+    expect(ctx.scale).not.toHaveBeenCalled();
+    expect(scaledX).toBe(1);
+    expect(scaledY).toBe(1);
+    expect(ctx.drawImage).toHaveBeenCalledWith(
+      expect.anything(),
+      -200,
+      -50,
+      400,
+      100,
+    );
   });
 });
