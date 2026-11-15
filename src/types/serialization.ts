@@ -16,9 +16,23 @@
  */
 
 import { AUDIO_MODEL_VERSION, normalizeClipAudioProperties } from "./audio";
-import { CAPTION_MODEL_VERSION, type CaptionTrack } from "./captions";
-import type { Project, MediaAsset, Track, Clip, AspectRatio, TransitionTimelineItem, TimelineMarker, CanvasBackgroundConfig, MediaStreamInfo, DerivedMediaProvenance, ClipAudioProperties } from "./index";
+import { CAPTION_MODEL_VERSION, type CaptionTrack, type Transcript } from "./captions";
+import { migrateProjectToTranscripts } from "@/core/captions/transcriptMigration";
+import type {
+  Project,
+  MediaAsset,
+  Track,
+  Clip,
+  AspectRatio,
+  TransitionTimelineItem,
+  TimelineMarker,
+  CanvasBackgroundConfig,
+  MediaStreamInfo,
+  DerivedMediaProvenance,
+  ClipAudioProperties,
+} from "./index";
 import type { Gap } from "./gap";
+import { isValidFrameRate } from "@/store/settingsTypes";
 
 // ============================================================================
 // RUST TYPES (snake_case)
@@ -55,6 +69,7 @@ export interface RustProject {
   audio_model_version?: number | null;
   caption_model_version?: number | null;
   caption_tracks?: any[] | null;
+  transcripts?: Record<string, any> | null;
 }
 
 /**
@@ -161,6 +176,7 @@ export interface ProjectPersistenceSnapshot {
   gaps: Gap[];
   markers: TimelineMarker[];
   captionTracks?: CaptionTrack[];
+  transcripts?: Record<string, Transcript>;
   timelineSchemaVersion: number;
   epoch?: number;
   migrated: boolean;
@@ -173,13 +189,17 @@ export interface ProjectPersistenceSnapshot {
  * Existing clip-kind/conform/text-effect migrations remain centralized in the
  * Rust-to-frontend converters; this function makes the load boundary atomic.
  */
-export function validateAndMigrateProjectPayload(input: unknown): ProjectPersistenceSnapshot {
+export function validateAndMigrateProjectPayload(
+  input: unknown,
+): ProjectPersistenceSnapshot {
   let raw: any = input;
   if (typeof raw === "string") {
     try {
       raw = JSON.parse(raw);
     } catch (error) {
-      throw new Error(`Project JSON is malformed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `Project JSON is malformed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -188,30 +208,51 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
   const rust: any = {
     ...raw,
     created_at: raw.created_at ?? raw.createdAt ?? Date.now(),
-    modified_at: raw.modified_at ?? raw.updatedAt ?? raw.created_at ?? raw.createdAt ?? Date.now(),
+    modified_at:
+      raw.modified_at ??
+      raw.updatedAt ??
+      raw.created_at ??
+      raw.createdAt ??
+      Date.now(),
     aspect_ratio: raw.aspect_ratio ?? raw.aspectRatio,
     canvas_width: raw.canvas_width ?? raw.canvasWidth,
     canvas_height: raw.canvas_height ?? raw.canvasHeight,
     frame_rate: raw.frame_rate ?? raw.frameRate,
     media_assets: raw.media_assets ?? raw.mediaAssets,
     canvas_background: raw.canvas_background ?? raw.canvasBackground,
-    timeline_schema_version: raw.timeline_schema_version ?? raw.timelineSchemaVersion,
+    timeline_schema_version:
+      raw.timeline_schema_version ?? raw.timelineSchemaVersion,
     audio_model_version: raw.audio_model_version ?? raw.audioModelVersion,
     main_video_track_id: raw.main_video_track_id ?? raw.mainVideoTrackId,
   };
-  if (typeof rust.id !== "string" || !rust.id.trim()) throw new Error("Project payload is missing a valid id");
-  if (typeof rust.name !== "string" || !rust.name.trim()) throw new Error("Project payload is missing a valid name");
-  if (!Number.isFinite(rust.created_at) || !Number.isFinite(rust.modified_at)) throw new Error("Project timestamps are invalid");
+  if (typeof rust.id !== "string" || !rust.id.trim())
+    throw new Error("Project payload is missing a valid id");
+  if (typeof rust.name !== "string" || !rust.name.trim())
+    throw new Error("Project payload is missing a valid name");
+  if (!Number.isFinite(rust.created_at) || !Number.isFinite(rust.modified_at))
+    throw new Error("Project timestamps are invalid");
 
-  const arrays = ["tracks", "clips", "transitions", "gaps", "markers", "media_assets"] as const;
+  const arrays = [
+    "tracks",
+    "clips",
+    "transitions",
+    "gaps",
+    "markers",
+    "media_assets",
+  ] as const;
   for (const key of arrays) {
     const value = rust[key];
-    if (value !== undefined && !Array.isArray(value)) throw new Error(`Project field ${key} must be an array`);
+    if (value !== undefined && !Array.isArray(value))
+      throw new Error(`Project field ${key} must be an array`);
   }
 
   const project = fromRustProject(rust as RustProject);
-  const mediaAssets = (rust.media_assets ?? []).map((asset: RustMediaAsset) => fromRustMediaAsset(asset));
-  const tracks = ((rust.tracks ?? []) as RustTrack[]).map((track) => fromRustTrack(track));
+  const mediaAssets = (rust.media_assets ?? []).map((asset: RustMediaAsset) =>
+    fromRustMediaAsset(asset),
+  );
+  const tracks = ((rust.tracks ?? []) as RustTrack[]).map((track) =>
+    fromRustTrack(track),
+  );
   const clips = (rust.clips ?? []).map((clip: RustClip) => fromRustClip(clip));
   const transitions = (rust.transitions ?? []) as TransitionTimelineItem[];
   const gaps = (rust.gaps ?? []).map((gap: RustGap) => fromRustGap(gap));
@@ -221,11 +262,20 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
   // additions race before the serialization lock was in place). Keep only the
   // first occurrence of each ID and mark the project as migrated so it is
   // auto-saved in the repaired form.
-  const allItems = [...mediaAssets, ...tracks, ...clips, ...transitions, ...gaps, ...markers];
+  const allItems = [
+    ...mediaAssets,
+    ...tracks,
+    ...clips,
+    ...transitions,
+    ...gaps,
+    ...markers,
+  ];
   const ids = allItems.map((item: any) => item?.id).filter(Boolean);
   let hasDuplicates = new Set(ids).size !== ids.length;
   if (hasDuplicates) {
-    console.warn("[validateAndMigrateProjectPayload] Project contains duplicate editable item IDs — deduplicating for recovery");
+    console.warn(
+      "[validateAndMigrateProjectPayload] Project contains duplicate editable item IDs — deduplicating for recovery",
+    );
     const seenIds = new Set<string>();
     const dedup = <T extends { id?: string }>(arr: T[]): T[] =>
       arr.filter((item) => {
@@ -247,15 +297,21 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
 
   const trackIds = new Set(tracks.map((track) => track.id));
   // Drop orphan clips whose track was removed by deduplication
-  const orphanClipIds = clips.filter((c: any) => !trackIds.has(c.trackId)).map((c: any) => c.id);
+  const orphanClipIds = clips
+    .filter((c: any) => !trackIds.has(c.trackId))
+    .map((c: any) => c.id);
   if (orphanClipIds.length > 0) {
-    console.warn("[validateAndMigrateProjectPayload] Dropping orphan clips with missing track refs:", orphanClipIds);
+    console.warn(
+      "[validateAndMigrateProjectPayload] Dropping orphan clips with missing track refs:",
+      orphanClipIds,
+    );
     const validClips = clips.filter((c: any) => trackIds.has(c.trackId));
     clips.length = 0;
     clips.push(...validClips);
   }
   for (const clip of clips) {
-    if (!trackIds.has(clip.trackId)) throw new Error(`Clip ${clip.id} refers to a missing track`);
+    if (!trackIds.has(clip.trackId))
+      throw new Error(`Clip ${clip.id} refers to a missing track`);
   }
 
   const captionTracks: CaptionTrack[] = Array.isArray(rust.caption_tracks)
@@ -264,28 +320,45 @@ export function validateAndMigrateProjectPayload(input: unknown): ProjectPersist
       ? (raw.captionTracks as CaptionTrack[])
       : [];
 
-  const normalizedRust = toRustProject(project, {
+  // Migrate existing v1.5.0 caption TextClips into v2 Transcripts
+  const migrationResult = migrateProjectToTranscripts(
+    {
+      project,
+      clips,
+      captionTracks,
+    },
+    raw,
+  );
+  const effectiveProject = migrationResult.project;
+  const effectiveClips = migrationResult.clips;
+  const effectiveCaptionTracks = migrationResult.captionTracks;
+
+  const normalizedRust = toRustProject(effectiveProject, {
     mediaAssets,
     tracks,
-    clips,
+    clips: effectiveClips,
     transitions,
     gaps,
     markers,
-    captionTracks,
+    captionTracks: effectiveCaptionTracks,
     mainVideoTrackId: rust.main_video_track_id ?? null,
     updateModifiedTime: false,
   });
-  const migrated = hasDuplicates || JSON.stringify(normalizedRust) !== JSON.stringify(raw);
+  const migrated =
+    hasDuplicates ||
+    migrationResult.migrated ||
+    JSON.stringify(normalizedRust) !== JSON.stringify(raw);
   return {
-    project,
+    project: effectiveProject,
     mediaAssets,
     tracks,
-    clips,
+    clips: effectiveClips,
     transitions,
     gaps,
     markers,
-    captionTracks,
-    timelineSchemaVersion: project.timelineSchemaVersion ?? 1,
+    captionTracks: effectiveCaptionTracks,
+    transcripts: effectiveProject.transcripts,
+    timelineSchemaVersion: effectiveProject.timelineSchemaVersion ?? 1,
     migrated,
     rustProject: normalizedRust,
     mainVideoTrackId: rust.main_video_track_id ?? null,
@@ -315,7 +388,7 @@ export function fromRustProject(rust: RustProject): Project {
     aspectRatio: (rust.aspect_ratio ?? "16:9") as AspectRatio,
     canvasWidth: rust.canvas_width ?? 1920,
     canvasHeight: rust.canvas_height ?? 1080,
-    frameRate: (rust.frame_rate ?? 30) as 24 | 30 | 60,
+    frameRate: isValidFrameRate(rust.frame_rate) ? rust.frame_rate : 30,
     duration: rust.duration ?? 0,
     mediaAssets: rust.media_assets?.map(fromRustMediaAsset),
     canvasBackground: rust.canvas_background ?? undefined,
@@ -325,6 +398,7 @@ export function fromRustProject(rust: RustProject): Project {
     timelineSchemaVersion: rust.timeline_schema_version ?? 1,
     audioModelVersion: rust.audio_model_version ?? AUDIO_MODEL_VERSION,
     captionModelVersion: rust.caption_model_version ?? CAPTION_MODEL_VERSION,
+    transcripts: (rust as any).transcripts ?? undefined,
   };
 }
 
@@ -408,7 +482,14 @@ export function fromRustClip(rust: RustClip): Clip {
 
   // Professional Conform System migration: construct default conform from legacy fitMode
   let conform = rust.conform;
-  if (!conform && kind !== "audio" && kind !== "text" && kind !== "filter" && kind !== "video-effect" && kind !== "body-effect") {
+  if (
+    !conform &&
+    kind !== "audio" &&
+    kind !== "text" &&
+    kind !== "filter" &&
+    kind !== "video-effect" &&
+    kind !== "body-effect"
+  ) {
     let mode: "fit" | "fill" | "none" = "fit";
     if (rust.fitMode === "cover") {
       mode = "fill";
@@ -429,12 +510,12 @@ export function fromRustClip(rust: RustClip): Clip {
   const baseClip: Clip = {
     id: rust.id,
     kind, // Now always present after migration
-    trackId: rust.trackId,
-    mediaId: rust.mediaId,
-    startTime: rust.startTime,
+    trackId: rust.trackId ?? (rust as any).track_id,
+    mediaId: rust.mediaId ?? (rust as any).media_id,
+    startTime: rust.startTime ?? (rust as any).start_time,
     duration: rust.duration,
-    trimIn: rust.trimIn,
-    trimOut: rust.trimOut,
+    trimIn: rust.trimIn ?? (rust as any).trim_in,
+    trimOut: rust.trimOut ?? (rust as any).trim_out,
     x: rust.x,
     y: rust.y,
     width: rust.width,
@@ -450,21 +531,36 @@ export function fromRustClip(rust: RustClip): Clip {
 
   // Preserve all additional properties (e.g., TextClip properties)
   // This ensures text, fontFamily, fontSize, color, etc. are restored
-  const hasAudioModel = kind !== "text" && kind !== "filter" && kind !== "video-effect" && kind !== "body-effect" && kind !== "animated-overlay" && kind !== "smart-overlay";
+  const hasAudioModel =
+    kind !== "text" &&
+    kind !== "filter" &&
+    kind !== "video-effect" &&
+    kind !== "body-effect" &&
+    kind !== "animated-overlay" &&
+    kind !== "smart-overlay";
   const clip = {
     ...baseClip,
     ...rust,
-    ...(hasAudioModel ? { audio: normalizeClipAudioProperties({ ...rust, kind }) } : {}),
+    ...(hasAudioModel
+      ? { audio: normalizeClipAudioProperties({ ...rust, kind }) }
+      : {}),
   } as any;
   if (rust.style_definition) {
     clip.styleDefinition = rust.style_definition;
     delete clip.style_definition;
   }
 
-  const rawChildren = (rust as any).compoundChildren ?? (rust as any).compound_children;
+  const rawChildren =
+    (rust as any).compoundChildren ?? (rust as any).compound_children;
   if (Array.isArray(rawChildren)) {
-    clip.compoundChildren = rawChildren.map((child: RustClip) => fromRustClip(child));
+    clip.compoundChildren = rawChildren.map((child: RustClip) =>
+      fromRustClip(child),
+    );
     delete clip.compound_children;
+  }
+
+  if ((rust as any).text_role && !(clip as any).textRole) {
+    (clip as any).textRole = (rust as any).text_role;
   }
 
   return clip as Clip;
@@ -527,7 +623,8 @@ export function toRustProject(
     name: frontend.name,
     created_at: frontend.createdAt,
     // Only update modified_at when actually saving, not during round-trip serialization
-    modified_at: options?.updateModifiedTime !== false ? Date.now() : frontend.updatedAt,
+    modified_at:
+      options?.updateModifiedTime !== false ? Date.now() : frontend.updatedAt,
     aspect_ratio: frontend.aspectRatio,
     canvas_width: frontend.canvasWidth,
     canvas_height: frontend.canvasHeight,
@@ -544,8 +641,10 @@ export function toRustProject(
     creator_thumbnails: frontend.creatorThumbnails ?? undefined,
     timeline_schema_version: frontend.timelineSchemaVersion ?? 1,
     audio_model_version: frontend.audioModelVersion ?? AUDIO_MODEL_VERSION,
-    caption_model_version: frontend.captionModelVersion ?? CAPTION_MODEL_VERSION,
+    caption_model_version:
+      frontend.captionModelVersion ?? CAPTION_MODEL_VERSION,
     caption_tracks: options?.captionTracks ?? [],
+    transcripts: frontend.transcripts ?? {},
     ...(options?.mainVideoTrackId !== undefined
       ? { main_video_track_id: options.mainVideoTrackId }
       : {}),
@@ -592,7 +691,11 @@ export function toRustTrack(frontend: Track): RustTrack {
   // Map new track types to existing Rust types
   let rustType: RustTrack["type"];
 
-  if (frontend.type === "video-effect" || frontend.type === "body-effect" || frontend.type === "animated-overlay") {
+  if (
+    frontend.type === "video-effect" ||
+    frontend.type === "body-effect" ||
+    frontend.type === "animated-overlay"
+  ) {
     rustType = "video"; // Map effect/overlay tracks to video type for Rust
   } else {
     rustType = frontend.type as RustTrack["type"];
