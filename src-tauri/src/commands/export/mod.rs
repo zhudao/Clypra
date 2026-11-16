@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeBody, Request};
+use tauri::Manager;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -23,11 +24,24 @@ pub use types::*;
 /// Returns a session ID that can be used to write frames and finalize.
 #[tauri::command]
 pub async fn start_video_export(
+    app: tauri::AppHandle,
     config: ExportConfig,
     on_progress: Channel<ExportProgress>,
 ) -> Result<String, String> {
     // Validate export parameters
     validate_compositor_export_config(&config)?;
+
+    // Create dedicated offscreen composition session for this export, isolating
+    // it from the interactive preview session so that export frame rendering does
+    // not contend for the preview mutex lock. Mandatory: never fall back to interactive preview.
+    let gpu_ctx = app
+        .try_state::<Arc<crate::wgpu_compositor::GpuContext>>()
+        .ok_or_else(|| {
+            "GPU context is unavailable for dedicated export composition session".to_string()
+        })?;
+    let export_preview_session = Arc::new(tokio::sync::Mutex::new(
+        crate::wgpu_compositor::NativePreviewSession::new(gpu_ctx.inner().clone()),
+    ));
 
     // Generate session ID
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -173,6 +187,7 @@ pub async fn start_video_export(
         last_perf_log_time: std::time::Instant::now(),
         last_composited_frame: None,
         source_eof_fallback_frames: 0,
+        preview_session: export_preview_session,
     };
 
     // Store session wrapped in Arc<Mutex<ExportSession>>
@@ -528,11 +543,21 @@ pub async fn render_and_write_export_frame(
             .get(&session_id)
             .cloned()
             .ok_or_else(|| format!("Export session not found: {}", session_id))?
+    }; // The global map lock is released immediately before locking the session
+
+    let export_preview_session = {
+        let session = session_arc.lock().await;
+        session.preview_session.clone()
     };
 
-    let (rgba, used_source_eof_fallback) =
-        match crate::commands::native_preview::render_frame_request_rgba(&app, &request).await {
-            Ok(rgba) => (Arc::<[u8]>::from(rgba), false),
+    let (rgba, used_source_eof_fallback) = match crate::commands::native_preview::render_frame_request_rgba_with_session(
+        &app,
+        &export_preview_session,
+        &request,
+    )
+    .await
+    {
+        Ok(rgba) => (Arc::<[u8]>::from(rgba), false),
             Err(error) if is_terminal_source_eof_error(&error) => {
                 // A demuxer/container duration can extend just past the final decodable
                 // source frame. Only recover the terminal export frame; an earlier miss
@@ -654,11 +679,21 @@ pub async fn render_and_write_export_frames_batch(
             .get(&session_id)
             .cloned()
             .ok_or_else(|| format!("Export session not found: {}", session_id))?
+    }; // The global map lock is released immediately before locking the session
+
+    let export_preview_session = {
+        let session = session_arc.lock().await;
+        session.preview_session.clone()
     };
 
     let mut rendered_frames = Vec::with_capacity(requests.len());
     for req in &requests {
-        let rgba = crate::commands::native_preview::render_frame_request_rgba(&app, req).await?;
+        let rgba = crate::commands::native_preview::render_frame_request_rgba_with_session(
+            &app,
+            &export_preview_session,
+            req,
+        )
+        .await?;
         rendered_frames.push(rgba);
     }
 

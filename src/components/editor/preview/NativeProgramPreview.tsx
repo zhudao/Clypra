@@ -36,7 +36,10 @@ import { PreviewZoomControl } from "./PreviewZoomControl";
 import { useNativeSurfaceController } from "./useNativeSurfaceController";
 import { TransformOverlayMemoized as TransformOverlay } from "../transform/TransformOverlay";
 import { applyDragPreviewGeometry } from "./dragPreviewGeometry";
-import { setActiveProgramPreviewPresenter } from "./programPreviewPresenterState";
+import {
+  setActiveProgramPreviewPresenter,
+  getActiveProgramPreviewPresenter,
+} from "./programPreviewPresenterState";
 import { SafeOverlay } from "../viewport/SafeOverlay";
 import {
   useViewportKeyboardShortcuts,
@@ -45,6 +48,11 @@ import {
 } from "../viewport/ViewportControls";
 import { calculateDisplayTransform } from "@/lib/utils/coordinateSystem";
 import { PreviewLayoutManager } from "@/core/preview/PreviewLayoutManager";
+import {
+  registerPreviewRepaintHandler,
+  forceRepaintNativeProgramPreview,
+} from "@/core/preview/previewRepaintCoordinator";
+export { forceRepaintNativeProgramPreview };
 import {
   PreviewQualityManager,
   PreviewQualityTier,
@@ -57,6 +65,7 @@ import { cn } from "@/lib/utils";
 import { AspectRatio, type Clip } from "@/types";
 import { formatTime } from "@/lib/utils/timeFormatting";
 import { refitClipsForCanvasChange } from "@/lib/timeline/refitClips";
+import { isClipActiveAtTime } from "@/lib/timeline/timelineClip";
 import { useAudioSyncEngine } from "@/hooks/useAudioSyncEngine";
 import { toast } from "@/lib/toast";
 
@@ -125,6 +134,10 @@ import {
   shouldRenderPausedCanvasDuringNativeHandover,
   shouldRetainNativeSurfaceForPausedCanvasHandover,
 } from "./pausedNativeSurfaceEligibility";
+import {
+  rasterizeNativeEditorOverlay,
+  NativeEditorOverlayManager,
+} from "./nativeEditorOverlay";
 import {
   matchesPausedNativeDemand,
   PAUSED_NATIVE_DEMAND_ACK_TIMEOUT_MS,
@@ -339,29 +352,9 @@ function onFramePresentedOrPainted(
  * (the RAF loop is already running in that case).
  */
 let _globalPreviewWakeFn: (() => void) | null = null;
-let _globalPreviewForceRepaintFn: (() => void) | null = null;
-let _pendingForceRepaint = false;
 
 export function wakeNativeProgramPreviewRenderLoop(): void {
   _globalPreviewWakeFn?.();
-}
-
-/**
- * Force an unconditional canvas repaint on the next RAF tick.
- *
- * Use this after `hideNativeSurfaceWhenIdle()` or on editor project session start
- * to guarantee the WebView canvas is repainted with the current frame even if
- * time/epoch/clips haven't changed.
- *
- * If called before the preview render loop is mounted, the request is latched
- * and executed as soon as the render loop initializes.
- */
-export function forceRepaintNativeProgramPreview(): void {
-  if (_globalPreviewForceRepaintFn) {
-    _globalPreviewForceRepaintFn();
-  } else {
-    _pendingForceRepaint = true;
-  }
 }
 
 /**
@@ -597,6 +590,19 @@ export const NativeProgramPreview: React.FC = () => {
   const selectedClipIds = useUIStore((s) => s.selectedClipIds);
   const selectedTransitionId = useUIStore((s) => s.selectedTransitionId);
   const selectedGapId = useUIStore((s) => s.selectedGapId);
+  const showSettingsModal = useUIStore((s) => s.showSettingsModal);
+  const showExportModal = useUIStore((s) => s.showExportModal);
+  const showNewProjectModal = useUIStore((s) => s.showNewProjectModal);
+  const showTransferModal = useUIStore((s) => s.showTransferModal);
+  const activeCurveEditor = useUIStore((s) => s.activeCurveEditor);
+
+  const isAnyModalOpen = Boolean(
+    showSettingsModal ||
+    showExportModal ||
+    showNewProjectModal ||
+    showTransferModal ||
+    activeCurveEditor !== null,
+  );
 
   const viewport = useViewportState();
 
@@ -660,6 +666,7 @@ export const NativeProgramPreview: React.FC = () => {
     safeOverlayVisible: false,
     karaokeOverlayVisible: false,
     previewMenuOpen: false,
+    isAnyModalOpen: false,
   });
   pausedOverlayStateRef.current = {
     hasSelectedClip: selectedClipIds.length > 0,
@@ -668,15 +675,16 @@ export const NativeProgramPreview: React.FC = () => {
     safeOverlayVisible: showSafeOverlay,
     karaokeOverlayVisible: karaokeOverlayEnabled,
     previewMenuOpen: anyPreviewMenuOpen,
+    isAnyModalOpen,
   };
 
   useEffect(() => {
-    if (anyPreviewMenuOpen) {
+    if (anyPreviewMenuOpen || isAnyModalOpen) {
       void hideNativeSurfaceWhenIdle().catch(() => undefined);
     } else {
       forceRepaintNativeProgramPreview();
     }
-  }, [anyPreviewMenuOpen]);
+  }, [anyPreviewMenuOpen, isAnyModalOpen]);
 
   // A native child surface is above the WebView. Wake the paused renderer when
   // an overlay begins or stops needing DOM layering so it can immediately
@@ -689,6 +697,7 @@ export const NativeProgramPreview: React.FC = () => {
     selectedGapId,
     showSafeOverlay,
     karaokeOverlayEnabled,
+    isAnyModalOpen,
   ]);
 
   const previewContainerRef = useRef<HTMLDivElement>(null);
@@ -1502,6 +1511,7 @@ export const NativeProgramPreview: React.FC = () => {
       return;
     }
     const nativeRasterBridge = sessionNativeRasterBridge;
+    const nativeEditorOverlayManager = new NativeEditorOverlayManager();
     // tracePlayback("playback-loop-start", {
     //   projectId: project.id,
     //   sessionId: capturedSession.sessionId,
@@ -3000,18 +3010,12 @@ export const NativeProgramPreview: React.FC = () => {
     // Publish to the module-level registry so external callers (TopBar, modals)
     // can force a canvas repaint after hiding the native surface.
     _globalPreviewWakeFn = scheduleNextFrame;
-    // forceRepaint sets the dirty flag first so mightNeedRender is guaranteed true,
-    // then schedules the next frame — needed when time/epoch/clips are all unchanged
-    // (e.g. immediately after closing the export dialog with a hidden native surface).
-    _globalPreviewForceRepaintFn = () => {
+    // Register with previewRepaintCoordinator so external callers (TopBar, modals, overlays)
+    // can force a canvas repaint after hiding the native surface.
+    const unregisterRepaintHandler = registerPreviewRepaintHandler(() => {
       forceRenderNeeded = true;
       scheduleNextFrame();
-    };
-    if (_pendingForceRepaint) {
-      _pendingForceRepaint = false;
-      forceRenderNeeded = true;
-      scheduleNextFrame();
-    }
+    });
 
     // Transform feedback is an ephemeral render concern. Keep it outside
     // renderStateRef and Zustand so a pointer drag cannot invalidate every
@@ -3415,10 +3419,69 @@ export const NativeProgramPreview: React.FC = () => {
           forceRenderNeeded = true;
           return;
         }
+        const currentSelectedClipIds = useUIStore.getState().selectedClipIds;
+        const allClips =
+          renderClips.length > 0 ? renderClips : (state.clips ?? []);
+        const selectedClips =
+          !isPlaying && currentSelectedClipIds.length > 0
+            ? allClips.filter(
+                (c) =>
+                  currentSelectedClipIds.includes(c.id) &&
+                  isClipActiveAtTime(c, state.clock.currentTime),
+              )
+            : [];
+        const activeGuides = transformController.getActiveGuides();
+        const overlayNeeded =
+          !isPlaying &&
+          (selectedClips.length > 0 ||
+            pausedOverlayStateRef.current.safeOverlayVisible ||
+            activeGuides !== null);
+        const projectCanvasWidth = state.canvasWidth || 1920;
+        const projectCanvasHeight = state.canvasHeight || 1080;
+        const previewScale =
+          state.displayWidth && state.canvasWidth
+            ? state.displayWidth / state.canvasWidth
+            : (state.scale || 1);
+        const nativeEditorOverlay = overlayNeeded
+          ? await nativeEditorOverlayManager.getOrRegisterOverlay({
+              canvasWidth: projectCanvasWidth,
+              canvasHeight: projectCanvasHeight,
+              previewScale,
+              selectedClips,
+              safeOverlayVisible:
+                pausedOverlayStateRef.current.safeOverlayVisible,
+              activeGuides,
+              frameIndex,
+              currentTime: state.clock.currentTime,
+            })
+          : null;
+        if (!overlayNeeded && nativeEditorOverlayManager.hasActiveOverlay()) {
+          void nativeEditorOverlayManager.cleanupLingeringAssets();
+        }
+        const nativeOverlaySupported =
+          !overlayNeeded || nativeEditorOverlay !== null;
+
+        if (
+          nativeEditorOverlay &&
+          nativeEditorOverlayManager.getLastUploadDurationMs() > 0
+        ) {
+          tracePlayback("native-overlay-registered", {
+            assetId: nativeEditorOverlay.assetId,
+            rasterizeMs: Number(
+              nativeEditorOverlayManager.getLastRasterizeDurationMs().toFixed(2),
+            ),
+            uploadMs: Number(
+              nativeEditorOverlayManager.getLastUploadDurationMs().toFixed(2),
+            ),
+            frameIndex,
+          });
+        }
+
         const nativeRasterLayers = [
           ...nativeBridgeRasters,
           ...nativeBodyMasks,
           ...nativeSmartOverlays,
+          ...(nativeEditorOverlay ? [nativeEditorOverlay] : []),
         ];
         const t0Eval = performance.now();
         const testEffectOverlay =
@@ -3692,7 +3755,10 @@ export const NativeProgramPreview: React.FC = () => {
           canPresentPausedFrameOnNativeSurface({
             surfaceUsable: nativeSurfaceUsable,
             qualificationForcesWebView,
+            nativeOverlaySupported,
             ...pausedOverlayStateRef.current,
+            hasSelectedClip: currentSelectedClipIds.length > 0,
+            isAnyModalOpen: pausedOverlayStateRef.current.isAnyModalOpen,
           });
         const nativeDirectSurfacePath =
           nativeSurfaceUsable &&
@@ -3836,7 +3902,8 @@ export const NativeProgramPreview: React.FC = () => {
           nativeSurfaceShown &&
           (!nativeDirectSurfacePath ||
             !nativeSurfaceUsable ||
-            (!nativeRequest && !nativeSurfaceOwnsCurrentFrame));
+            (!nativeRequest && !nativeSurfaceOwnsCurrentFrame) ||
+            pausedOverlayStateRef.current.isAnyModalOpen);
         if (nativeSurfaceNeedsHide) {
           const retainForPausedCanvasHandover =
             shouldRetainNativeSurfaceForPausedCanvasHandover({
@@ -3846,8 +3913,12 @@ export const NativeProgramPreview: React.FC = () => {
               hasNativeRequest: nativeRequest !== null,
               nativeDirectSurfacePath,
             });
-          if (!nativeSurfaceUsable || !nativeRequest) {
-            // Unrecoverable surface error or empty scene: hide immediately
+          if (
+            !nativeSurfaceUsable ||
+            !nativeRequest ||
+            pausedOverlayStateRef.current.isAnyModalOpen
+          ) {
+            // Unrecoverable surface error, empty scene, or modal open: hide immediately
             if (handoverSafetyTimer !== null) {
               window.clearTimeout(handoverSafetyTimer);
               handoverSafetyTimer = null;
@@ -4495,7 +4566,11 @@ export const NativeProgramPreview: React.FC = () => {
                               "running" &&
                             previewQualificationController.getState().path ===
                               "webview",
+                          nativeOverlaySupported,
                           ...pausedOverlayStateRef.current,
+                          hasSelectedClip: currentSelectedClipIds.length > 0,
+                          isAnyModalOpen:
+                            pausedOverlayStateRef.current.isAnyModalOpen,
                         });
                       const canRetainPresentedSurface =
                         isActive &&
@@ -5370,6 +5445,7 @@ export const NativeProgramPreview: React.FC = () => {
       //   renderInFlight,
       // });
       isActive = false;
+      void nativeEditorOverlayManager.cleanupLingeringAssets();
       unsubscribeLifecycleWakeup();
       unsubscribeLifecycleSleep();
       if (unlistenMaskEviction) unlistenMaskEviction();
@@ -5393,9 +5469,7 @@ export const NativeProgramPreview: React.FC = () => {
       if (_globalPreviewWakeFn === scheduleNextFrame) {
         _globalPreviewWakeFn = null;
       }
-      if (_globalPreviewForceRepaintFn) {
-        _globalPreviewForceRepaintFn = null;
-      }
+      unregisterRepaintHandler();
       if (rafId !== null) cancelAnimationFrame(rafId);
       frameScheduled = false;
       if (handoverSafetyTimer !== null) {
@@ -5552,7 +5626,10 @@ export const NativeProgramPreview: React.FC = () => {
                 />
 
                 <SafeOverlay
-                  visible={showSafeOverlay}
+                  visible={
+                    showSafeOverlay &&
+                    getActiveProgramPreviewPresenter() !== "native-surface"
+                  }
                   displayWidth={displayWidth}
                   displayHeight={displayHeight}
                   displayOffset={{ x: offsetX, y: offsetY }}
