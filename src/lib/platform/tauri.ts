@@ -1,5 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AudioFadeCurve, DensityLevel, ThumbnailTile } from "../../types";
 import type { ColdStartReport } from "../../services/telemetryCollector";
@@ -15,6 +15,7 @@ import type {
   NativePreviewPerformanceReport,
   NativePlaybackPlan,
   NativePlaybackFrameDemand,
+  NativePlaybackDemandAbandonment,
   NativePlaybackState,
   NativeFrameTime,
   NativeSurfaceGeometry,
@@ -24,6 +25,7 @@ import type {
   NativeSyncMetricsSnapshot,
   NativeFramesBySource,
   NativeSessionSnapshot,
+  NativeScrubExperimentContext,
 } from "./nativeCore";
 import { recordRasterUpload } from "@/lib/playback/textMetrics";
 
@@ -713,6 +715,14 @@ export async function submitNativePlaybackDemand(
   await invoke("submit_native_playback_demand", { demand });
 }
 
+/** Finalize a native demand that the frontend abandoned waiting for. */
+export async function abandonNativePlaybackDemand(
+  abandonment: NativePlaybackDemandAbandonment,
+): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  return invoke<boolean>("abandon_native_playback_demand", { payload: abandonment });
+}
+
 /**
  * Fired by the Rust-owned latest-only render session after an explicit demand
  * has actually reached the retained surface. Unlike the demand command's
@@ -727,6 +737,16 @@ export function listenForNativePlaybackDemandPresented(
   );
 }
 
+/** Fired when an accepted latest-value demand terminates before presentation. */
+export function listenForNativePlaybackDemandTerminal(
+  onTerminal: (terminal: import("./nativeCore").NativePlaybackDemandTerminal) => void,
+): Promise<UnlistenFn> {
+  return listen<import("./nativeCore").NativePlaybackDemandTerminal>(
+    "clypra://native-playback-demand-terminal",
+    (event) => onTerminal(event.payload),
+  );
+}
+
 export interface NativePlaybackStatsPayload {
   framesRendered: number;
   fps: number;
@@ -736,6 +756,55 @@ export interface NativePlaybackStatsPayload {
   maxFrameMs: number;
   dropped: number;
   stackedStreams: number;
+  /** Continuous playback accounting; paused seeks are excluded. */
+  playbackSubmissions: number;
+  playbackCompletions: number;
+  playbackSupersessions: number;
+  playbackLookaheadMisses: number;
+  nativeState: "playing";
+  demandClass: "continuous_playback";
+}
+
+export interface RuntimeFlagProfile {
+  profile: "dev" | "release";
+  trace: { enabled: boolean; source: string };
+  validateStages: { enabled: boolean; source: string };
+  requireZeroCopy: { enabled: boolean; source: string };
+  decodePath: string;
+  decodePathSource: string;
+  allowUnverified: { enabled: boolean; source: string };
+  disableDirtyRecovery: { enabled: boolean; source: string };
+}
+
+export interface NativeDiagnosticPayload {
+  level?: string;
+  source?: string;
+  code?: string;
+  message?: string;
+  timestampEpochMs?: number;
+}
+
+export async function getRuntimeFlagProfile(): Promise<RuntimeFlagProfile> {
+  if (!isTauriRuntime()) {
+    throw new Error("getRuntimeFlagProfile requires the Tauri runtime");
+  }
+  return invoke<RuntimeFlagProfile>("get_runtime_flag_profile");
+}
+
+export function listenForNativeDiagnostics(
+  onDiagnostic: (diagnostic: NativeDiagnosticPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<NativeDiagnosticPayload>("clypra://native-diagnostic", (event) => {
+    onDiagnostic(event.payload);
+  });
+}
+
+/** Emit a local diagnostic event for the perf-log bridge. */
+export async function emitNativeDiagnostic(
+  payload: Record<string, unknown>,
+): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await emit("clypra://native-diagnostic", payload);
 }
 
 /** Listen for rolling real-time playback telemetry from Rust. */
@@ -747,6 +816,16 @@ export function listenForNativePlaybackStats(
     (event) => {
       onStats(event.payload);
     },
+  );
+}
+
+/** Listen for presentation progress from continuous native playback. */
+export function listenForNativePlaybackProgress(
+  onProgress: (progress: { frameIndex: number; generation?: number }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ frameIndex: number; generation?: number }>(
+    "clypra://native-playback-progress",
+    (event) => onProgress(event.payload),
   );
 }
 
@@ -1022,6 +1101,16 @@ export async function resetNativeSessionTelemetry(): Promise<void> {
     throw new Error("resetNativeSessionTelemetry requires the Tauri runtime");
   }
   return invoke<void>("reset_session_telemetry");
+}
+
+/** Debug-only controlled scrub experiment marker for local Tauri sessions. */
+export async function setNativeScrubExperimentContext(
+  context: NativeScrubExperimentContext,
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("setNativeScrubExperimentContext requires the Tauri runtime");
+  }
+  return invoke<void>("set_native_scrub_experiment_context", { payload: context });
 }
 
 export async function getNativeGpuStatus(): Promise<NativeGpuRuntimeStatus> {
@@ -1397,10 +1486,16 @@ export async function setNativeAudioOutput(
   await invoke("set_native_audio_output", { volume, muted });
 }
 
-export async function seekNativeAudio(positionTicks: number): Promise<void> {
+export async function seekNativeAudio(
+  positionTicks: number,
+  correlation?: { generation?: number },
+): Promise<void> {
   if (!isTauriRuntime())
     throw new Error("seekNativeAudio requires the Tauri runtime");
-  await invoke("seek_native_audio", { positionTicks });
+  await invoke("seek_native_audio", {
+    positionTicks,
+    generation: correlation?.generation,
+  });
 }
 
 export async function loadNativeAudioClip(options: {

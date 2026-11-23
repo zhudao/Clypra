@@ -34,7 +34,7 @@ import { useViewportState } from "@/hooks/useViewportController";
 import { PreviewTransport } from "./PreviewTransport";
 import { PreviewZoomControl } from "./PreviewZoomControl";
 import { useNativeSurfaceController } from "./useNativeSurfaceController";
-import { TransformOverlayMemoized as TransformOverlay } from "../transform/TransformOverlay";
+import { NativeInteractionOverlay } from "../transform/NativeInteractionOverlay";
 import { applyDragPreviewGeometry } from "./dragPreviewGeometry";
 import {
   setActiveProgramPreviewPresenter,
@@ -50,6 +50,7 @@ import { calculateDisplayTransform } from "@/lib/utils/coordinateSystem";
 import { PreviewLayoutManager } from "@/core/preview/PreviewLayoutManager";
 import {
   registerPreviewRepaintHandler,
+  registerPreviewWakeHandler,
   forceRepaintNativeProgramPreview,
 } from "@/core/preview/previewRepaintCoordinator";
 export { forceRepaintNativeProgramPreview };
@@ -68,6 +69,7 @@ import { refitClipsForCanvasChange } from "@/lib/timeline/refitClips";
 import { isClipActiveAtTime } from "@/lib/timeline/timelineClip";
 import { useAudioSyncEngine } from "@/hooks/useAudioSyncEngine";
 import { toast } from "@/lib/toast";
+import { useI18n } from "@/i18n";
 
 import { AspectSelector } from "./AspectSelector";
 import { PlaybackSpeedSelector } from "./PlaybackSpeedSelector";
@@ -78,6 +80,7 @@ import { clampAndSnapProgramTime } from "@/lib/timeline/programTimelineBridge";
 import {
   tracePlayback,
   traceSlowPlaybackStage,
+  setPlaybackTraceEnabled,
 } from "@/core/playback/playbackTrace";
 import { traceAudioEvent } from "@/core/playback/audioTrace"; // INVESTIGATION ONLY — remove before Phase 6
 import {
@@ -92,6 +95,7 @@ import {
   configureNativePlaybackRender,
   updateNativePlaybackRender,
   submitNativePlaybackDemand,
+  abandonNativePlaybackDemand,
   getNativeFrameServiceStats,
   getNativeFrameServiceSamples,
   getNativeSyncMetricsSnapshot,
@@ -105,8 +109,13 @@ import {
   closeNativePlaybackPushStream,
   queueNativeFrame,
   listenForNativePlaybackStats,
+  listenForNativePlaybackProgress,
+  emitNativeDiagnostic,
+  getRuntimeFlagProfile,
+  listenForNativeDiagnostics,
   listenForNativePlaybackStartup,
   listenForNativePlaybackDemandPresented,
+  listenForNativePlaybackDemandTerminal,
   listenForEngineQoSDecision,
   listenForNativeMaskEviction,
   listenForNativeRasterEviction,
@@ -114,7 +123,9 @@ import {
   recordColdStartSpan,
   markFirstFramePainted,
   type NativePlaybackStatsPayload,
+  type RuntimeFlagProfile,
 } from "@/lib/platform/tauri";
+import { NativePlaybackWatchdog } from "@/core/playback/nativePlaybackWatchdog";
 import { telemetryCollector } from "@/services/telemetryCollector";
 import type { TelemetryPreviewContext } from "@/services/telemetryCollector";
 import { perfLogService } from "@/services/perfLogService";
@@ -143,6 +154,7 @@ import {
   PAUSED_NATIVE_DEMAND_ACK_TIMEOUT_MS,
   shouldFallbackForPausedNativeDemand,
   createNativeDemandOperationId,
+  shouldClearPendingPausedNativeDemandOnTerminal,
   telemetryRequestToken,
 } from "./pausedNativeDemandLifecycle";
 
@@ -181,6 +193,21 @@ import {
   WebViewCanvasOutput,
 } from "@/core/playback/previewOutputAdapters";
 import { ensureNativeFontsRegistered } from "@/core/fonts/nativeFontRegistry";
+import {
+  decideNativeScrubDemandDispatch,
+  type NativeScrubDemandPacingState,
+} from "@/core/playback/nativeScrubDemandPacing";
+import {
+  resolveNativeScrubDemandLifecycle,
+  resolveNativeScrubDirection,
+  shouldInvalidateNativeScrubDemand,
+  type NativeScrubDirection,
+  type NativeScrubDemandLifecycleState,
+} from "@/core/playback/nativeScrubDemandLifecycle";
+import {
+  decidePausedNativeDemandAction,
+  type PausedNativeDemandIdentity,
+} from "@/core/playback/pausedNativeDemandState";
 import {
   EMBEDDED_PREVIEW_ONLY,
   NATIVE_PREVIEW_ONLY,
@@ -547,34 +574,8 @@ const ConnectedProgramTransport: React.FC<ConnectedProgramTransportProps> =
     );
   });
 
-interface ConnectedTransformOverlayProps extends Omit<
-  React.ComponentProps<typeof TransformOverlay>,
-  "currentTime" | "visible"
-> {}
-
-/**
- * Playback is a leaf concern for the transform overlay. Keeping this clock
- * subscription here prevents playhead ticks from re-rendering the preview
- * container, canvas host, and native-surface coordination tree.
- */
-const ConnectedTransformOverlay = React.memo(
-  (props: ConnectedTransformOverlayProps) => {
-    const clockState = usePlaybackClock();
-    const { pause } = useTransportControls();
-
-    return (
-      <TransformOverlay
-        {...props}
-        currentTime={clockState.time}
-        visible={clockState.state !== "playing"}
-        interactionMode={clockState.state === "playing" ? "playing" : "editing"}
-        onPlaybackInteraction={pause}
-      />
-    );
-  },
-);
-
 export const NativeProgramPreview: React.FC = () => {
+  const { t } = useI18n();
   const karaokeOverlayEnabled = useCaptionStore((s) => s.karaokeOverlayEnabled);
   const project = useProjectStore((s) => s.project);
   const projectInitializing = useProjectStore(
@@ -595,13 +596,15 @@ export const NativeProgramPreview: React.FC = () => {
   const showNewProjectModal = useUIStore((s) => s.showNewProjectModal);
   const showTransferModal = useUIStore((s) => s.showTransferModal);
   const activeCurveEditor = useUIStore((s) => s.activeCurveEditor);
+  const activeOverlayIds = useUIStore((s) => s.activeOverlayIds);
 
   const isAnyModalOpen = Boolean(
     showSettingsModal ||
     showExportModal ||
     showNewProjectModal ||
     showTransferModal ||
-    activeCurveEditor !== null,
+    activeCurveEditor !== null ||
+    activeOverlayIds.length > 0,
   );
 
   const viewport = useViewportState();
@@ -630,6 +633,47 @@ export const NativeProgramPreview: React.FC = () => {
   const [activeSession, setActiveSession] = useState<ProjectSession | null>(
     () => getActiveSessionOrNull(),
   );
+  const [runtimeFlagProfile, setRuntimeFlagProfile] =
+    useState<RuntimeFlagProfile | null>(null);
+  const [zeroCopyViolationCount, setZeroCopyViolationCount] = useState(0);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let mounted = true;
+    void getRuntimeFlagProfile()
+      .then((profile) => {
+        if (mounted) {
+          setRuntimeFlagProfile(profile);
+          setPlaybackTraceEnabled(profile.trace.enabled);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+    void listenForNativeDiagnostics((diagnostic) => {
+      if (
+        mounted &&
+        diagnostic.source === "native-preview" &&
+        diagnostic.code === "zero-copy-violation"
+      ) {
+        setZeroCopyViolationCount((count) => count + 1);
+      }
+    }).then((cleanup) => {
+      if (mounted) unlisten = cleanup;
+      else cleanup();
+    });
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     return subscribeToSessionChanges(() => {
@@ -770,6 +814,8 @@ export const NativeProgramPreview: React.FC = () => {
     surface: "dom-canvas",
     runtimeEnvironment: import.meta.env.DEV ? "development" : "production",
   });
+  const previewContextIdRef = useRef(0);
+  const lastPreviewContextFingerprintRef = useRef("");
   // Native telemetry is read through the service's bounded sequence cursor.
   // This preserves every retained observation between polls without creating
   // a measurement when the editor is idle.
@@ -1470,11 +1516,14 @@ export const NativeProgramPreview: React.FC = () => {
     let nativeTextPrefetchTimer: number | null = null;
 
     let nativeSurfaceShown = false;
+    const nativePlaybackWatchdog = new NativePlaybackWatchdog();
     let pendingHandoverSurfaceHide = false;
     let handoverSafetyTimer: number | null = null;
     let unlistenStartupMilestone: (() => void) | null = null;
     let unlistenPlaybackStats: (() => void) | null = null;
+    let unlistenPlaybackProgress: (() => void) | null = null;
     let unlistenDemandPresentation: (() => void) | null = null;
+    let unlistenDemandTerminal: (() => void) | null = null;
     let lastNativePlaybackRequestKey = "";
     if (isTauriRuntime()) {
       void listenForNativePlaybackStartup(({ stage }) => {
@@ -1500,6 +1549,15 @@ export const NativeProgramPreview: React.FC = () => {
       capturedSession.transportAuthority?.getSeekController();
     let latestSeekIntent: SeekIntent | null =
       seekController?.getCurrent() ?? null;
+    let previousNativeCancellationIntent: {
+      time: number;
+      isScrubbing: boolean;
+    } | null = latestSeekIntent
+      ? {
+          time: latestSeekIntent.time,
+          isScrubbing: latestSeekIntent.isScrubbing,
+        }
+      : null;
     let visibleRequestGeneration = seekController?.getGeneration() ?? 0;
     let transportRevision = 0;
     let activeTimelineEditStartedAt: number | null = null;
@@ -1511,6 +1569,15 @@ export const NativeProgramPreview: React.FC = () => {
       return;
     }
     const nativeRasterBridge = sessionNativeRasterBridge;
+    if (isTauriRuntime()) {
+      void listenForNativePlaybackProgress(({ frameIndex }) => {
+        nativePlaybackWatchdog.recordPresentation(frameIndex, performance.now());
+        nativeSurfaceShown = true;
+      }).then((fn) => {
+        if (!isActive) fn();
+        else unlistenPlaybackProgress = fn;
+      });
+    }
     const nativeEditorOverlayManager = new NativeEditorOverlayManager();
     // tracePlayback("playback-loop-start", {
     //   projectId: project.id,
@@ -1528,6 +1595,10 @@ export const NativeProgramPreview: React.FC = () => {
     >();
     const nativeFrontendPerfSpans = new Map<string, NativePerfSpan>();
     let nativeDemandSequence = 0;
+    let nativeScrubDemandPacing: NativeScrubDemandPacingState | null = null;
+    let nativeScrubDemandLifecycle: NativeScrubDemandLifecycleState | null =
+      null;
+    let nativeScrubDemandSnapshotKey = "";
     const createDemandOperationRequest = (
       request: NativeFrameRequest,
       generation: number,
@@ -1545,6 +1616,9 @@ export const NativeProgramPreview: React.FC = () => {
       requestId: string;
       generation: number;
       frameIndex: number;
+      cancellationEpoch: number;
+      isScrubbing: boolean;
+      scrubDirection: NativeScrubDirection;
       dispatchedAtMs: number;
       commandAcknowledged: boolean;
       presentation?: NativeSurfacePresentation;
@@ -1554,28 +1628,57 @@ export const NativeProgramPreview: React.FC = () => {
     const abandonPausedNativeDemand = (
       reason: "superseded" | "ack-timeout" | "submit-failed",
       useDirectFallback: boolean,
+      notifyNative = true,
     ) => {
       const pending = pendingPausedNativeDemand;
       if (!pending) return;
 
       window.clearTimeout(pending.acknowledgementTimeoutId);
       pendingPausedNativeDemand = null;
+      const wasSuperseded = reason === "superseded";
       nativeFrontendPerfSpans.get(pending.requestKey)?.finish({
         dropped: true,
-        cancelled: true,
-        dropReason: "cancelled",
+        stale: wasSuperseded,
+        cancelled: reason === "ack-timeout",
+        dropReason:
+          reason === "superseded"
+            ? "superseded"
+            : reason === "submit-failed"
+              ? "present-failed"
+              : "cancelled",
       });
       nativeFrontendPerfSpans.delete(pending.requestKey);
       lastNativePlaybackRequestKey = "";
-      tracePlayback("native-demand-abandoned", {
-        operationId: pending.requestId,
-        requestKey: telemetryRequestToken(pending.requestKey),
-        generation: pending.generation,
-        frameIndex: pending.frameIndex,
-        dispatchMode: "persistent-demand",
-        reason,
-        useDirectFallback,
-      });
+      if (notifyNative) {
+        const outcome =
+          reason === "superseded"
+            ? "superseded"
+            : reason === "ack-timeout"
+              ? "cancelled"
+              : "failed";
+        void abandonNativePlaybackDemand({
+          requestId: pending.requestId,
+          frameIndex: pending.frameIndex,
+          generation: pending.generation,
+          cancellationEpoch: pending.cancellationEpoch,
+          isScrubbing: pending.isScrubbing,
+          mode: pending.isScrubbing ? "scrub" : "seek",
+          scrubDirection: pending.scrubDirection,
+          outcome,
+          reason,
+        }).catch(() => undefined);
+        tracePlayback("native-demand-abandoned", {
+          operationId: pending.requestId,
+          requestKey: telemetryRequestToken(pending.requestKey),
+          generation: pending.generation,
+          frameIndex: pending.frameIndex,
+          scrubDirection: pending.scrubDirection,
+          dispatchMode: "exact-interactive-demand",
+          reason,
+          outcome,
+          useDirectFallback,
+        });
+      }
       if (useDirectFallback) {
         // The next RAF takes the proven direct invoke path. This is a recovery
         // path only; normal paused seeks remain latest-only persistent demands.
@@ -1599,12 +1702,16 @@ export const NativeProgramPreview: React.FC = () => {
         requestKey: telemetryRequestToken(pending.requestKey),
         generation: pending.generation,
         frameIndex: pending.frameIndex,
-        dispatchMode: "persistent-demand",
+        scrubDirection: pending.scrubDirection,
+        dispatchMode: "exact-interactive-demand",
         presented: presentation.presented,
         dropped: presentation.dropped,
+        terminalDisposition: presentation.terminalDisposition,
         dropReason: presentation.dropReason,
       });
       if (presentation.presented) {
+        const settlesCurrentSeek =
+          pending.generation === visibleRequestGeneration;
         nativeSurfaceShown = true;
         onFramePresentedOrPainted(
           false,
@@ -1626,11 +1733,23 @@ export const NativeProgramPreview: React.FC = () => {
               }
             : undefined,
         });
-        if (clock.isSeeking) {
+        if (settlesCurrentSeek && clock.isSeeking) {
           const seekLatencyMs = clock.completeSeek();
           if (seekLatencyMs !== null) {
             telemetryCollector.recordSeekSpan(seekLatencyMs, false);
           }
+        }
+        if (!settlesCurrentSeek) {
+          // A paced forward scrub may intentionally retain one older decode
+          // long enough to paint it. It improves continuity, but only the
+          // latest generation is allowed to settle the seek/playhead state.
+          // Clear the dedupe key even when the visual key is unchanged: a
+          // pointer event can advance target generation without changing its
+          // frame key, and that newer exact target must get its own terminal
+          // native operation after this older presentation completes.
+          lastNativePlaybackRequestKey = "";
+          forceRenderNeeded = true;
+          wakeNativeRenderLoopRef.current?.();
         }
       } else {
         lastNativePlaybackRequestKey = "";
@@ -1659,6 +1778,55 @@ export const NativeProgramPreview: React.FC = () => {
       }).then((fn) => {
         if (!isActive) fn();
         else unlistenDemandPresentation = fn;
+      });
+      void listenForNativePlaybackDemandTerminal((terminal) => {
+        const pending = pendingPausedNativeDemand;
+        tracePlayback("native-demand-terminal", {
+          operationId: terminal.requestId,
+          lifecycleRequestId: terminal.lifecycleRequestId,
+          generation: terminal.generation,
+          frameIndex: terminal.frameIndex,
+          scrubDirection:
+            terminal.scrubDirection ??
+            (pending?.requestId === terminal.requestId
+              ? pending.scrubDirection
+              : undefined),
+          disposition: terminal.disposition,
+          outcome: terminal.outcome,
+          workload: terminal.workload,
+          experimentContext: terminal.experimentContext,
+          stage: terminal.stage,
+          reason: terminal.reason,
+          actorWaitUs: terminal.actorWaitUs,
+          actorQueueWaitUs: terminal.actorQueueWaitUs,
+          decoderMutexWaitUs: terminal.decoderMutexWaitUs,
+          queueResidencyUs: terminal.queueResidencyUs,
+          queueHit: terminal.queueHit,
+          error: terminal.error,
+          surfaceState: terminal.surfaceState,
+        });
+        if (!pending || !matchesPausedNativeDemand(pending, terminal)) {
+          return;
+        }
+        // Successful and decode-complete outcomes are followed by the
+        // matching presentation event. A mailbox supersession has no such
+        // event, so release the stale liveness owner immediately and let the
+        // next RAF publish the newest scrub target.
+        if (!shouldClearPendingPausedNativeDemandOnTerminal(terminal)) {
+          return;
+        }
+        abandonPausedNativeDemand(
+          terminal.disposition === "superseded"
+            ? "superseded"
+            : terminal.stage === "presentation"
+              ? "submit-failed"
+              : "ack-timeout",
+          false,
+          false,
+        );
+      }).then((fn) => {
+        if (!isActive) fn();
+        else unlistenDemandTerminal = fn;
       });
     }
     const pushRequestKeysByFrameId = new Map<number, string>();
@@ -2442,9 +2610,19 @@ export const NativeProgramPreview: React.FC = () => {
       );
       nativePreviewScheduler.setVisibleGeneration(intent.generation);
       lastNativePlaybackRequestKey = "";
-      void cancelNativePreviewRequests(intent.generation).catch(
-        () => undefined,
+      const shouldInvalidateNativeWork = shouldInvalidateNativeScrubDemand(
+        previousNativeCancellationIntent,
+        intent,
       );
+      previousNativeCancellationIntent = {
+        time: intent.time,
+        isScrubbing: intent.isScrubbing,
+      };
+      if (shouldInvalidateNativeWork) {
+        void cancelNativePreviewRequests(intent.generation).catch(
+          () => undefined,
+        );
+      }
       forceRenderNeeded = true;
       wakeNativeRenderLoopRef.current?.();
     });
@@ -2857,6 +3035,11 @@ export const NativeProgramPreview: React.FC = () => {
 
     // Matches PrefetchPolicy::playback_window=200ms at 30fps.
     const LOOKAHEAD_PRIME_FRAMES = 6;
+    // Keep the frontend primer from fan-out submitting six independent decode
+    // requests at once. Rust owns the continuous lookahead worker; the
+    // frontend primer only needs a small startup cushion and must not compete
+    // with a visible frame or an upcoming clip-boundary decode.
+    const MAX_CONCURRENT_LOOKAHEAD_PRIME_REQUESTS = 2;
 
     /**
      * Cold-start lookahead primer (Bug 13 fix).
@@ -2884,7 +3067,11 @@ export const NativeProgramPreview: React.FC = () => {
       const revision = `${project.id ?? "unknown-project"}:${state.epoch}`;
       let queuedCount = 0;
 
-      for (let i = 0; i < frameCount; i++) {
+      const boundedFrameCount = Math.min(
+        frameCount,
+        MAX_CONCURRENT_LOOKAHEAD_PRIME_REQUESTS,
+      );
+      for (let i = 0; i < boundedFrameCount; i++) {
         const frameIdx = currentFrame + i;
         const cacheKey = `${revision}:video:prime:${frameIdx}`;
         if (
@@ -2970,7 +3157,7 @@ export const NativeProgramPreview: React.FC = () => {
             payload: {
               event: "lookahead-prime",
               frameIndex: currentFrame,
-              frameCount,
+              frameCount: boundedFrameCount,
               primeTriggeredBy,
             },
           });
@@ -3016,6 +3203,10 @@ export const NativeProgramPreview: React.FC = () => {
       forceRenderNeeded = true;
       scheduleNextFrame();
     });
+    // Also register the wake function so overlay components can call
+    // wakeNativeProgramPreviewRenderLoop() via the coordinator without
+    // importing from this component directly.
+    const unregisterWakeHandler = registerPreviewWakeHandler(scheduleNextFrame);
 
     // Transform feedback is an ephemeral render concern. Keep it outside
     // renderStateRef and Zustand so a pointer drag cannot invalidate every
@@ -3086,13 +3277,29 @@ export const NativeProgramPreview: React.FC = () => {
         const playbackState = state.clock.state;
         const isPlaying = playbackState === "playing";
         // Task 3: Detect first RAF after transition to playing.
+        const wasPlaying = wasPlayingInLastFrame;
         const justStartedPlaying = isPlaying && !wasPlayingInLastFrame;
+        const justStoppedPlaying = !isPlaying && wasPlaying;
         wasPlayingInLastFrame = isPlaying;
         if (justStartedPlaying) {
+          nativePlaybackWatchdog.beginPlayback(performance.now());
           lastNativePlaybackRequestKey = "";
+        } else if (justStoppedPlaying) {
+          nativePlaybackWatchdog.endPlayback();
         }
         const frameRate = state.project?.frameRate ?? 30;
         const frameIndex = getFrameIndexAtTime(timeToRender, frameRate);
+        const watchdogIncident = nativePlaybackWatchdog.check(
+          isPlaying,
+          performance.now(),
+          frameIndex,
+        );
+        if (watchdogIncident) {
+          tracePlayback("native-playback-watchdog", { ...watchdogIncident });
+          void emitNativeDiagnostic({ ...watchdogIncident }).catch(
+            () => undefined,
+          );
+        }
         if (playbackState !== lastTracedPlaybackState) {
           lastTracedPlaybackState = playbackState;
           // tracePlayback("playback-state", {
@@ -3441,7 +3648,7 @@ export const NativeProgramPreview: React.FC = () => {
         const previewScale =
           state.displayWidth && state.canvasWidth
             ? state.displayWidth / state.canvasWidth
-            : (state.scale || 1);
+            : state.scale || 1;
         const nativeEditorOverlay = overlayNeeded
           ? await nativeEditorOverlayManager.getOrRegisterOverlay({
               canvasWidth: projectCanvasWidth,
@@ -3468,7 +3675,9 @@ export const NativeProgramPreview: React.FC = () => {
           tracePlayback("native-overlay-registered", {
             assetId: nativeEditorOverlay.assetId,
             rasterizeMs: Number(
-              nativeEditorOverlayManager.getLastRasterizeDurationMs().toFixed(2),
+              nativeEditorOverlayManager
+                .getLastRasterizeDurationMs()
+                .toFixed(2),
             ),
             uploadMs: Number(
               nativeEditorOverlayManager.getLastUploadDurationMs().toFixed(2),
@@ -3760,6 +3969,10 @@ export const NativeProgramPreview: React.FC = () => {
             hasSelectedClip: currentSelectedClipIds.length > 0,
             isAnyModalOpen: pausedOverlayStateRef.current.isAnyModalOpen,
           });
+        // The nativeSurfaceNeedsHide block below (lines ~4021-4049) already
+        // gates native-surface hide on isAnyModalOpen. Do NOT add an extra
+        // !isAnyModalOpen guard here: it would prevent the path from becoming
+        // true again after the overlay closes, deadlocking native re-engagement.
         const nativeDirectSurfacePath =
           nativeSurfaceUsable &&
           Boolean(nativeRequest) &&
@@ -3778,6 +3991,11 @@ export const NativeProgramPreview: React.FC = () => {
         const outputAdapter = nativeDirectSurfacePath
           ? NativeSurfaceOutput
           : WebViewCanvasOutput;
+        // When an overlay is open during playback the render loop should idle
+        // on the nativeSurfaceNeedsHide path — not reroute frames to WebView
+        // readback. Routing via captureNativePreviewFrame while nativeSurfaceShown
+        // is false creates a stuck-canvas state that persists after overlay close.
+        // isAnyModalOpen must NOT appear here; the hide block already covers it.
         const nativeReadbackFallbackPath =
           isPlaying &&
           nativePlaybackPath &&
@@ -3816,10 +4034,7 @@ export const NativeProgramPreview: React.FC = () => {
               ? (qualification.runId ?? undefined)
               : undefined,
           scenario: telemetryScenario as
-            | "playback"
-            | "seek"
-            | "paused-interaction"
-            | "qualification",
+            "playback" | "seek" | "paused-interaction" | "qualification",
           runtimeEnvironment: import.meta.env.DEV
             ? ("development" as const)
             : ("production" as const),
@@ -3840,10 +4055,67 @@ export const NativeProgramPreview: React.FC = () => {
                 : undefined,
               ...telemetryContextBase,
             };
+        const visualLayers = scene.visualLayers;
+        const previewContext = previewTelemetryContextRef.current;
+        // Native preview stream telemetry keys decoders by clipId (the same
+        // identifier sent as `layer_id`), not by the shared media asset ID.
+        // Keep this join exact so the offline linter can reconcile frontend
+        // preview contexts with native frame samples.
+        const streamKeys = visualLayers
+          .flatMap((layer) =>
+            layer.layerType === "media" && layer.mediaType === "video"
+              ? [layer.clipId]
+              : [],
+          )
+          .filter(Boolean)
+          .sort();
+        const previewContextFingerprint = JSON.stringify({
+          presenterMode: previewContext.presenterMode,
+          fallbackReason: previewContext.presenterFallbackReason,
+          surface: previewContext.surface,
+          canvasWidth,
+          canvasHeight,
+          frameRate,
+          streamKeys,
+        });
+        if (
+          previewContextFingerprint !== lastPreviewContextFingerprintRef.current
+        ) {
+          lastPreviewContextFingerprintRef.current = previewContextFingerprint;
+          previewContextIdRef.current += 1;
+          const userAgent =
+            typeof navigator !== "undefined" ? navigator.userAgent : "";
+          const kind = !nativeDirectSurfacePath
+            ? "dom_canvas"
+            : userAgent.includes("Mac")
+              ? "native_metal_surface"
+              : userAgent.includes("Linux")
+                ? "native_vulkan_surface"
+                : "native_d3d_surface";
+          perfLogService.recordPreviewContext({
+            previewContextId: previewContextIdRef.current,
+            kind,
+            role: "program",
+            surface: {
+              width: canvasWidth,
+              height: canvasHeight,
+              dpr:
+                typeof window !== "undefined" ? window.devicePixelRatio : 1,
+            },
+            pipeline: nativeDirectSurfacePath
+              ? ["hardware_decode", "native_import", "wgpu_compositor", "native_presenter"]
+              : ["cpu_download", "ipc_bridge", "dom_canvas"],
+            fpsTarget: frameRate,
+            streamKeys,
+            presenterMode: nativeDirectSurfacePath
+              ? "native-surface"
+              : "bridge",
+            fallbackReason: previewContext.presenterFallbackReason,
+          });
+        }
         // Capture composition complexity from the evaluated scene—not clip
         // metadata—so hidden, transparent, and non-active layers never skew
         // the media/multi-stack cohort that is persisted with this session.
-        const visualLayers = scene.visualLayers;
         const mediaLayers = visualLayers.filter(
           (layer) => layer.layerType === "media",
         );
@@ -4052,6 +4324,12 @@ export const NativeProgramPreview: React.FC = () => {
                 nativePlaybackRenderSnapshotKey === pausedSnapshotKey &&
                 nativePlaybackRenderSnapshotInFlight === null;
               if (persistentNativePlaybackEligible) {
+                // Playback, like project snapshot replacement, is a distinct
+                // native lifecycle. A later paused scrub must never reuse an
+                // epoch from the prior interaction.
+                nativeScrubDemandLifecycle = null;
+                nativeScrubDemandPacing = null;
+                nativeScrubDemandSnapshotKey = "";
                 ensureNativePlaybackRenderSnapshot(requestToPresent);
                 const snapshotKey =
                   nativePlaybackSnapshotKeyFor(requestToPresent);
@@ -4153,6 +4431,72 @@ export const NativeProgramPreview: React.FC = () => {
                   return;
                 }
               } else if (persistentNativePausedEligible) {
+                if (nativeScrubDemandSnapshotKey !== pausedSnapshotKey) {
+                  nativeScrubDemandSnapshotKey = pausedSnapshotKey;
+                  nativeScrubDemandLifecycle = null;
+                  nativeScrubDemandPacing = null;
+                }
+                const previousScrubFrameIndex =
+                  nativeScrubDemandLifecycle?.lastFrameIndex ?? null;
+                const scrubDirection = isScrubbing
+                  ? resolveNativeScrubDirection(
+                      previousScrubFrameIndex,
+                      requestToPresent.frameTime.frameIndex,
+                    )
+                  : "stationary";
+                const scrubLifecycle = resolveNativeScrubDemandLifecycle(
+                  nativeScrubDemandLifecycle,
+                  targetGeneration,
+                  requestToPresent.frameTime.frameIndex,
+                  isScrubbing,
+                );
+                nativeScrubDemandLifecycle = scrubLifecycle.next;
+                const scrubDemandPacing = decideNativeScrubDemandDispatch(
+                  nativeScrubDemandPacing,
+                  requestToPresent.frameTime.frameIndex,
+                  isScrubbing,
+                  performance.now(),
+                );
+                nativeScrubDemandPacing = scrubDemandPacing.next;
+                if (!scrubDemandPacing.shouldDispatch) {
+                  // Keep the currently accepted frame decode alive. The next
+                  // render tick submits the latest forward target after the
+                  // bounded pacing interval, rather than cancelling it now.
+                  forceRenderNeeded = true;
+                  renderInFlight = false;
+                  scheduleNextFrame();
+                  return;
+                }
+                const desiredPausedDemand: PausedNativeDemandIdentity = {
+                  requestKey,
+                  generation: targetGeneration,
+                  frameIndex: requestToPresent.frameTime.frameIndex,
+                  cancellationEpoch: scrubLifecycle.cancellationEpoch,
+                  isScrubbing,
+                };
+                const activePausedDemand = pendingPausedNativeDemand
+                  ? {
+                      requestKey: pendingPausedNativeDemand.requestKey,
+                      generation: pendingPausedNativeDemand.generation,
+                      frameIndex: pendingPausedNativeDemand.frameIndex,
+                      cancellationEpoch:
+                        pendingPausedNativeDemand.cancellationEpoch,
+                      isScrubbing: pendingPausedNativeDemand.isScrubbing,
+                    }
+                  : null;
+                const pausedDemandAction = decidePausedNativeDemandAction(
+                  activePausedDemand,
+                  desiredPausedDemand,
+                );
+                if (pausedDemandAction === "hold") {
+                  // The native worker owns the active decode. Preserve it until
+                  // a terminal event; the next RAF will publish the latest
+                  // desired target instead of replacing the settle candidate.
+                  forceRenderNeeded = true;
+                  renderInFlight = false;
+                  scheduleNextFrame();
+                  return;
+                }
                 // Paused P0 seeks use the same bounded Rust-owned latest-only
                 // worker as playback. The invoke below only replaces a demand;
                 // presentation acknowledgement arrives asynchronously after the
@@ -4181,12 +4525,17 @@ export const NativeProgramPreview: React.FC = () => {
                 if (frontendSpan) {
                   nativeFrontendPerfSpans.set(requestKey, frontendSpan);
                 }
-                abandonPausedNativeDemand("superseded", false);
+                if (pausedDemandAction === "replace") {
+                  abandonPausedNativeDemand("superseded", false);
+                }
                 pendingPausedNativeDemand = {
                   requestKey,
                   requestId: pausedDemandRequest.requestId,
                   generation: targetGeneration,
                   frameIndex: requestToPresent.frameTime.frameIndex,
+                  cancellationEpoch: scrubLifecycle.cancellationEpoch,
+                  isScrubbing,
+                  scrubDirection,
                   dispatchedAtMs: performance.now(),
                   commandAcknowledged: false,
                   acknowledgementTimeoutId: window.setTimeout(() => {
@@ -4209,10 +4558,15 @@ export const NativeProgramPreview: React.FC = () => {
                   requestKey: telemetryRequestToken(requestKey),
                   generation: targetGeneration,
                   frameIndex: requestToPresent.frameTime.frameIndex,
-                  dispatchMode: "persistent-demand",
+                  scrubDirection,
+                  dispatchMode: "exact-interactive-demand",
                 });
                 nativePlaybackInFlight = submitNativePlaybackDemand(
-                  createNativePlaybackFrameDemand(pausedDemandRequest),
+                  createNativePlaybackFrameDemand(pausedDemandRequest, {
+                    cancellationEpoch: scrubLifecycle.cancellationEpoch,
+                    isScrubbing,
+                    scrubDirection,
+                  }),
                 )
                   .then(() => {
                     nativeFrontendPerfSpans.get(requestKey)?.markIpcFinished();
@@ -4223,7 +4577,8 @@ export const NativeProgramPreview: React.FC = () => {
                         requestKey: telemetryRequestToken(requestKey),
                         generation: targetGeneration,
                         frameIndex: requestToPresent.frameTime.frameIndex,
-                        dispatchMode: "persistent-demand",
+                        scrubDirection,
+                        dispatchMode: "exact-interactive-demand",
                       });
                       settlePausedNativeDemand();
                     }
@@ -5470,6 +5825,7 @@ export const NativeProgramPreview: React.FC = () => {
         _globalPreviewWakeFn = null;
       }
       unregisterRepaintHandler();
+      unregisterWakeHandler();
       if (rafId !== null) cancelAnimationFrame(rafId);
       frameScheduled = false;
       if (handoverSafetyTimer !== null) {
@@ -5497,7 +5853,9 @@ export const NativeProgramPreview: React.FC = () => {
       abandonPausedNativeDemand("superseded", false);
       unlistenStartupMilestone?.();
       unlistenPlaybackStats?.();
+      unlistenPlaybackProgress?.();
       unlistenDemandPresentation?.();
+      unlistenDemandTerminal?.();
     };
     // Viewport values (scale, offsetX, offsetY, canvasWidth, canvasHeight) are
     // now read from renderStateRef inside the loop, so they are NOT listed as deps here.
@@ -5552,12 +5910,34 @@ export const NativeProgramPreview: React.FC = () => {
   return (
     <div
       data-preview-space="program"
-      className="flex-1 bg-bg flex flex-col min-h-0 border-l border-t border-white/3"
+      className="flex-1 bg-surface-workspace flex flex-col min-h-0 border-l border-t border-border-default/60"
     >
-      <div className="flex-1 flex items-center justify-center overflow-hidden bg-[#06080a] relative">
+      <div className="flex-1 flex items-center justify-center overflow-hidden bg-surface-workspace relative">
         {import.meta.env.DEV && nativeSurfaceError && (
           <div className="absolute top-3 left-3 z-40 px-2.5 py-1 rounded bg-danger/20 border border-danger/40 text-[11px] text-danger font-medium pointer-events-none">
             Preview surface unavailable: {nativeSurfaceError}
+          </div>
+        )}
+        {runtimeFlagProfile?.profile === "dev" && (
+          <div className="absolute top-3 right-3 z-40 pointer-events-none flex flex-col items-end gap-1">
+            <div className="px-2.5 py-1 rounded bg-surface-floating/90 backdrop-blur-md border border-status-warning/40 text-[10px] font-mono text-status-warning shadow-lg select-none">
+              {t("preview.devDefaults", {
+                trace: runtimeFlagProfile.trace.enabled
+                  ? t("common.status.on")
+                  : t("common.status.off"),
+                zeroCopy: runtimeFlagProfile.requireZeroCopy.enabled
+                  ? t("common.status.on")
+                  : t("common.status.off"),
+                decodePath: runtimeFlagProfile.decodePath,
+              })}
+            </div>
+            {zeroCopyViolationCount > 0 && (
+              <div className="px-2.5 py-1 rounded bg-status-warning/15 border border-status-warning/40 text-[10px] font-mono text-status-warning shadow-lg select-none">
+                {t("preview.zeroCopyViolation", {
+                  count: zeroCopyViolationCount,
+                })}
+              </div>
+            )}
           </div>
         )}
         <div
@@ -5573,7 +5953,7 @@ export const NativeProgramPreview: React.FC = () => {
             <div
               ref={nativeSurfaceTargetCallback}
               data-testid="program-preview-viewport"
-              className="relative flex shrink-0 items-center justify-center overflow-visible bg-black ring-1 ring-white/15 shadow-[0_4px_30px_rgba(0,0,0,0.8)]"
+              className="relative flex shrink-0 items-center justify-center overflow-visible bg-black ring-1 ring-border-default/50 shadow-2xl"
               style={{ width: displayWidth, height: displayHeight }}
             >
               <>
@@ -5615,14 +5995,15 @@ export const NativeProgramPreview: React.FC = () => {
                   }}
                 />
 
-                <ConnectedTransformOverlay
+                <NativeInteractionOverlay
                   canvasWidth={canvasWidth}
                   canvasHeight={canvasHeight}
                   scale={scale}
-                  viewport={viewport}
-                  displayOffset={{ x: offsetX, y: offsetY }}
+                  zoom={viewport.zoom}
                   displayWidth={displayWidth}
                   displayHeight={displayHeight}
+                  currentTime={clock.time}
+                  visible={clock.state !== "playing" && !isAnyModalOpen}
                 />
 
                 <SafeOverlay
@@ -5636,19 +6017,19 @@ export const NativeProgramPreview: React.FC = () => {
                 />
                 {karaokeOverlayEnabled && <KaraokeCaptions />}
                 {playbackStats && clock.state === "playing" && (
-                  <div className="absolute top-3 left-3 z-30 pointer-events-none flex items-center gap-2 px-2.5 py-1 rounded-md bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-white/90 shadow-lg select-none">
-                    <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <div className="absolute top-3 left-3 z-30 pointer-events-none flex items-center gap-2 px-2.5 py-1 rounded-md bg-surface-floating/90 backdrop-blur-md border border-border-default text-[11px] font-mono text-text-primary shadow-lg select-none">
+                    <span className="inline-block w-2 h-2 rounded-full bg-status-success animate-pulse" />
                     <span>{playbackStats.fps} fps</span>
-                    <span className="text-white/30">•</span>
+                    <span className="text-text-muted">•</span>
                     <span>{playbackStats.avgTotalMs.toFixed(1)}ms</span>
-                    <span className="text-white/30">•</span>
-                    <span className="text-emerald-300">
+                    <span className="text-text-muted">•</span>
+                    <span className="text-status-success">
                       {playbackStats.hitRatePercent.toFixed(0)}% cached
                     </span>
                     {playbackStats.stackedStreams > 1 && (
                       <>
-                        <span className="text-white/30">•</span>
-                        <span className="text-amber-300">
+                        <span className="text-text-muted">•</span>
+                        <span className="text-status-warning">
                           {playbackStats.stackedStreams} streams
                         </span>
                       </>
