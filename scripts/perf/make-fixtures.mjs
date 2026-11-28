@@ -228,6 +228,98 @@ export async function generateMediaFixtures(targetDir, options = {}) {
 }
 
 /**
+ * Generate the immutable two-clip pack used by the W1-A Windows volunteer
+ * comparison. The pack hash is derived from the canonical manifest contents,
+ * not from a timestamp or archive metadata, so volunteers can verify it
+ * independently before setting CLYPRA_MEDIA_HASH.
+ */
+export async function generateW1AVolunteerFixtures(targetDir, options = {}) {
+  await mkdir(targetDir, { recursive: true });
+  const ffmpeg = resolveFfmpeg();
+  const clips = [
+    {
+      filename: "w1a-h264-8bit.mp4",
+      role: "A",
+      codec: "h264",
+      profile: "high",
+      bitDepth: 8,
+      chroma: "yuv420p",
+      width: 640,
+      height: 360,
+      frameRate: 30,
+      durationSeconds: 10,
+      args: [
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+        "-t", "10", "-map_metadata", "-1", "-fflags", "+bitexact",
+        "-c:v", "libx264", "-preset", "medium", "-threads", "1",
+        "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "30",
+        "-keyint_min", "30", "-sc_threshold", "0", "-movflags", "+faststart",
+      ],
+    },
+    {
+      filename: "w1a-hevc-main10.mp4",
+      role: "B",
+      codec: "hevc",
+      profile: "main10",
+      bitDepth: 10,
+      chroma: "yuv420p10le",
+      width: 640,
+      height: 360,
+      frameRate: 30,
+      durationSeconds: 10,
+      args: [
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+        "-t", "10", "-map_metadata", "-1", "-fflags", "+bitexact",
+        "-vf", "format=yuv420p10le", "-c:v", "libx265", "-preset", "medium",
+        "-threads", "1", "-profile:v", "main10", "-pix_fmt", "yuv420p10le",
+        "-x265-params", "pools=1:frame-threads=1", "-g", "30",
+        "-keyint_min", "30", "-tag:v", "hvc1", "-movflags", "+faststart",
+      ],
+    },
+  ];
+
+  const media = [];
+  for (const clip of clips) {
+    const dest = path.join(targetDir, clip.filename);
+    if (options.force || !(await fileExists(dest))) {
+      await execFile(ffmpeg, [
+        "-hide_banner", "-loglevel", "error", "-y",
+        ...clip.args,
+        dest,
+      ]);
+    }
+    media.push({
+      filename: clip.filename,
+      role: clip.role,
+      codec: clip.codec,
+      profile: clip.profile,
+      bitDepth: clip.bitDepth,
+      chroma: clip.chroma,
+      width: clip.width,
+      height: clip.height,
+      frameRate: clip.frameRate,
+      durationSeconds: clip.durationSeconds,
+      sha256: await hashFile(dest),
+    });
+  }
+
+  const descriptor = {
+    schemaVersion: 1,
+    protocolVersion: "w1a-volunteer-v1",
+    media,
+  };
+  const packSha256 = computeObjectHash(descriptor);
+  const manifest = { ...descriptor, packSha256 };
+  await writeFile(
+    path.join(targetDir, "manifest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    "utf8",
+  );
+
+  return { ...manifest, directory: targetDir };
+}
+
+/**
  * Build normalized, deterministic project JSON definitions across the 3 workload tiers.
  */
 export function buildTierProjects(mediaDirRelative = "tests/fixtures/perf") {
@@ -316,16 +408,28 @@ export function buildTierProjects(mediaDirRelative = "tests/fixtures/perf") {
   const pText = {
     ...baseProject("project-text", "Plain Text Overlay Benchmark", 25, 30),
     tracks: [{ id: "track-t1", type: "text", name: "Text Track", muted: false, locked: false, visible: true, height: 50 }],
-    clips: [],
-    text_effects: [
+    clips: [
       {
-        id: "text-fx-1",
+        id: "clip-text-1",
+        kind: "text",
         trackId: "track-t1",
-        text: "Performance Benchmark Text",
+        mediaId: "",
+        name: "Plain Text Benchmark",
         startTime: 0,
         duration: 30,
-        style: { fontSize: 48, fontFamily: "sans-serif", color: "#FFFFFF", textAlign: "center" },
-        transform: { position: { x: 960, y: 540 }, scale: 1.0, rotation: 0 },
+        trimIn: 0,
+        trimOut: 30,
+        x: 460,
+        y: 450,
+        width: 1000,
+        height: 180,
+        opacity: 1.0,
+        rotation: 0,
+        text: "Performance Benchmark Text",
+        fontSize: 64,
+        fontFamily: "Inter",
+        color: "#FFFFFF",
+        textAlign: "center",
       },
     ],
   };
@@ -333,18 +437,38 @@ export function buildTierProjects(mediaDirRelative = "tests/fixtures/perf") {
   const pTextEffect = {
     ...baseProject("project-text-effect", "Animated Text Effect Benchmark", 25, 30),
     tracks: [{ id: "track-t1", type: "text", name: "Text Effect Track", muted: false, locked: false, visible: true, height: 50 }],
-    clips: [],
-    text_effects: [
+    clips: [
       {
-        id: "text-fx-anim-1",
+        id: "clip-text-fx-1",
+        kind: "text",
         trackId: "track-t1",
-        text: "Kinetic Motion Graphics",
+        mediaId: "",
+        name: "Animated Text Effect",
         startTime: 0,
         duration: 30,
-        effectType: "fade_slide",
-        animationProgress: 0.5,
-        style: { fontSize: 64, fontFamily: "sans-serif", color: "#FFCC00", textAlign: "center" },
-        transform: { position: { x: 960, y: 540 }, scale: 1.2, rotation: 0 },
+        trimIn: 0,
+        trimOut: 30,
+        x: 460,
+        y: 450,
+        width: 1000,
+        height: 180,
+        opacity: 1.0,
+        rotation: 0,
+        text: "Kinetic Motion Graphics",
+        fontSize: 64,
+        fontFamily: "Inter",
+        color: "#FFCC00",
+        textAlign: "center",
+        entranceAnimation: {
+          type: "slide-up",
+          duration: 1.0,
+          easing: "ease-out",
+        },
+        exitAnimation: {
+          type: "fade",
+          duration: 1.0,
+          easing: "ease-in",
+        },
       },
     ],
   };
@@ -352,15 +476,30 @@ export function buildTierProjects(mediaDirRelative = "tests/fixtures/perf") {
   const pTextTemplate = {
     ...baseProject("project-text-template", "Text Template Benchmark", 25, 30),
     tracks: [{ id: "track-t1", type: "text", name: "Text Template Track", muted: false, locked: false, visible: true, height: 50 }],
-    clips: [],
-    text_templates: [
+    clips: [
       {
-        id: "template-1",
+        id: "clip-template-1",
+        kind: "text-template",
+        role: "text",
         trackId: "track-t1",
-        templateId: "lower_third_clean",
+        mediaId: "",
+        name: "Lower Third Template",
         startTime: 0,
         duration: 30,
-        parameters: { primaryText: "Lower Third Headline", secondaryText: "Secondary Descriptor", accentColor: "#00AAFF" },
+        trimIn: 0,
+        trimOut: 30,
+        x: 150,
+        y: 750,
+        width: 650,
+        height: 140,
+        opacity: 1.0,
+        rotation: 0,
+        templateId: "lower-third-broadcast",
+        templateControlValues: {
+          headline: "Lower Third Headline",
+          subline: "Secondary Descriptor",
+          accentColor: "#00AAFF",
+        },
       },
     ],
   };
@@ -427,15 +566,27 @@ export function buildTierProjects(mediaDirRelative = "tests/fixtures/perf") {
       { id: "clip-v2", kind: "video", trackId: "track-v2-broll", mediaId: "asset-video-broll", name: "B-Roll PIP Clip", startTime: 2, duration: dur - 4, trimIn: 0, trimOut: dur - 4 },
       { id: "clip-v3", kind: "image", trackId: "track-v3-image", mediaId: "asset-image-logo", name: "Corner Image", startTime: 0, duration: dur, trimIn: 0, trimOut: dur },
       { id: "clip-a1", kind: "audio", trackId: "track-a1-audio", mediaId: "asset-audio-bed", name: "Periodic Beeps Track", startTime: 0, duration: 35, trimIn: 0, trimOut: 35 },
-    ];
-    p.text_effects = [
       {
-        id: "fx-composite-1",
+        id: "clip-text-composite-1",
+        kind: "text",
         trackId: "track-t1-titles",
-        text: `Composite Multi-Layer ${fps}fps`,
+        mediaId: "",
+        name: `Composite Multi-Layer ${fps}fps`,
         startTime: 1,
         duration: dur - 2,
-        style: { fontSize: 44, fontFamily: "sans-serif", color: "#00FFCC", textAlign: "center" },
+        trimIn: 0,
+        trimOut: dur - 2,
+        x: 460,
+        y: 860,
+        width: 1000,
+        height: 120,
+        opacity: 1.0,
+        rotation: 0,
+        text: `Composite Multi-Layer ${fps}fps`,
+        fontSize: 44,
+        fontFamily: "Inter",
+        color: "#00FFCC",
+        textAlign: "center",
       },
     ];
     return p;

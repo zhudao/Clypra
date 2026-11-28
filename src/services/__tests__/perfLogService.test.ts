@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { perfLogService, PerfLogService } from "../perfLogService";
+import {
+  perfLogService,
+  PerfLogService,
+  sanitizeTelemetryValue,
+} from "../perfLogService";
 
 describe("PerfLogService Phase 5 Session Telemetry Integration", () => {
   beforeEach(() => {
@@ -86,15 +90,33 @@ describe("PerfLogService Phase 5 Session Telemetry Integration", () => {
       });
     }).not.toThrow();
   });
+
+  it("redacts local paths in nested telemetry before browser fallback upload", () => {
+    const sanitized = sanitizeTelemetryValue({
+      videoPath: "/Users/example/clip.mov",
+      serialized: '{"videoPath":"/Users/example/clip.mov"}',
+      fileUrl: "file:///Users/example/clip.mov",
+      safe: "native-video-path",
+    }) as Record<string, unknown>;
+
+    const encoded = JSON.stringify(sanitized);
+    expect(encoded).not.toContain("/Users/example");
+    expect(encoded).not.toContain("file:///Users/example");
+    expect(encoded).toContain("[redacted-path]");
+    expect(sanitized.safe).toBe("native-video-path");
+  });
 });
 
 describe("PerfLogService Telemetry Upload Default Behavior", () => {
   const TELEMETRY_KEY = "clypra.telemetryUploadEnabled";
+  const TELEMETRY_NOTICE_KEY = "clypra.telemetryOnboardingShown";
   let originalGetItem: typeof Storage.prototype.getItem;
   let originalSetItem: typeof Storage.prototype.setItem;
   let store: Record<string, string>;
 
   beforeEach(() => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_CLYPRA_DISABLE_TELEMETRY_UPLOAD", "");
     // Mock localStorage with a clean store for each test
     store = {};
     originalGetItem = Storage.prototype.getItem;
@@ -109,14 +131,17 @@ describe("PerfLogService Telemetry Upload Default Behavior", () => {
   afterEach(() => {
     Storage.prototype.getItem = originalGetItem;
     Storage.prototype.setItem = originalSetItem;
+    vi.unstubAllEnvs();
   });
 
-  it("defaults to opt-out (false) when localStorage key is absent", () => {
-    // Key is absent; a new user must explicitly opt in.
+  it("blocks a new install until the disclosure has been shown", () => {
     expect(localStorage.getItem(TELEMETRY_KEY)).toBeNull();
-
-    // Static accessor (primary API)
     expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(false);
+  });
+
+  it("enables a new install after the disclosure has been shown", () => {
+    store[TELEMETRY_NOTICE_KEY] = "true";
+    expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(true);
   });
 
   it("respects explicit opt-out (false)", () => {
@@ -135,8 +160,7 @@ describe("PerfLogService Telemetry Upload Default Behavior", () => {
     expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(true);
   });
 
-  it("allows user to toggle from default opt-out to opt-in", () => {
-    // Start with default (key absent)
+  it("allows user to toggle from the undisclosed default to explicit opt-in", () => {
     expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(false);
 
     // User opts out
@@ -155,6 +179,13 @@ describe("PerfLogService Telemetry Upload Default Behavior", () => {
     // Read multiple times
     expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(false);
     expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(false);
+    expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(false);
+  });
+
+  it("fails closed when storage throws", () => {
+    Storage.prototype.getItem = vi.fn(() => {
+      throw new Error("storage unavailable");
+    });
     expect(PerfLogService.isTelemetryUploadEnabledStatic()).toBe(false);
   });
 });

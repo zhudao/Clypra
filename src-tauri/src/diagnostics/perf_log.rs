@@ -120,12 +120,23 @@ pub struct PerfSystemFingerprint {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DxgiScopedLatchHeader {
+    pub enabled: bool,
+    pub frame_failure_threshold: usize,
+    pub frame_failure_window_ms: u64,
+    pub initial_probe_backoff_ms: u64,
+    pub max_probe_backoff_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PerfSessionHeader {
     pub schema_version: u16,
     pub session_id: String,
     pub opened_at_epoch_ms: u64,
     pub build: PerfBuildIdentity,
     pub system: PerfSystemFingerprint,
+    pub dxgi_scoped_latch: DxgiScopedLatchHeader,
     pub resolved_flags: std::collections::BTreeMap<String, bool>,
     /// Profile that supplied defaults for this session. This is separate from
     /// build debug assertions because release binaries can opt into the dev
@@ -152,6 +163,10 @@ pub struct PerfSessionHeader {
     pub experiment_arm: Option<String>,
     /// Human-readable meaning derived from resolved flags, not the arm letter.
     pub experiment_arm_meaning: Option<String>,
+    /// Upload consent for sessions eligible to leave the device. Explicit
+    /// opt-outs are omitted because those sessions do not upload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_state: Option<String>,
     pub validation_mode: bool,
 }
 
@@ -181,6 +196,7 @@ struct PerfLogSession {
     file_path: PathBuf,
     file: Arc<AsyncMutex<File>>,
     opened_at_epoch_ms: u64,
+    consent_state: Option<String>,
 }
 
 // ── Global session registry ────────────────────────────────────────────────
@@ -214,7 +230,11 @@ fn resolved_flag(name: &str) -> bool {
     )
 }
 
-fn make_session_header(session_id: &str, opened_at_epoch_ms: u64) -> PerfSessionHeader {
+fn make_session_header(
+    session_id: &str,
+    opened_at_epoch_ms: u64,
+    consent_state: Option<String>,
+) -> PerfSessionHeader {
     let machine = crate::engine::benchmark::runner::probe_machine_identity();
     let decode_resolution = crate::engine::decode_policy::resolve_decode_resolution();
     let runtime_profile = crate::runtime_profile::resolve_runtime_flag_profile();
@@ -242,6 +262,10 @@ fn make_session_header(session_id: &str, opened_at_epoch_ms: u64) -> PerfSession
         (
             "CLYPRA_DEBUG_DISABLE_DIRTY_RECOVERY".to_string(),
             runtime_profile.disable_dirty_recovery.enabled,
+        ),
+        (
+            "CLYPRA_DXGI_SCOPED_LATCH".to_string(),
+            runtime_profile.dxgi_scoped_latch.enabled,
         ),
         (
             "CLYPRA_VALIDATE_STAGES".to_string(),
@@ -296,16 +320,28 @@ fn make_session_header(session_id: &str, opened_at_epoch_ms: u64) -> PerfSession
             "CLYPRA_DEBUG_DISABLE_DIRTY_RECOVERY".to_string(),
             runtime_profile.disable_dirty_recovery.source.to_string(),
         ),
+        (
+            "CLYPRA_DXGI_SCOPED_LATCH".to_string(),
+            runtime_profile.dxgi_scoped_latch.source.to_string(),
+        ),
     ]
     .into_iter()
     .collect();
-    let experiment_arm = std::env::var("CLYPRA_EXPERIMENT_ARM").ok();
+    let dxgi_arm = if runtime_profile.dxgi_scoped_latch.enabled {
+        "dxgi-scoped-latch"
+    } else {
+        "dxgi-legacy-latch"
+    };
+    let experiment_arm = std::env::var("CLYPRA_EXPERIMENT_ARM")
+        .ok()
+        .or_else(|| Some(dxgi_arm.to_string()));
     let experiment_arm_meaning = experiment_arm.as_ref().map(|_| {
-        if runtime_profile.disable_dirty_recovery.enabled {
-            "dirty-recovery-disabled".to_string()
+        let recovery_arm = if runtime_profile.disable_dirty_recovery.enabled {
+            "dirty-recovery-disabled"
         } else {
-            "dirty-recovery-enabled".to_string()
-        }
+            "dirty-recovery-enabled"
+        };
+        format!("{dxgi_arm}; {recovery_arm}")
     });
     let env_f64 = |name: &str| {
         std::env::var(name)
@@ -363,6 +399,17 @@ fn make_session_header(session_id: &str, opened_at_epoch_ms: u64) -> PerfSession
             low_power_mode: probe_low_power_mode(),
             thermal_state: probe_thermal_state(),
         },
+        dxgi_scoped_latch: DxgiScopedLatchHeader {
+            enabled: runtime_profile.dxgi_scoped_latch.enabled,
+            frame_failure_threshold:
+                crate::wgpu_compositor::scoped_dxgi_latch::FRAME_FAILURE_THRESHOLD,
+            frame_failure_window_ms:
+                crate::wgpu_compositor::scoped_dxgi_latch::FRAME_FAILURE_WINDOW_MS,
+            initial_probe_backoff_ms:
+                crate::wgpu_compositor::scoped_dxgi_latch::INITIAL_PROBE_BACKOFF_MS,
+            max_probe_backoff_ms:
+                crate::wgpu_compositor::scoped_dxgi_latch::MAX_PROBE_BACKOFF_MS,
+        },
         resolved_flags,
         runtime_profile: runtime_profile.profile,
         dev_profile: runtime_profile.is_dev(),
@@ -379,7 +426,10 @@ fn make_session_header(session_id: &str, opened_at_epoch_ms: u64) -> PerfSession
         unverified_capabilities_verified: false,
         ffmpeg_callback_verified: crate::filmstrip_engine::decoder::ffmpeg_callback_verified(),
         media_hash: std::env::var("CLYPRA_MEDIA_HASH").ok(),
-        project_hash: std::env::var("CLYPRA_PROJECT_HASH").ok(),
+        // Project hashes can fingerprint a user's project. They are not part
+        // of the production upload contract; media_hash is retained only for
+        // the explicitly supplied, public W1-A fixture-pack identifier.
+        project_hash: None,
         project_computed_duration: env_f64("CLYPRA_PROJECT_COMPUTED_DURATION"),
         project_frame_rate: env_f64("CLYPRA_PROJECT_FRAME_RATE"),
         media_frame_rate: env_f64("CLYPRA_MEDIA_FRAME_RATE"),
@@ -387,6 +437,7 @@ fn make_session_header(session_id: &str, opened_at_epoch_ms: u64) -> PerfSession
         scenario_hash: std::env::var("CLYPRA_SCENARIO_HASH").ok(),
         experiment_arm,
         experiment_arm_meaning,
+        consent_state,
         validation_mode: runtime_profile.validate_stages.enabled,
     }
 }
@@ -474,10 +525,15 @@ pub fn get_perf_log_dir(app_data_dir: &Path) -> PathBuf {
 pub async fn open_perf_log_session(
     app: tauri::AppHandle,
     session_id: String,
+    consent_state: Option<String>,
 ) -> Result<PerfLogSessionInfo, String> {
     // Re-use existing session when the frontend hot-reloads.
     if let Some(session) = SESSIONS.get(&session_id) {
-        let header = make_session_header(&session_id, session.opened_at_epoch_ms);
+        let header = make_session_header(
+            &session_id,
+            session.opened_at_epoch_ms,
+            session.consent_state.clone(),
+        );
         return Ok(PerfLogSessionInfo {
             session_id: session_id.clone(),
             file_path: session.file_path.to_string_lossy().to_string(),
@@ -514,7 +570,8 @@ pub async fn open_perf_log_session(
         .open(&file_path)
         .map_err(|e| format!("Failed to open perf log file '{file_name}': {e}"))?;
 
-    let header = make_session_header(&session_id, epoch);
+    let consent_state = consent_state.filter(|value| value == "default" || value == "explicit-on");
+    let header = make_session_header(&session_id, epoch, consent_state.clone());
     let header_entry = PerfLogEntry {
         schema_version: PERF_LOG_SCHEMA_VERSION,
         kind: "session-header".to_string(),
@@ -539,6 +596,7 @@ pub async fn open_perf_log_session(
             file_path: file_path.clone(),
             file: Arc::new(AsyncMutex::new(file)),
             opened_at_epoch_ms: epoch,
+            consent_state,
         },
     );
 
@@ -974,15 +1032,56 @@ pub fn purge_perf_logs(app: tauri::AppHandle, max_age_days: Option<u32>) -> Resu
     Ok(deleted)
 }
 
+/// Deletes completed perf-log files that have not been uploaded. Open sessions
+/// are skipped because their writers are still active.
+#[tauri::command]
+pub fn delete_pending_perf_logs(app: tauri::AppHandle) -> Result<usize, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve perf-log directory: {e}"))?;
+    let log_dir = get_perf_log_dir(&app_data_dir);
+    if !log_dir.exists() {
+        return Ok(0);
+    }
+
+    let open_paths: std::collections::HashSet<PathBuf> = SESSIONS
+        .iter()
+        .map(|session| session.value().file_path.clone())
+        .collect();
+    let mut deleted = 0usize;
+    for entry in fs::read_dir(&log_dir).map_err(|e| format!("Failed to read perf_logs dir: {e}"))? {
+        let path = entry.map_err(|e| format!("Directory entry error: {e}"))?.path();
+        let ext = path.extension().and_then(|value| value.to_str());
+        if !matches!(ext, Some("ndjson") | Some("uploaded")) || open_paths.contains(&path) {
+            continue;
+        }
+        if fs::remove_file(path).is_ok() {
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 /// Recursively traverses a JSON value and redacts any project identifiers (e.g. `project-1790732159574-...`)
 /// to protect user privacy before telemetry uploads.
 fn sanitize_telemetry_json(value: &mut serde_json::Value) {
     static PROJECT_ID_REGEX: once_cell::sync::Lazy<regex::Regex> =
         once_cell::sync::Lazy::new(|| regex::Regex::new(r"project-[a-zA-Z0-9_-]+").unwrap());
+    static LOCAL_PATH_REGEX: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| {
+            regex::Regex::new(
+                r#"(?i)(?:file:///|[A-Z]:[\\/]|\\\\(?:Users|Documents)|/(?:Users|home|private/var|var/folders)/)[^\"]*"#,
+            )
+            .expect("local telemetry path regex must compile")
+        });
 
     match value {
-        serde_json::Value::String(s) if s.contains("project-") => {
-            *s = PROJECT_ID_REGEX.replace_all(s, "project-anon").to_string();
+        serde_json::Value::String(s) => {
+            if s.contains("project-") {
+                *s = PROJECT_ID_REGEX.replace_all(s, "project-anon").to_string();
+            }
+            *s = LOCAL_PATH_REGEX.replace_all(s, "[redacted-path]").to_string();
         }
         serde_json::Value::Array(arr) => {
             for v in arr {
@@ -1091,6 +1190,26 @@ mod tests {
             "frontend:webview:bridge:project-anon:1"
         );
         assert_eq!(sample["nested"]["nonProject"], "some-other-string");
+    }
+
+    #[test]
+    fn test_sanitize_telemetry_json_redacts_local_paths_inside_nested_strings() {
+        let mut sample = serde_json::json!({
+            "payload": {
+                "videoPath": "/Users/example/clip.mov",
+                "serializedProject": "{\"videoPath\":\"/Users/example/clip.mov\"}",
+                "fileUrl": "file:///Users/example/clip.mov",
+                "safe": "native-video-path"
+            }
+        });
+
+        sanitize_telemetry_json(&mut sample);
+
+        let encoded = serde_json::to_string(&sample).expect("sanitized telemetry must serialize");
+        assert!(!encoded.contains("/Users/example"));
+        assert!(!encoded.contains("file:///Users/example"));
+        assert!(encoded.contains("[redacted-path]"));
+        assert_eq!(sample["payload"]["safe"], "native-video-path");
     }
 
     #[test]
